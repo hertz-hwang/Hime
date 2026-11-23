@@ -182,9 +182,11 @@ bool hime_set_config(const char* json);
 // 目录不可读返回 "[]"，可随时调用（不要求引擎已初始化）
 char* hime_scan_schemes(const char* dir);
 
-// 选中 scheme_dir（scan 条目里的 path）：其码表替换引擎词库，其 metadata
-// 值整体替换引擎配置（即切换方案时重载方案默认值，page_size 保留），
-// 现有会话保持 id、换用新词库并丢弃进行中的编码；引擎未初始化则初始化。
+// 选中 scheme_dir（scan 条目里的 path）：按方案 type 决定候选来源——形码整句
+// (type 3) 用 n-gram 模型 + 方案表构建整句引擎，其余把方案码表作为词库；其
+// metadata 值整体替换引擎配置（切换方案即重载方案默认值，page_size 保留）。
+// 现有会话保持 id、按新来源原地重建并丢弃进行中的编码（词库↔整句可互切）；
+// 引擎未初始化则初始化。整句方案缺 .hng 模型时返回 false 且引擎不变。
 // 非法路径或加载失败返回 false，引擎保持不变
 bool hime_select_scheme(const char* scheme_dir);
 
@@ -192,3 +194,73 @@ bool hime_select_scheme(const char* scheme_dir);
 // hime_scan_schemes 均用它）
 void hime_free_string(char* ptr);
 ```
+
+## 7. 形码整句（whole-sentence, `ngram` + `sentence`）
+
+形码整句是 `code_type = 3`（`CodeType::XingmaSentence`）的编码类型：长编码不再
+逐词查表，而是把整段键流解码成**整句**候选——解码器把键流切成词（词图），由
+字级 n-gram 模型给候选链打分，beam search 选出得分最高的整句。它和词库检索
+一样全部实现于 `hime-core`，外壳仍只转发按键、按 `EngineResponse` 渲染（
+AGENTS.md §1）。`code_type` 随方案固定（§2.3、§5.1，面板只读），整句方案即
+`data/schemes/liuli_v1_sentence`。
+
+### 7.1 n-gram 模型（`ngram`，HFNGMF v1 / `.hng`）
+
+- 零拷贝 mmap 的字级三 gram 插值语言模型：magic `HFNGMF01`，256 字节头 + 13
+  段，概率以 BF16 存储，按词表 id 排名做热/冷分桶。读取与打分移植自该模型自带
+  的可执行校验脚本，逐位一致（在报告精度上）。打分在 f64 上做三级插值：
+  `P1 = uni`、`P2 = s2 + λ2·P1`、`P3 = s3 + λ3·P2`、`logp = ln(max(P3, 1e-300))`。
+  BOS / EOS 控制码点为 `CP_BOS = 0x0002`、`CP_EOS = 0x0003`。
+- `NgramModel::load` 仅做 open + mmap + 头校验即就绪（无逐进程反序列化拷贝），
+  查表为直接索引；`Mmap` 是 `Send + Sync`，故 `Arc<NgramModel>` 可服务所有线程。
+- 模型文件 `data/sentence-ngram.hng` 约 191 MB，体积大、按路径加载、不入库。
+  定位顺序封装在 `ngram::find_model_path()`，引擎 / CLI / 测试共用：
+  `HIME_SENTENCE_MODEL` 环境变量 → 仓库 `data/sentence-ngram.hng` → 相对路径。
+
+### 7.2 词图（`sentence::lexicon`）
+
+整句码表（`候选\t编码`，与方案码表同格式，可选第三列频率，`#`/空行忽略）读成
+`编码 → 带名次的边`：名次取该编码下的文件序（1 起），不叠加用户词。同时记录
+出现的码长集合、每个编码的所有真前缀，以及 `optimal_single` 标志（某单字用了
+它的**最短**编码，只可能落在多键码上；同长多码只认先出现的那条，与 Fire 对齐）。
+只收纯 ASCII 字母编码，编码里的选名次记号（`;` / `'` / 数字）由解码器单独解析。
+
+### 7.3 beam 解码（`sentence::decoder`）
+
+逐位置 beam：同一文本的状态按 log-sum-exp 合并概率质量，保留的代表按（更小
+max-rank、更高分、更少边）择定；每个位置先按文本去重、再按码长对应的 beam 宽
+截断（`select_exact_top` 精确取前 N），然后才向外扩展。整段单边（键流恰好命中
+一条词图边）保持词库序，只有多词分段之间才按分数竞争；候选一律补 EOS 转移
+打分后再排序，输出附 ␣ 连接的码分段串。`SentenceDecoder::decode(model, lexicon,
+raw_code, context, allow_duplicate_single)` 是纯函数（`context` 仅作模型历史），
+其中 `Rc` 引用图与 `Cell` 仅在单次调用内存在，调用结束即释放，引擎仍 `Send +
+Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
+
+延迟项（与 Fire 中无学习 / 用户数据时等价关闭，均为无数据时归零的附加分项）：
+学习通道 A/B/C1、Aho-Corasick 加权词补充、按会话增量 lattice（纯延迟优化，
+此处每次全量重建）、拼音、概率提前上屏。
+
+### 7.4 引擎门面与状态机
+
+- `SentenceEngine` 持有模型 + 词图，`load(model_path, table_path)` 构建，提供
+  无状态 `decode(code, context)`（沿用默认 单字重码组句 开启），整体以 `Arc`
+  跨会话共享。`SentenceTranslator` 把引擎适配为 `Translator`，整句候选因此接入
+  既有检索管线（`Pipeline::sentence`，无需去重——解码本就一文本一候选）；整段
+  编码已被消费，候选不带 `~剩余码` 注释。
+- 状态机（§3）：`code_type = 形码整句` 时字母只受解码器上限 `MAX_RAW_LENGTH =
+  256` 约束——不按 `max_code_len` 截断、也不触发 `commit_next_code` 顶码提交，
+  再按一个字母是延长整句；其余键义不变（空格选首条 / 数字选备选 / 退格删码 /
+  Esc 丢弃 / 回车提交原始码）。`Session::sentence(engine, config)` 装配整句会话
+  并强制 `code_type = 形码整句`，分页、数字、空格据此列出并提交整句。
+
+### 7.5 经外壳接入
+
+- FFI（§6）：`hime_select_scheme` 按方案 `type` 选来源——3 走
+  `SentenceEngine::load(模型, 方案表)`，其余按词表；模型缺失时选择整句方案返回
+  `false` 且引擎不变。切换方案按新来源原地重建所有活动会话（保留 id、丢弃输入
+  中的编码），词库与整句模式可互相切换。
+- CLI：`cargo run -p hime-cli -- --sentence [整句表]` 进入整句模式逐键调试；缺
+  模型时打印指引并以失败退出。
+- macOS 打包：`.hng` 当前不随 bundle 复制；外壳在选中整句方案前需把
+  `HIME_SENTENCE_MODEL` 指向随应用分发的模型（或在 Resources 内置并使
+  `find_model_path` 命中），属外壳后续接线项。
