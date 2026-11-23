@@ -147,6 +147,13 @@ fn full_flow_through_c_abi() {
     assert!(set_config(r#"{"page_size":5,"max_code_len":4}"#));
     assert_eq!(get_config()["page_size"], 5);
 
+    // ascii_punct is a 0/1 flag; other numbers clamp to 中文标点.
+    assert_eq!(get_config()["ascii_punct"], 0, "English punctuation by default");
+    assert!(set_config(r#"{"ascii_punct":9}"#));
+    assert_eq!(get_config()["ascii_punct"], 1, "unknown numbers clamp to the flag's top");
+    assert!(set_config(r#"{"ascii_punct":0}"#));
+    assert_eq!(get_config()["ascii_punct"], 0);
+
     // --- schemes: discovery (hime_scan_schemes) and selection ---
 
     let schemes = scan_schemes(&schemes_root());
@@ -160,6 +167,7 @@ fn full_flow_through_c_abi() {
     assert_eq!(liuli["auto_commit"], false);
     assert_eq!(liuli["auto_commit_length"], 4);
     assert_eq!(liuli["commit_next_code"], 5);
+    assert_eq!(liuli["ascii_punct"], 1, "琉璃v1 ships with Chinese punctuation");
 
     let unreadable = CString::new("/nonexistent/schemes-dir").unwrap();
     assert!(scan_schemes(&unreadable).is_empty(), "an unreadable dir lists nothing");
@@ -176,6 +184,7 @@ fn full_flow_through_c_abi() {
     assert_eq!(cfg["code_type"], 2, "metadata type 2 = 形码");
     assert_eq!(cfg["auto_commit_length"], 4);
     assert_eq!(cfg["commit_next_code"], 5, "the metadata overflow rule is live");
+    assert_eq!(cfg["ascii_punct"], 1, "the metadata punctuation default replaces the user value");
 
     // The session is idle (composition dropped) and answers from the 琉璃 table.
     let r = process(live, KEY_SPACE);

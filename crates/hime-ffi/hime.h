@@ -51,7 +51,8 @@ char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifier
 
 /* Read the current engine config as JSON:
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
- *  "auto_commit_length":4,"commit_next_code":0}.
+ *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0}.
+ * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
  * Reports the defaults before hime_init. The caller must release the string
  * with hime_free_string. */
 char* hime_get_config(void);
@@ -66,7 +67,7 @@ bool hime_set_config(const char* json);
 /* List the schemes under dir (the data/schemes layout: one folder per
  * scheme with a metadata.toml and a *.txt table) as a JSON array, sorted by
  * folder name; each entry:
- * {"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…}.
+ * {"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…,"ascii_punct":…}.
  * A plain filesystem read, valid before hime_init; unloadable folders are
  * skipped, an unreadable dir yields "[]". Returns NULL on an invalid path.
  * The caller must release the string with hime_free_string. */

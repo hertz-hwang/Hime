@@ -160,8 +160,8 @@ pub extern "C" fn hime_process_key(
 /// Read the current engine configuration as a NUL-terminated JSON string
 /// owned by the caller (release it with [`hime_free_string`]). The shape is
 /// `{"page_size":<n>,"max_code_len":<n>,"code_type":<n>,"auto_commit":<bool>,
-/// "auto_commit_length":<n>,"commit_next_code":<n>}` (see [`hime_set_config`]
-/// and [`hime_core::Config`]).
+/// "auto_commit_length":<n>,"commit_next_code":<n>,"ascii_punct":<n>}`
+/// (see [`hime_set_config`] and [`hime_core::Config`]).
 ///
 /// Before `hime_init` the default configuration is reported. Returns null
 /// only if serialization fails.
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn hime_set_config(json: *const c_char) -> bool {
 /// [`hime_free_string`]). This is a plain filesystem read: it works at any
 /// time, including before [`hime_init`]. Entries are sorted by folder name
 /// and shaped like
-/// `{"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…}`;
+/// `{"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…,"ascii_punct":…}`;
 /// `dir` is the stable id, `path` is what to hand to [`hime_select_scheme`].
 ///
 /// An unreadable directory yields `"[]"`; folders that fail to load are
