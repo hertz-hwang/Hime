@@ -48,8 +48,9 @@ impl SentenceLexicon {
         let mut codes: HashMap<String, Vec<SentenceEdge>> = HashMap::new();
         let mut length_values: HashSet<usize> = HashSet::new();
         let mut entry_count = 0usize;
-        // Shortest code seen per single-character text, for optimal_single.
-        let mut optimal_single_code: HashMap<String, usize> = HashMap::new();
+        // Shortest code seen per single-character text (the code string itself,
+        // not just its length), for optimal_single. Ties keep the first seen.
+        let mut optimal_single_code: HashMap<String, String> = HashMap::new();
 
         for line in content.lines() {
             let line = line.trim_end();
@@ -81,10 +82,16 @@ impl SentenceLexicon {
             entry_count += 1;
 
             if text.chars().count() == 1 {
-                optimal_single_code
-                    .entry(text.to_string())
-                    .and_modify(|best| *best = (*best).min(len))
-                    .or_insert(len);
+                match optimal_single_code.get_mut(text) {
+                    // Replace only on a strictly shorter code; ties keep the first.
+                    Some(existing) if len < existing.chars().count() => {
+                        *existing = code.to_string();
+                    }
+                    Some(_) => {}
+                    None => {
+                        optimal_single_code.insert(text.to_string(), code.to_string());
+                    }
+                }
             }
         }
 
@@ -98,7 +105,7 @@ impl SentenceLexicon {
             }
             for edge in edges.iter_mut() {
                 edge.optimal_single = edge.text.chars().count() == 1
-                    && optimal_single_code.get(&edge.text) == Some(&code.chars().count());
+                    && optimal_single_code.get(&edge.text).map(String::as_str) == Some(code.as_str());
             }
         }
 
@@ -200,6 +207,15 @@ mod tests {
         assert!(!fd[0].optimal_single, "fd is longer than the shortest code f");
         assert!(lex.edges("hd").unwrap()[0].optimal_single);
         assert!(!lex.edges("hgd").unwrap()[0].optimal_single);
+    }
+
+    /// Two equally-short multi-key codes for one character: only the first seen
+    /// is optimal (matches Fire, which stores the shortest code string itself).
+    #[test]
+    fn optimal_single_ties_keep_the_first_code() {
+        let lex = SentenceLexicon::parse("好\thd\n好\thx\n");
+        assert!(lex.edges("hd").unwrap()[0].optimal_single);
+        assert!(!lex.edges("hx").unwrap()[0].optimal_single);
     }
 
     /// The whole input is one edge (整段单边) for a code that exists.
