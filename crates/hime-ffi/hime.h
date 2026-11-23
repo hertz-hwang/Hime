@@ -79,10 +79,15 @@ char* hime_scan_schemes(const char* dir);
 /* Load the scheme folder at scheme_dir (an entry's "path" from
  * hime_scan_schemes): its table becomes the engine dictionary, its
  * metadata.toml values replace the engine config (that is how selecting a
- * scheme reloads its defaults; page_size survives). Live sessions keep
- * their ids, adopt the new dictionary and config, and drop any
- * in-progress composition. Initializes the engine if needed. Returns false
- * on an invalid path or unloadable scheme; the engine then stays unchanged. */
+ * scheme reloads its defaults; page_size survives). Live sessions keep their
+ * ids, drop any in-progress composition, and are rebuilt for the new source,
+ * so a scheme can be switched while typing (including between a 形码 and a
+ * 形码整句 scheme). Initializes the engine if needed.
+ *
+ * A 形码整句 scheme (metadata "type" 3) decodes whole sentences and also needs
+ * the HFNGMF n-gram model, located via HIME_SENTENCE_MODEL or the bundled
+ * data/sentence-ngram.hng; if the model is absent this fails and the engine is
+ * unchanged. Returns false on an invalid path or unloadable scheme/model. */
 bool hime_select_scheme(const char* scheme_dir);
 
 /* Release a string returned by hime_process_key, hime_get_config or

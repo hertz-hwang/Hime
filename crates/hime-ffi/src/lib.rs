@@ -14,19 +14,50 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use hime_core::{load_scheme, scan_schemes, Config, Dictionary, Session};
+use hime_core::ngram::find_model_path;
+use hime_core::sentence::SentenceEngine;
+use hime_core::{load_scheme, scan_schemes, CodeType, Config, Dictionary, Session};
+
+/// Where candidates come from: a word table, or the whole-sentence engine a
+/// 形码整句 (type 3) scheme needs. This decides how every session is built.
+enum EngineSource {
+    Table(Arc<Dictionary>),
+    Sentence(Arc<SentenceEngine>),
+}
 
 /// Global engine state, present only after a successful `hime_init`.
 struct Engine {
-    dict: Arc<Dictionary>,
+    source: EngineSource,
     config: Config,
     sessions: HashMap<u64, Session>,
     next_session_id: u64,
 }
 
 impl Engine {
-    fn new(dict: Arc<Dictionary>) -> Self {
-        Self { dict, config: Config::default(), sessions: HashMap::new(), next_session_id: 1 }
+    fn new(source: EngineSource) -> Self {
+        Self { source, config: Config::default(), sessions: HashMap::new(), next_session_id: 1 }
+    }
+
+    /// Build a fresh session for the current source and config. A 形码整句
+    /// source builds a sentence session (long codes decode whole sentences);
+    /// a table source builds the word-lookup session.
+    fn build_session(&self) -> Session {
+        match &self.source {
+            EngineSource::Table(dict) => Session::with_config(Arc::clone(dict), self.config),
+            EngineSource::Sentence(engine) => Session::sentence(Arc::clone(engine), self.config),
+        }
+    }
+
+    /// Rebuild every live session in place (ids kept) for the current source and
+    /// config, dropping in-progress compositions. Used when a scheme switches
+    /// the candidate source, including between word and whole-sentence modes,
+    /// which a session cannot change by mutation.
+    fn rebuild_sessions(&mut self) {
+        let ids: Vec<u64> = self.sessions.keys().copied().collect();
+        for id in ids {
+            let session = self.build_session();
+            self.sessions.insert(id, session);
+        }
     }
 }
 
@@ -81,7 +112,7 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
         Ok(dict) => {
             let dict = Arc::new(dict);
             with_engine("hime_init", |slot| {
-                *slot = Some(Engine::new(dict));
+                *slot = Some(Engine::new(EngineSource::Table(dict)));
             });
             true
         }
@@ -104,7 +135,7 @@ pub extern "C" fn hime_create_session() -> u64 {
         Some(engine) => {
             let id = engine.next_session_id;
             engine.next_session_id += 1;
-            let session = Session::with_config(Arc::clone(&engine.dict), engine.config);
+            let session = engine.build_session();
             engine.sessions.insert(id, session);
             id
         }
@@ -271,12 +302,19 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 /// dictionary and its `metadata.toml` values become the engine
 /// configuration, replacing user changes — that is how selecting a scheme
 /// reloads the scheme defaults. `page_size` is not scheme-defined and
-/// survives. Live sessions keep their ids, adopt the new dictionary and
-/// config, and drop any in-progress composition; a scheme can therefore be
-/// switched while typing. The engine is initialized on demand.
+/// survives. Live sessions keep their ids, drop any in-progress composition,
+/// and are rebuilt for the new source, so a scheme can be switched while
+/// typing (including between a 形码 and a 形码整句 scheme). The engine is
+/// initialized on demand.
 ///
-/// Returns `false` on a null/invalid path or when the folder's metadata or
-/// table fails to load; the engine stays unchanged in that case.
+/// A 形码整句 scheme (`type = 3` in its metadata) decodes whole sentences and
+/// additionally needs the HFNGMF n-gram model; it is located as everywhere
+/// else (the `HIME_SENTENCE_MODEL` environment variable, else the bundled
+/// `data/sentence-ngram.hng`). If that model is absent, selecting such a
+/// scheme fails and leaves the engine unchanged.
+///
+/// Returns `false` on a null/invalid path or when the folder's metadata, table
+/// or (for 形码整句) model fails to load; the engine stays unchanged.
 ///
 /// # Safety
 /// `scheme_dir` must be null or point to a valid NUL-terminated C string.
@@ -300,27 +338,44 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             return false;
         }
     };
-    let dict = match Dictionary::load(&info.table) {
-        Ok(dict) => Arc::new(dict),
-        Err(e) => {
-            eprintln!("hime-ffi: failed to load dictionary {:?}: {e}", info.table);
-            return false;
+    // A 形码整句 (type 3) scheme decodes with the n-gram model over a sentence
+    // table; every other scheme is a word table. Building the engine here lets
+    // a bad model fail the call without touching the live engine.
+    let source = match info.metadata.code_type {
+        CodeType::XingmaSentence => {
+            let Some(model) = find_model_path() else {
+                eprintln!(
+                    "hime-ffi: scheme {path:?} is 形码整句 but no .hng model was found (set HIME_SENTENCE_MODEL)"
+                );
+                return false;
+            };
+            match SentenceEngine::load(&model, &info.table) {
+                Ok(engine) => EngineSource::Sentence(Arc::new(engine)),
+                Err(e) => {
+                    eprintln!("hime-ffi: failed to load sentence engine for {path:?}: {e}");
+                    return false;
+                }
+            }
         }
+        _ => match Dictionary::load(&info.table) {
+            Ok(dict) => EngineSource::Table(Arc::new(dict)),
+            Err(e) => {
+                eprintln!("hime-ffi: failed to load dictionary {:?}: {e}", info.table);
+                return false;
+            }
+        },
     };
     with_engine("hime_select_scheme", |slot| match slot.as_mut() {
         None => {
-            let mut engine = Engine::new(dict);
+            let mut engine = Engine::new(source);
             engine.config = info.metadata.defaults_for(engine.config);
             *slot = Some(engine);
             true
         }
         Some(engine) => {
-            engine.dict = Arc::clone(&dict);
             engine.config = info.metadata.defaults_for(engine.config);
-            for session in engine.sessions.values_mut() {
-                session.set_dict(Arc::clone(&dict));
-                session.set_config(engine.config);
-            }
+            engine.source = source;
+            engine.rebuild_sessions();
             true
         }
     })
