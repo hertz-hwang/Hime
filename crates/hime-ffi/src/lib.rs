@@ -52,11 +52,13 @@ fn with_engine<T: Default>(what: &str, f: impl FnOnce(&mut Option<Engine>) -> T)
     }
 }
 
-/// Load the dictionary and (re)initialize the global engine.
+/// Load the lexicon and (re)initialize the global engine.
 ///
-/// `dict_path` is a NUL-terminated path to the TSV lexicon. Returns `false`
-/// on a null/invalid path, an unreadable file, or a parse error. Calling
-/// this again re-initializes the engine and drops all live sessions.
+/// `dict_path` is a NUL-terminated path to a lexicon file: a scheme table
+/// (`text<TAB>code`, the default — e.g. 琉璃v1) or a weighted TSV
+/// (`code<TAB>text<TAB>weight`). Returns `false` on a null/invalid path, an
+/// unreadable file, or a parse error. Calling this again re-initializes the
+/// engine and drops all live sessions.
 ///
 /// # Safety
 /// `dict_path` must be null or point to a valid NUL-terminated C string.

@@ -15,7 +15,8 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
 BRIDGE_HEADER="${ROOT_DIR}/crates/hime-ffi/hime.h"
-DICTIONARY="${ROOT_DIR}/data/xingma_sample.tsv"
+# The default input scheme: 琉璃v1 (data/xingma_sample.tsv is a test fixture only).
+DICTIONARY="${ROOT_DIR}/data/schemes/liuli_v1/liuli_table.txt"
 
 echo "==> cargo build --release -p hime-ffi"
 cargo build --release -p hime-ffi --manifest-path "${ROOT_DIR}/Cargo.toml"
@@ -44,7 +45,7 @@ swiftc \
     "${RUST_LIB}"
 
 cp "${SCRIPT_DIR}/Info.plist" "${CONTENTS}/Info.plist"
-cp "${DICTIONARY}" "${CONTENTS}/Resources/xingma_sample.tsv"
+cp "${DICTIONARY}" "${CONTENTS}/Resources/liuli_table.txt"
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
 echo "==> Rendering icons from assets/*.svg"

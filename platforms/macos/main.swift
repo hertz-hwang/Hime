@@ -13,8 +13,8 @@ let bundleIdentifier = "com.hime.inputmethod.Hime"
 // Shared candidate panel used by every HimeInputController instance.
 var sharedCandidates: IMKCandidates!
 
-guard let dictPath = Bundle.main.path(forResource: "xingma_sample", ofType: "tsv") else {
-    fputs("Hime: xingma_sample.tsv not found in bundle Resources\n", stderr)
+guard let dictPath = Bundle.main.path(forResource: "liuli_table", ofType: "txt") else {
+    fputs("Hime: liuli_table.txt not found in bundle Resources\n", stderr)
     exit(1)
 }
 guard hime_init(dictPath) else {

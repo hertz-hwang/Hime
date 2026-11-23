@@ -1,11 +1,11 @@
 //! Terminal interactive tester for the Hime engine.
 //!
-//! Loads the TSV dictionary, reads simulated keystroke commands from stdin,
+//! Loads the scheme table, reads simulated keystroke commands from stdin,
 //! and prints the `EngineResponse` JSON for every key — the same payload the
 //! macOS shell will receive over FFI.
 //!
 //! Usage:
-//!   cargo run -p hime-cli -- [dict.tsv]
+//!   cargo run -p hime-cli -- [table.txt]
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -23,19 +23,21 @@ use hime_core::{Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_S
 
 const HELP: &str = "type letters a-z to compose (one keystroke per char); commands: :space :bs :esc :enter :1-:9 :help :quit";
 
-/// Dictionary path: CLI argument, else `data/xingma_sample.tsv` under the
-/// current directory, else the copy next to this source tree.
+/// Dictionary path: CLI argument, else the default scheme table
+/// `data/schemes/liuli_v1/liuli_table.txt` under the current directory, else
+/// the copy next to this source tree.
 fn dict_path() -> PathBuf {
     if let Some(arg) = std::env::args().nth(1) {
         return PathBuf::from(arg);
     }
-    let relative = PathBuf::from("data/xingma_sample.tsv");
+    const DEFAULT_TABLE: &str = "data/schemes/liuli_v1/liuli_table.txt";
+    let relative = PathBuf::from(DEFAULT_TABLE);
     if relative.is_file() {
         return relative;
     }
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../data/xingma_sample.tsv"
+        "/../../data/schemes/liuli_v1/liuli_table.txt"
     ))
 }
 

@@ -27,9 +27,11 @@ extern "C" {
 #define HIME_KEY_ESCAPE 27
 #define HIME_KEY_SPACE 32
 
-/* Load the TSV dictionary (absolute path) and initialize the global engine.
- * Returns false when the path is null/invalid or the dictionary fails to
- * load. Calling again re-initializes the engine and drops all sessions. */
+/* Load a lexicon (absolute path) and initialize the global engine. Accepted
+ * row formats: scheme table `text\tcode` (the default, e.g. 琉璃v1) or
+ * weighted TSV `code\ttext\tweight`. Returns false when the path is
+ * null/invalid or the dictionary fails to load. Calling again re-initializes
+ * the engine and drops all sessions. */
 bool hime_init(const char* dict_path);
 
 /* Create a session. Returns a session id >= 1, or 0 if the engine is not
