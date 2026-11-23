@@ -60972,7 +60972,6 @@ IP地址	cxch
 隐天蔽日	eaqw
 行事风格	eaqy
 已成艺术	eaqy
-（八）	ear2
 斩钉截铁	eara
 斩钢截铁	eara
 博远	eard
@@ -61922,7 +61921,6 @@ IP地址	cxch
 连败	edqv
 布帛菽粟	edqx
 连杀	edqy
-（四）	edr2
 齐白石	edra
 连狙	edra
 有害无益	edrb
@@ -62481,7 +62479,6 @@ IP地址	cxch
 阵灵	eeqx
 旖旎风光	eeqy
 𲉗	eeqy
-（十）	eer2
 陨石	eera
 连连磕头	eerc
 巺	eerc
@@ -62976,7 +62973,6 @@ IP地址	cxch
 雄获	efqr
 雄蕊	efqv
 附庸风雅	efqx
-（一）	efr2
 肉身翻墙	efrc
 雄师	efrf
 行舟	efrg
@@ -63971,7 +63967,6 @@ IP地址	cxch
 露苗	ehqt
 有灵	ehqx
 露芽	ehqx
-（二）	ehr2
 轻装前进	ehrc
 防止破坏	ehrc
 有来无去	ehrg
@@ -64553,7 +64548,6 @@ IP地址	cxch
 陪灵	eiqx
 有何感受	eiqx
 附儒风雅	eiqx
-（五）	eir2
 阶石	eira
 左慈	eirc
 随便翻开	eirc
@@ -68152,7 +68146,6 @@ IP地址	cxch
 右翼	epqt
 车刹	epqy
 震杀	epqy
-（三）	epr2
 车泵	eprb
 雷鸣般的	eprd
 右舵	eprd
@@ -68606,7 +68599,6 @@ IP地址	cxch
 布莱希特	eqqr
 雪茄	eqqs
 雪幕	eqqs
-（六）	eqr2
 雨花石	eqra
 行若无事	eqra
 赛特	eqrc
@@ -69491,7 +69483,6 @@ IP地址	cxch
 队名	esqp
 布幕	esqs
 陈账	esqz
-（七）	esr2
 布帆无恙	esra
 零七碎八	esra
 协考	esrb
@@ -70043,7 +70034,6 @@ IP地址	cxch
 𨸒	etqr
 斩杀	etqy
 雷杀	etqy
-（九）	etr2
 雷石	etra
 𲳦	etra
 未考	etrb
@@ -73299,7 +73289,6 @@ IP地址	cxch
 重新连接	fdev
 瞎改	fdev
 酉阳	fdew
-道：“	fdf2
 躬身	fdfa
 酚酞	fdfa
 瞚	fdfa
@@ -84604,7 +84593,6 @@ AV画质	ftle
 度数	fzzv
 一层层	fzzy
 𨢆	fzzy
-。”“	g2f2
 惨兮兮	gaab
 慢吞吞地	gaac
 慢吞吞的	gaad
@@ -143355,7 +143343,6 @@ QQ空间	kizw
 比较难	lezw
 比较长	lezx
 从未间断	lezz
-么！	lfa2
 缠在	lfac
 智能助手	lfac
 只能在	lfac
@@ -143788,7 +143775,6 @@ QQ空间	kizw
 盲童	lfvs
 缠扰	lfvs
 统一指挥	lfvv
-么？	lfw2
 终于明白	lfwd
 𫒯	lfwd
 红眼病	lfwf
@@ -172588,7 +172574,6 @@ QQ达人	ndsk
 被殴打	nhvn
 正版授权	nhvy
 视频播放器	nhvy
-就这？	nhw2
 合并症	nhwn
 礼遇	nhwt
 京爷冲击	nhwv
@@ -196381,7 +196366,6 @@ AV女优	ouis
 𱔪	pmzw
 更深层	pmzy
 𲕎	pmzy
-哈！	pna2
 老神在在	pnaa
 饕餮盛宴	pnad
 𫩰	pnad
@@ -196780,7 +196764,6 @@ AV女优	ouis
 吃撑	pnvs
 吃瓜	pnvw
 顺之者昌	pnvw
-哈？	pnw2
 吃冰	pnwb
 吃瘪	pnwc
 老年公寓	pnwd
@@ -199043,7 +199026,6 @@ AV女优	ouis
 听党指挥	psvv
 三指	psvy
 三排	psvy
-吧？	psw2
 三产	pswd
 三昧	pswe
 三驾马车	pswe
@@ -200655,7 +200637,6 @@ AV女优	ouis
 百日誓师	pwvr
 顺我者昌	pwvw
 老马恋栈	pwvy
-吗？	pww2
 老公公	pwwh
 唯我	pwwj
 咬我	pwwj
@@ -201478,7 +201459,6 @@ AV女优	ouis
 叱问	pyzp
 𱔹	pyzp
 贞松劲柏	pyzy
-呢！	pza2
 虎皮羊质	pzal
 叹羡	pzaw
 虎门销烟	pzax
@@ -201653,7 +201633,6 @@ AV女优	ouis
 𪢀	pzvj
 𪢒	pzvj
 嘱托	pzvl
-呢？	pzw2
 百米冲刺	pzwd
 三观冲击	pzwv
 更长时间	pzwz
@@ -226117,7 +226096,6 @@ AV女优	ouis
 人来车往	shet
 兄弟齐心	shev
 人贵有自知之明	shew
-说：“	shf2
 话音一落	shfb
 兄弟一场	shfc
 说道	shfd
@@ -277608,7 +277586,6 @@ py交易	wawj
 骑驴找驴	wwvw
 骑马找马	wwvw
 𤬆	wwvw
-？？？	www2
 公交公司	wwwb
 冷冰冰	wwwb
 𭳾	wwwb
