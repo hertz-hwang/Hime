@@ -10,14 +10,18 @@
 //! beam search over the two. A thin engine ties the three together and is the
 //! single object the engine and shells talk to.
 //!
+//! [`auto_commit`] implements Fire's probabilistic early-commit and empty-code
+//! state machine; it is gated on `Config::auto_commit` and lives in the session.
+//!
 //! Deferred relative to Fire (documented where each belongs): the learning
 //! channels (session cache / user n-gram / correction), the Aho-Corasick
 //! weighted-word supplement, the per-session incremental lattice (a latency
-//! optimization), pinyin decoding, and the probabilistic early-commit overlay.
-//! None of them affect the deterministic whole-sentence ranking that is the
-//! core of 形码整句; they are additive score terms gated off when there is no
-//! learning or user-word data, exactly as in Fire.
+//! optimization), and pinyin decoding. None of them affect the deterministic
+//! whole-sentence ranking that is the core of 形码整句; they are additive score
+//! terms gated off when there is no learning or user-word data, exactly as in
+//! Fire.
 
+pub(crate) mod auto_commit;
 pub mod decoder;
 pub mod engine;
 pub mod lexicon;
@@ -42,6 +46,11 @@ pub(crate) mod config {
     /// Hard cap on the raw key stream with auto-commit off; keys past it are
     /// handed back to the host.
     pub const MAX_RAW_LENGTH: usize = 256;
+    /// Cap on the raw key stream with auto-commit on. Lower than the manual
+    /// cap because the near-cap fallback commits a mature prefix before the
+    /// buffer can grow into the range where decoding slows (Fire keeps it at
+    /// 64 ≈ sixteen multi-key 形码 characters).
+    pub const AUTO_COMMIT_MAX_RAW_LENGTH: usize = 64;
     /// Light penalty for a non-first rank, scaled by ln(rank).
     pub const RANK_PENALTY: f64 = 0.03;
     /// Reward per character emitted, so full coverage outranks partial.
@@ -55,6 +64,28 @@ pub(crate) mod config {
     /// this many, so expansion stays bounded before an explicit de-dup.
     pub const AGGREGATE_DURING_EXPANSION_THRESHOLD: usize = 128;
 
+    // ---- Probabilistic early commit (ported from Fire `SentenceConfig`) ----
+    /// Posterior share a prefix must reach to qualify as commit evidence.
+    pub const EARLY_COMMIT_MINIMUM_SHARE: f64 = 0.995;
+    /// Strong-confirmation share; reaching it twice commits without waiting.
+    pub const EARLY_COMMIT_STRONG_SHARE: f64 = 0.99999;
+    /// Boundary share at which a raw position counts as a closed split.
+    pub const EARLY_COMMIT_CLOSED_BOUNDARY_SHARE: f64 = 0.99999;
+    /// Consecutive generations a prefix must hold before it matures.
+    pub const EARLY_COMMIT_REQUIRED_EVIDENCE: usize = 3;
+    /// Consecutive strong confirmations that let a prefix mature early.
+    pub const EARLY_COMMIT_REQUIRED_STRONG: usize = 2;
+    /// Generations a tracker may survive a neutral (low-confidence) gap.
+    pub const EARLY_COMMIT_MAXIMUM_NEUTRAL_GAP: usize = 3;
+    /// Keys the composition keeps after an auto-commit, so typing continues.
+    pub const EARLY_COMMIT_RETAINED_RAW_LENGTH: usize = 3;
+    /// Keys at the start of a composition that never count as evidence.
+    pub const FIRST_KEYS_IMMUNITY: usize = 4;
+    /// How close to the cap (in keys) the last-resort fallback starts.
+    pub const NEAR_CAP_COMMIT_GENERATIONS: usize = 5;
+    /// Prefix share the near-cap fallback accepts (vs the normal minimum).
+    pub const NEAR_CAP_MINIMUM_SHARE: f64 = 0.9;
+
     /// Beam width to use at a given raw length.
     #[must_use]
     pub const fn beam_limit_at(raw_length: usize) -> usize {
@@ -62,6 +93,19 @@ pub(crate) mod config {
             LONG_INPUT_BEAM_WIDTH
         } else {
             BEAM_WIDTH
+        }
+    }
+
+    /// Cap on the raw key stream, which depends on whether auto-commit is on:
+    /// the tighter [`AUTO_COMMIT_MAX_RAW_LENGTH`] so the near-cap fallback can
+    /// still commit before the cap, or the manual [`MAX_RAW_LENGTH`] when
+    /// auto-commit is off (a long sentence typed by hand).
+    #[must_use]
+    pub const fn max_raw_length(auto_commit: bool) -> usize {
+        if auto_commit {
+            AUTO_COMMIT_MAX_RAW_LENGTH
+        } else {
+            MAX_RAW_LENGTH
         }
     }
 }

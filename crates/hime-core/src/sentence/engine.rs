@@ -86,6 +86,25 @@ impl SentenceEngine {
         SentenceDecoder::decode(&self.model, &self.lexicon, code, context, true)
     }
 
+    /// Whole-sentence candidates for `code` plus the early-commit evidence the
+    /// probabilistic auto-commit consumes (SPEC §7.6). The decode is identical
+    /// to [`Self::decode`]; only the prefix-maturity evidence is extra.
+    #[must_use]
+    pub(crate) fn decode_with_evidence(
+        &self,
+        code: &str,
+        context: &str,
+    ) -> super::decoder::SentenceDecode {
+        SentenceDecoder::decode_with_evidence(&self.model, &self.lexicon, code, context, true)
+    }
+
+    /// The word graph, for the auto-commit's "can the keys still be covered
+    /// completely" check (SPEC §7.6).
+    #[must_use]
+    pub(crate) fn lexicon(&self) -> &SentenceLexicon {
+        &self.lexicon
+    }
+
     /// Whether the word graph is empty; an empty engine decodes to nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {

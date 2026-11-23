@@ -14,7 +14,18 @@ use crate::dictionary::Dictionary;
 use crate::pipeline::Pipeline;
 use crate::processor::{Action, Processor};
 use crate::punct::{self, QuotePair};
+use crate::sentence::auto_commit::SentenceAutoCommit;
+use crate::sentence::SentenceEngine;
 use crate::types::{Candidate, EngineResponse};
+
+/// 形码整句 auto-commit state plus the engine it re-decodes with. Present only
+/// for a [`Session::sentence`] session; the auto-commit itself is inert unless
+/// `Config::auto_commit` is on (SPEC §7.6).
+#[derive(Debug)]
+struct SentenceComposer {
+    engine: Arc<SentenceEngine>,
+    auto_commit: SentenceAutoCommit,
+}
 
 /// Which way a paging key turns the candidate list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +56,9 @@ pub struct Session {
     /// Quote pairing for 中文标点; deliberately survives [`Session::clear`]
     /// so a quote opened before a commit still closes after it.
     quotes: QuotePair,
+    /// 形码整句 probabilistic/empty-code auto-commit state; `None` for every
+    /// non-sentence session, which keeps the sentence path fully gated.
+    sentence: Option<SentenceComposer>,
 }
 
 impl Session {
@@ -68,6 +82,7 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            sentence: None,
         }
     }
 
@@ -83,6 +98,7 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            sentence: None,
         }
     }
 
@@ -94,9 +110,9 @@ impl Session {
     /// knob (page size, punctuation) comes from `config`. Paging, digit
     /// select and Space then list and commit the sentences exactly like table
     /// candidates.
-    pub fn sentence(engine: Arc<crate::sentence::SentenceEngine>, config: Config) -> Self {
+    pub fn sentence(engine: Arc<SentenceEngine>, config: Config) -> Self {
         let config = Config { code_type: CodeType::XingmaSentence, ..config }.sanitized();
-        let pipeline = Pipeline::sentence(engine);
+        let pipeline = Pipeline::sentence(Arc::clone(&engine));
         Self {
             dict: None,
             config,
@@ -106,6 +122,10 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            sentence: Some(SentenceComposer {
+                engine,
+                auto_commit: SentenceAutoCommit::default(),
+            }),
         }
     }
 
@@ -169,6 +189,9 @@ impl Session {
             Action::DeleteCode => {
                 self.input_buffer.pop();
                 self.refresh_candidates();
+                if let Some(composer) = self.sentence.as_mut() {
+                    composer.auto_commit.evidence_invalidated();
+                }
                 self.response(true, None)
             }
             Action::Discard => {
@@ -214,10 +237,12 @@ impl Session {
             },
             Action::PageUp => {
                 self.turn_page(PageDirection::Previous);
+                self.suspend_sentence_auto_commit();
                 self.response(true, None)
             }
             Action::PageDown => {
                 self.turn_page(PageDirection::Next);
+                self.suspend_sentence_auto_commit();
                 self.response(true, None)
             }
         }
@@ -234,6 +259,11 @@ impl Session {
     fn push_letter(&mut self, byte: u8, pending: Option<String>) -> EngineResponse {
         self.input_buffer.push(char::from(byte));
         self.refresh_candidates();
+        // 形码整句 replaces the unique-candidate rule with the probabilistic
+        // auto-commit; the word-code rule below only applies to table sessions.
+        if self.sentence.is_some() {
+            return self.sentence_auto_commit(pending);
+        }
         if self.config.auto_commit
             && self.input_buffer.len() >= self.config.auto_commit_length
             && self.candidates.len() == 1
@@ -250,6 +280,50 @@ impl Session {
             return self.response(true, Some(commit));
         }
         self.response(true, pending)
+    }
+
+    /// 形码整句: after a letter extends the code, ask the auto-commit state
+    /// machine whether a matured prefix or a now-uncoverable tail should go to
+    /// the host now (SPEC §7.6). On a hit, the fragment is emitted and the
+    /// still-unconsumed tail stays in the composition, so typing continues
+    /// straight into the next character. `pending` carries an overflow commit,
+    /// which sentence mode never produces, so it stays `None` in practice.
+    fn sentence_auto_commit(&mut self, pending: Option<String>) -> EngineResponse {
+        let commit = {
+            let composer = self
+                .sentence
+                .as_mut()
+                .expect("sentence session owns the auto-commit state");
+            composer.auto_commit.key_pressed(
+                composer.engine.as_ref(),
+                &self.input_buffer,
+                true,
+                self.config.auto_commit,
+            )
+        };
+        match commit {
+            Some(outcome) => {
+                self.input_buffer = outcome.retained_raw;
+                self.refresh_candidates();
+                let text = match pending {
+                    Some(mut committed) => {
+                        committed.push_str(&outcome.text);
+                        committed
+                    }
+                    None => outcome.text,
+                };
+                self.response(true, Some(text))
+            }
+            None => self.response(true, pending),
+        }
+    }
+
+    /// Hold auto-commit for the rest of the composition (paging, Tab): only
+    /// meaningful for a sentence session.
+    fn suspend_sentence_auto_commit(&mut self) {
+        if let Some(composer) = self.sentence.as_mut() {
+            composer.auto_commit.suspend();
+        }
     }
 
     /// Re-retrieve the whole candidate window for the current encoding and
@@ -290,6 +364,11 @@ impl Session {
         self.window.clear();
         self.page = 0;
         self.candidates.clear();
+        // A whole-code commit or abandon ends the composition: drop all
+        // auto-commit state except the committed-fragment context.
+        if let Some(composer) = self.sentence.as_mut() {
+            composer.auto_commit.reset();
+        }
     }
 
     /// Bundle current session state into the response a shell renders as-is.

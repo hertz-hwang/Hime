@@ -188,7 +188,11 @@ fn heap_sift_down<T>(heap: &mut [T], start: usize, better: &impl Fn(&T, &T) -> b
 }
 
 /// A complete sentence scored to the end (with EOS), before it becomes a
-/// [`SentenceCandidate`].
+/// [`SentenceCandidate`]. It keeps the winning `path` and its `confidence`
+/// because the early-commit evidence walks the path's raw boundaries and
+/// weights every candidate by its probability mass; the public candidate drops
+/// the path.
+#[derive(Clone)]
 struct Completed {
     score: f64,
     confidence: f64,
@@ -198,7 +202,95 @@ struct Completed {
     segmented: String,
     /// Whether the path has more than one word (a real segmentation).
     segmented_path: bool,
+    /// The state chain behind this candidate (its parent links carry the raw
+    /// boundaries the early-commit evidence needs).
+    path: Rc<SentenceState>,
 }
+
+/// Strip the decoder-internal `path` to hand a caller the public candidate.
+fn candidate_of(completed: Completed) -> SentenceCandidate {
+    SentenceCandidate {
+        text: completed.text,
+        segmented: completed.segmented,
+        score: completed.score,
+        confidence: completed.confidence,
+        max_rank: completed.max_rank,
+        edge_count: completed.edge_count,
+    }
+}
+
+/// Prefix posterior evidence for one `(text, raw boundary)` over the decode
+/// pool (port of `SentencePrefixEvidence`). `share` is this prefix's probability
+/// mass over the whole pool; `boundary_share` is the mass that ends a word at
+/// exactly this raw position, and `boundary_closed` marks that every pool path
+/// agrees the sentence splits there (Fire's closed-boundary gate).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PrefixEvidence {
+    pub(crate) text: String,
+    pub(crate) raw_length: usize,
+    pub(crate) share: f64,
+    pub(crate) boundary_share: f64,
+    pub(crate) boundary_closed: bool,
+    pub(crate) text_char_count: usize,
+}
+
+/// Early-commit evidence from one decode (port of `SentenceEarlyEvidence`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct EarlyEvidence {
+    pub(crate) prefixes: Vec<PrefixEvidence>,
+    /// An incomplete code tail was merged into the evidence pool.
+    pub(crate) merged_incomplete_tail: bool,
+    /// The visible generations are collectively low-confidence (a neutral
+    /// pause): evidence is held without counting against it.
+    pub(crate) neutral_low_confidence: bool,
+    /// A beam de-dup dropped pool states, so the posterior is suspect (normal
+    /// rules void the evidence; the near-cap fallback still uses it).
+    pub(crate) confidence_truncated: bool,
+}
+
+/// A visible candidate projected for the auto-commit layer: enough of the path
+/// to decide commits without exposing `SentenceState`. `boundaries` lists each
+/// non-root path node's `(raw_length, text)` ascending by `raw_length`;
+/// `prev_raw_length` is the boundary one word before the end (the last-segment
+/// start the empty-code commit keeps).
+#[derive(Clone)]
+pub(crate) struct CompletedView {
+    pub(crate) text: String,
+    pub(crate) confidence: f64,
+    pub(crate) max_rank: u32,
+    pub(crate) prev_raw_length: usize,
+    pub(crate) boundaries: Vec<(usize, String)>,
+}
+
+/// A decode plus its early-commit evidence (port of `SentenceDecodeResult`).
+pub(crate) struct SentenceDecode {
+    pub(crate) candidates: Vec<CompletedView>,
+    pub(crate) evidence: EarlyEvidence,
+}
+
+/// Project a finished `Completed` onto the auto-commit's view of its path.
+fn view_of(completed: Completed) -> CompletedView {
+    let prev_raw_length =
+        completed.path.previous.as_ref().map_or(0, |parent| parent.raw_length);
+    let mut boundaries = Vec::new();
+    let mut node = Some(completed.path);
+    while let Some(state) = node {
+        if state.raw_length == 0 {
+            break;
+        }
+        boundaries.push((state.raw_length, state.text.clone()));
+        node = state.previous.clone();
+    }
+    boundaries.reverse();
+    CompletedView {
+        text: completed.text,
+        confidence: completed.confidence,
+        max_rank: completed.max_rank,
+        prev_raw_length,
+        boundaries,
+    }
+}
+
 
 fn completed_better_score_first(a: &Completed, b: &Completed) -> bool {
     if a.score == b.score {
@@ -304,7 +396,7 @@ impl Bucket {
 /// Parse the rank-selection marker after a code edge. `;`=2nd, `'`=3rd,
 /// digits=that rank (`0`=10, digits may run, e.g. `12` = 12th). Consumes the
 /// marker bytes, returning `(rank, end)`. `rank == 0` means none.
-fn parse_selector(raw: &[u8], code_end: usize) -> (u32, usize) {
+pub(crate) fn parse_selector(raw: &[u8], code_end: usize) -> (u32, usize) {
     if code_end >= raw.len() {
         return (0, code_end);
     }
@@ -334,7 +426,7 @@ fn parse_selector(raw: &[u8], code_end: usize) -> (u32, usize) {
 /// An explicit rank takes that edge only; otherwise a whole-input edge may use
 /// every rank, and a mid-stream edge uses rank 1 (plus single-character
 /// homophones when duplicate-single is on).
-fn eligible_edges(
+pub(crate) fn eligible_edges(
     edges: &[SentenceEdge],
     selected_rank: u32,
     whole_input_edge: bool,
@@ -506,32 +598,26 @@ impl<'a> Decoder<'a> {
         buckets
     }
 
-    /// Score the end bucket, choose lexicon-order vs score-order, and return the
-    /// top candidates.
+    /// Score the end bucket, choose lexicon-order vs score-order, and return
+    /// the top candidates as [`Completed`] (path retained for the evidence
+    /// layer) together with the length-bucket de-dup truncation flag — the
+    /// caller maps to public candidates, or builds early-commit evidence.
     fn emit(
         &self,
         raw: &[u8],
         buckets: &mut [Option<Bucket>],
         length: usize,
         allow_duplicate_single: bool,
-    ) -> Vec<SentenceCandidate> {
+    ) -> (Vec<Completed>, bool) {
         let base = buckets[length].take().unwrap_or_default();
         let completed = base.dedup(beam_limit_at(length), &state_better_score_first);
+        let pool_truncated = completed.truncated;
 
         let mut all: Vec<Completed> = Vec::with_capacity(completed.items.len());
         for state in &completed.items {
-            let ending = self.model.logp(state.prev2, state.prev1, CP_EOS);
-            let segmented_path =
-                state.previous.as_ref().is_some_and(|p| p.raw_length > 0);
-            all.push(Completed {
-                score: state.score + ending,
-                confidence: state.mass.get() + ending,
-                text: state.text.clone(),
-                max_rank: state.max_rank.max(1),
-                edge_count: state.edge_count,
-                segmented: segmented_from_path(state, raw),
-                segmented_path,
-            });
+            let mut candidate = self.evaluate_state(state);
+            candidate.segmented = segmented_from_path(state, raw);
+            all.push(candidate);
         }
 
         // A whole-input single edge is ordered by the table (the lexicon owns
@@ -553,18 +639,197 @@ impl<'a> Decoder<'a> {
             sort_by_better(&mut result, &completed_better_rank_first);
         }
 
-        result
-            .into_iter()
-            .map(|c| SentenceCandidate {
-                text: c.text,
-                segmented: c.segmented,
-                score: c.score,
-                confidence: c.confidence,
-                max_rank: c.max_rank,
-                edge_count: c.edge_count,
-            })
-            .collect()
+        (result, pool_truncated)
     }
+
+    /// Turn one beam state into a sentence candidate scored to the end with an
+    /// EOS transition (port of `evaluateState`). Used for both the end-bucket
+    /// candidates and the incomplete-tail states merged into the evidence pool;
+    /// `segmented` is filled only for the visible candidates.
+    fn evaluate_state(&self, state: &Rc<SentenceState>) -> Completed {
+        let ending = self.model.logp(state.prev2, state.prev1, CP_EOS);
+        Completed {
+            score: state.score + ending,
+            confidence: state.mass.get() + ending,
+            text: state.text.clone(),
+            max_rank: state.max_rank.max(1),
+            edge_count: state.edge_count,
+            segmented: String::new(),
+            segmented_path: state.previous.as_ref().is_some_and(|p| p.raw_length > 0),
+            path: Rc::clone(state),
+        }
+    }
+
+    /// Build the early-commit evidence over the visible candidates plus the
+    /// intermediate states that sit on an incomplete code tail (port of
+    /// `buildEarlyCommitEvidence`). `buckets` holds every position the expand
+    /// pass reached; positions whose remaining keys are an incomplete code tail
+    /// contribute their partial states so a sentence whose last word is still
+    /// unfinished still yields prefix evidence.
+    fn build_early_commit_evidence(
+        &self,
+        raw: &[u8],
+        buckets: &mut [Option<Bucket>],
+        visible: &[Completed],
+        pool_truncated: bool,
+    ) -> EarlyEvidence {
+        let mut pool: Vec<Completed> =
+            visible.iter().filter(|c| !c.text.is_empty()).cloned().collect();
+        let mut merged_incomplete_tail = false;
+        let mut truncated = pool_truncated;
+
+        let maximum_tail_length = self
+            .lexicon
+            .max_code_length()
+            .saturating_sub(1)
+            .min(raw.len().saturating_sub(1));
+        for tail_length in 1..=maximum_tail_length {
+            let consumed = raw.len() - tail_length;
+            if !self.incomplete_code_tail(&raw[consumed..]) {
+                continue;
+            }
+            let Some(bucket) = buckets[consumed].as_ref() else { continue };
+            let partial = bucket.dedup(beam_limit_at(consumed), &state_better_score_first);
+            let partial_truncated = partial.truncated;
+            let mut added = false;
+            for state in &partial.items {
+                if state.text.is_empty() {
+                    continue;
+                }
+                pool.push(self.evaluate_state(state));
+                added = true;
+            }
+            if added {
+                merged_incomplete_tail = true;
+                if partial_truncated {
+                    truncated = true;
+                }
+            }
+        }
+
+        EarlyEvidence {
+            prefixes: build_prefix_evidence(&pool),
+            merged_incomplete_tail,
+            neutral_low_confidence: has_low_confidence_completed_generation(visible),
+            confidence_truncated: truncated,
+        }
+    }
+
+    /// Whether the remaining keys form an incomplete code tail: a letter string
+    /// that is a proper prefix of some code but not itself a full code, so a
+    /// word could still be forming there (port of `incompleteCodeTail`).
+    fn incomplete_code_tail(&self, tail: &[u8]) -> bool {
+        if tail.is_empty() || !has_letter(tail) {
+            return false;
+        }
+        let Ok(text) = std::str::from_utf8(tail) else {
+            return false;
+        };
+        if !self.lexicon.is_proper_prefix(text) {
+            return false;
+        }
+        text.chars().count() < 2 || self.lexicon.edges(text).is_none()
+    }
+}
+
+/// Posterior share of every `(text, raw boundary)` over the pool (port of
+/// `buildPrefixEvidence`). Weights are `exp(confidence − max)`; a candidate
+/// contributes its weight to every boundary on its path, so `share` is the
+/// prefix's total mass fraction and `boundary_share` the fraction of paths that
+/// end a word at exactly that raw length.
+fn build_prefix_evidence(pool: &[Completed]) -> Vec<PrefixEvidence> {
+    if pool.is_empty() {
+        return Vec::new();
+    }
+    let mut max_score = pool[0].confidence;
+    for candidate in pool.iter().skip(1) {
+        if candidate.confidence > max_score {
+            max_score = candidate.confidence;
+        }
+    }
+    let mut total = 0.0;
+    let weights: Vec<f64> = pool
+        .iter()
+        .map(|candidate| {
+            let weight = (candidate.confidence - max_score).exp();
+            total += weight;
+            weight
+        })
+        .collect();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+
+    struct Entry {
+        text: String,
+        raw_length: usize,
+        weight: f64,
+        chars: usize,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut index: HashMap<(usize, String), usize> = HashMap::new();
+    let mut boundary_mass: HashMap<usize, f64> = HashMap::new();
+
+    for (i, candidate) in pool.iter().enumerate() {
+        let weight = weights[i];
+        let mut node = Some(Rc::clone(&candidate.path));
+        while let Some(state) = node {
+            if !state.text.is_empty() {
+                let key = (state.raw_length, state.text.clone());
+                match index.get(&key) {
+                    Some(&existing) => entries[existing].weight += weight,
+                    None => {
+                        index.insert(key, entries.len());
+                        entries.push(Entry {
+                            text: state.text.clone(),
+                            raw_length: state.raw_length,
+                            weight,
+                            chars: state.text.chars().count(),
+                        });
+                    }
+                }
+                // The path's raw lengths strictly increase, so each boundary is
+                // counted once per candidate.
+                *boundary_mass.entry(state.raw_length).or_insert(0.0) += weight;
+            }
+            node = state.previous.clone();
+        }
+    }
+
+    entries
+        .into_iter()
+        .map(|entry| {
+            let boundary_share =
+                boundary_mass.get(&entry.raw_length).copied().unwrap_or(0.0) / total;
+            PrefixEvidence {
+                text: entry.text,
+                raw_length: entry.raw_length,
+                share: entry.weight / total,
+                boundary_share,
+                boundary_closed: boundary_share >= EARLY_COMMIT_CLOSED_BOUNDARY_SHARE,
+                text_char_count: entry.chars,
+            }
+        })
+        .collect()
+}
+
+/// Whether the visible generations are collectively low-confidence, i.e. even
+/// the best candidate carries less than [`EARLY_COMMIT_MINIMUM_SHARE`] of the
+/// posterior mass — a neutral point where evidence should pause, not advance
+/// (port of `hasLowConfidenceCompletedGeneration`).
+fn has_low_confidence_completed_generation(candidates: &[Completed]) -> bool {
+    let Some(first) = candidates.first() else {
+        return false;
+    };
+    let mut max_score = first.confidence;
+    for candidate in candidates.iter().skip(1) {
+        if candidate.confidence > max_score {
+            max_score = candidate.confidence;
+        }
+    }
+    let total: f64 =
+        candidates.iter().map(|candidate| (candidate.confidence - max_score).exp()).sum();
+    total > 0.0 && 1.0 / total < EARLY_COMMIT_MINIMUM_SHARE
 }
 
 /// ␣-joined code split behind a path (port of `segmentedFromPath`).
@@ -590,7 +855,7 @@ fn segmented_from_path(path: &Rc<SentenceState>, raw: &[u8]) -> String {
 /// Keep only the bytes a sentence code may contain: ASCII letters (case kept),
 /// `;`, `'`, and digits; spaces and tabs are dropped; any other character makes
 /// the whole input non-sentence (`None`).
-fn normalize(raw: &str) -> Option<Vec<u8>> {
+pub(crate) fn normalize(raw: &str) -> Option<Vec<u8>> {
     let mut bytes: Vec<u8> = Vec::with_capacity(raw.len());
     for ch in raw.chars() {
         let value = ch as u32;
@@ -611,8 +876,16 @@ fn normalize(raw: &str) -> Option<Vec<u8>> {
 }
 
 /// Whether the stream holds at least one letter (a bare `123;` is not a code).
-fn has_letter(raw: &[u8]) -> bool {
+pub(crate) fn has_letter(raw: &[u8]) -> bool {
     raw.iter().any(|b| b.is_ascii_alphabetic())
+}
+
+/// Whether the stream carries a rank-selection marker (`;`, `'`, or a digit).
+/// An explicit selection pins the word, so every rank is eligible for a fallback
+/// commit; without one only the table's first choice qualifies (port of Fire's
+/// `Selector.hasSelectionSuffix` / `containsSelector`).
+pub(crate) fn has_selection_suffix(raw: &[u8]) -> bool {
+    raw.iter().any(|&b| b == b';' || b == b'\'' || b.is_ascii_digit())
 }
 
 /// Stateless handle over the beam search. It holds no data; the model and graph
@@ -645,7 +918,43 @@ impl SentenceDecoder {
         let length = raw.len();
         let decoder = Decoder { model, lexicon };
         let mut buckets = decoder.build_buckets(&raw, allow_duplicate_single, context);
-        decoder.emit(&raw, &mut buckets, length, allow_duplicate_single)
+        let (completed, _pool_truncated) =
+            decoder.emit(&raw, &mut buckets, length, allow_duplicate_single);
+        completed.into_iter().map(candidate_of).collect()
+    }
+
+    /// Decode `raw_code` and also return the early-commit evidence the
+    /// probabilistic auto-commit consumes (port of Fire's `decode(...,
+    /// includeEarlyCommit: true)`). The candidate list is identical to
+    /// [`Self::decode`]; only the evidence is extra. Returns empty candidates
+    /// and default evidence for an unusable input.
+    #[must_use]
+    pub(crate) fn decode_with_evidence(
+        model: &NgramModel,
+        lexicon: &SentenceLexicon,
+        raw_code: &str,
+        context: &str,
+        allow_duplicate_single: bool,
+    ) -> SentenceDecode {
+        let unusable =
+            || SentenceDecode { candidates: Vec::new(), evidence: EarlyEvidence::default() };
+        let Some(raw) = normalize(raw_code) else {
+            return unusable();
+        };
+        if raw.is_empty() || !has_letter(&raw) || raw.len() > MAX_RAW_LENGTH {
+            return unusable();
+        }
+        let length = raw.len();
+        let decoder = Decoder { model, lexicon };
+        let mut buckets = decoder.build_buckets(&raw, allow_duplicate_single, context);
+        let (completed, pool_truncated) =
+            decoder.emit(&raw, &mut buckets, length, allow_duplicate_single);
+        let evidence =
+            decoder.build_early_commit_evidence(&raw, &mut buckets, &completed, pool_truncated);
+        SentenceDecode {
+            candidates: completed.into_iter().map(view_of).collect(),
+            evidence,
+        }
     }
 }
 
@@ -803,6 +1112,7 @@ mod tests {
             edge_count: 1,
             segmented: String::new(),
             segmented_path: true,
+            path: Rc::new(score_state(0.0)),
         };
         let first_choice = make(1.0, 1, "甲");
         let better_score_worse_rank = make(5.0, 3, "乙");

@@ -17,7 +17,7 @@
 
 use crate::config::{CodeType, Config};
 use crate::punct;
-use crate::sentence::config::MAX_RAW_LENGTH;
+use crate::sentence::config::max_raw_length;
 use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE};
 
 /// What the engine should do about one key.
@@ -94,9 +94,12 @@ impl Processor {
             // 形码整句: the key stream is one whole sentence, so it is capped
             // only by the decoder's own limit and never overflows — a further
             // letter extends the sentence, and selecting or Space commits it.
-            // The word-code cap and the overflow rule do not apply here.
+            // With auto-commit on the cap is the tighter `max_raw_length(true)`
+            // so the near-cap fallback commits a mature prefix before the key
+            // stream can leak; with it off the full manual cap applies. The
+            // word-code cap and the overflow rule do not apply here.
             if config.code_type == CodeType::XingmaSentence {
-                return if code.len() < MAX_RAW_LENGTH {
+                return if code.len() < max_raw_length(config.auto_commit) {
                     Action::AppendCode(byte)
                 } else {
                     Action::Noop
@@ -180,6 +183,7 @@ fn is_symbol_key(key: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sentence::config::{AUTO_COMMIT_MAX_RAW_LENGTH, MAX_RAW_LENGTH};
     use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
     const KEY_A: u32 = 97;
@@ -482,6 +486,7 @@ mod tests {
 
     /// The sentence code is capped at the decoder's own limit; letters past it
     /// are swallowed, matching how a word code treats letters over its cap.
+    /// Auto-commit off keeps the full manual cap.
     #[test]
     fn sentence_mode_caps_the_code_at_the_decoder_limit() {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
@@ -496,6 +501,36 @@ mod tests {
             Processor::decide(KEY_A, &full, 1, sentence),
             Action::Noop,
             "letters past the limit are swallowed"
+        );
+    }
+
+    /// With auto-commit on the cap drops to the tighter auto-commit limit, so
+    /// the near-cap fallback commits a mature prefix before a long code can
+    /// reach the manual cap (Fire `SentenceConfig.maxRawLength`).
+    #[test]
+    fn sentence_mode_caps_lower_with_auto_commit_on() {
+        let sentence = Config {
+            code_type: CodeType::XingmaSentence,
+            auto_commit: true,
+            ..Config::default()
+        };
+        let at_limit = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH - 1);
+        assert_eq!(
+            Processor::decide(KEY_A, &at_limit, 1, sentence),
+            Action::AppendCode(b'a'),
+            "the letter reaching the auto-commit cap is accepted"
+        );
+        let full = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH);
+        assert_eq!(
+            Processor::decide(KEY_A, &full, 1, sentence),
+            Action::Noop,
+            "letters past the auto-commit cap are swallowed"
+        );
+        // Well below the manual cap: a code the manual cap would still allow.
+        assert_eq!(
+            Processor::decide(KEY_A, &full, 1, Config { auto_commit: false, ..sentence }),
+            Action::AppendCode(b'a'),
+            "auto-commit off keeps extending past the 64-key cap"
         );
     }
 
