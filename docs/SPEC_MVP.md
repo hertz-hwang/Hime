@@ -48,14 +48,16 @@ pub struct Config {
     pub auto_commit: bool,        // 码长达到 auto_commit_length 且候选唯一时自动提交上屏
     pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效
     pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭
+    pub ascii_punct: u8,          // 标点输出：0 英文标点 / 1 中文标点，即 metadata 的 ascii_punct，JSON 里就是这个数字（非布尔）；sanitized() 把其它值钳到 1
 }
 ```
 
-- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`），未设置时行为与从前完全一致。
+- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
 - `Session::set_config` 会用新页长重建表管线并重取候选，编码输入中途改配置也能从下一次响应起生效。
+- `ascii_punct` 在 MVP 阶段只随配置存储与下发：§3 的按键模型尚未消费它，标点键行为不变（空闲时原样交给宿主的 app，编码中吞掉）；中文标点的转换行为留待后续实现。
 
 ## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
 按键语义集中在 `Processor::decide(key, code, candidate_count)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
@@ -116,6 +118,7 @@ pub struct Config {
 | `auto_commit` | 布尔 | 候选唯一且码长达标时自动上屏 | 是 |
 | `auto_commit_length` | 整数 | 自动上屏所需码长，`auto_commit` 关闭时无效 | 是 |
 | `commit_next_code` | 整数 | 顶码提交的码位 N，0 为关闭 | 是 |
+| `ascii_punct` | 0/1 | 标点输出：0 英文标点 / 1 中文标点，即 `Config.ascii_punct` | 是 |
 
 - 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改（`type` 除外：编码类型由方案决定，面板只读跟随）；切换方案时再按新方案的元数据重载默认值（`page_size` 不由方案定义，跨方案保留）。
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
