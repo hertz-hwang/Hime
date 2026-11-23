@@ -47,6 +47,12 @@ pub const KEY_ENTER: u32 = 13;
 pub const KEY_ESCAPE: u32 = 27;
 pub const KEY_SPACE: u32 = 32;
 
+/// Candidate paging keys (`SPEC_MVP` §3): `-` turns to the previous page,
+/// `=` to the next. They carry their own ASCII code (the shell forwards
+/// printable keys unchanged) and only take effect while a candidate is shown.
+pub const KEY_PAGE_UP: u32 = 45; // b'-'
+pub const KEY_PAGE_DOWN: u32 = 61; // b'='
+
 /// Default maximum length of a Xingma encoding (`Config::default`).
 pub const MAX_CODE_LEN: usize = 4;
 

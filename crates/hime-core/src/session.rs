@@ -16,6 +16,13 @@ use crate::processor::{Action, Processor};
 use crate::punct::{self, QuotePair};
 use crate::types::{Candidate, EngineResponse};
 
+/// Which way a paging key turns the candidate list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageDirection {
+    Previous,
+    Next,
+}
+
 /// One typing session. All typing state lives here; shells just render the
 /// [`EngineResponse`] they get back.
 #[derive(Debug)]
@@ -26,6 +33,14 @@ pub struct Session {
     config: Config,
     pipeline: Pipeline,
     input_buffer: String,
+    /// Every candidate for the encoding after the pipeline's filters: wider
+    /// than one page, so paging has somewhere to go.
+    window: Vec<Candidate>,
+    /// Zero-based index into the pages of `window`; resets to 0 whenever the
+    /// encoding changes. `candidates` is the page this selects.
+    page: usize,
+    /// The page `page` selects: the list the shell numbers 1.. and the one
+    /// `Processor` validates digits and the paging keys against.
     candidates: Vec<Candidate>,
     /// Quote pairing for 中文标点; deliberately survives [`Session::clear`]
     /// so a quote opened before a commit still closes after it.
@@ -43,12 +58,14 @@ impl Session {
     /// [`Config`]). Values outside the supported range are clamped.
     pub fn with_config(dict: Arc<Dictionary>, config: Config) -> Self {
         let config = config.sanitized();
-        let pipeline = Pipeline::table_with_page_size(Arc::clone(&dict), config.page_size);
+        let pipeline = Pipeline::table(Arc::clone(&dict));
         Self {
             dict: Some(dict),
             config,
             pipeline,
             input_buffer: String::new(),
+            window: Vec::new(),
+            page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
         }
@@ -62,6 +79,8 @@ impl Session {
             config: Config::default(),
             pipeline,
             input_buffer: String::new(),
+            window: Vec::new(),
+            page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
         }
@@ -78,21 +97,18 @@ impl Session {
     /// composition. Sessions built with [`Session::with_pipeline`] keep a
     /// custom chain they own; here the pipeline is the table chain again.
     pub fn set_dict(&mut self, dict: Arc<Dictionary>) {
-        self.pipeline = Pipeline::table_with_page_size(Arc::clone(&dict), self.config.page_size);
+        self.pipeline = Pipeline::table(Arc::clone(&dict));
         self.dict = Some(dict);
         self.clear();
     }
 
     /// Apply a new configuration while live. Out-of-range values are
-    /// clamped. The table pipeline is rebuilt for the new page size and the
-    /// candidate list is re-retrieved, so a change made mid-composition
-    /// takes effect on the next rendered response.
+    /// clamped. The retrieval chain no longer depends on the page size, so
+    /// only the page is re-cut for the new size (clamping the page cursor); a
+    /// change made mid-composition takes effect on the next rendered response.
     pub fn set_config(&mut self, config: Config) {
         self.config = config.sanitized();
-        if let Some(dict) = &self.dict {
-            self.pipeline = Pipeline::table_with_page_size(Arc::clone(dict), self.config.page_size);
-            self.refresh_candidates();
-        }
+        self.apply_page();
     }
 
     /// Feed one key (see the `KEY_*` constants and ASCII codes in
@@ -105,7 +121,10 @@ impl Session {
     /// releases, which keeps `handled: false` so the character reaches the
     /// host; unrecognized keys (letters over the cap, digits without a
     /// candidate behind them, any other key code) are swallowed as no-ops so
-    /// the host's Marked Text keeps running.
+    /// the host's Marked Text keeps running. The paging keys `-`/`=` are the
+    /// one page-control exception: while a candidate is shown they turn the
+    /// page and are always consumed, so the digits keep selecting inside
+    /// whichever page is currently rendered.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
         let decision = Processor::decide(key, &self.input_buffer, self.candidates.len(), self.config);
         match decision {
@@ -166,10 +185,18 @@ impl Session {
                     self.clear();
                     self.response(true, Some(commit))
                 }
-                // The list no longer has that entry; keep composing rather
-                // than commit the wrong text.
+                // The rendered page no longer has that entry; keep composing
+                // rather than commit the wrong text.
                 None => self.response(true, None),
             },
+            Action::PageUp => {
+                self.turn_page(PageDirection::Previous);
+                self.response(true, None)
+            }
+            Action::PageDown => {
+                self.turn_page(PageDirection::Next);
+                self.response(true, None)
+            }
         }
     }
 
@@ -202,16 +229,43 @@ impl Session {
         self.response(true, pending)
     }
 
+    /// Re-retrieve the whole candidate window for the current encoding and
+    /// show its first page: an encoding change always restarts at the top.
     fn refresh_candidates(&mut self) {
-        self.candidates = if self.input_buffer.is_empty() {
+        self.window = if self.input_buffer.is_empty() {
             Vec::new()
         } else {
             self.pipeline.retrieve(&self.input_buffer)
         };
+        self.page = 0;
+        self.apply_page();
+    }
+
+    /// Re-cut [`Self::candidates`] from [`Self::window`] for the current page,
+    /// clamping the page cursor into the range the window can offer.
+    fn apply_page(&mut self) {
+        let size = self.config.page_size;
+        let last_page = self.window.len().saturating_sub(1) / size;
+        self.page = self.page.min(last_page);
+        let start = self.page * size;
+        let end = (start + size).min(self.window.len());
+        self.candidates = self.window[start..end].to_vec();
+    }
+
+    /// Move the page cursor, clamped to the first and last page: turning past
+    /// an end holds on it, so the paging keys never leave the list.
+    fn turn_page(&mut self, direction: PageDirection) {
+        match direction {
+            PageDirection::Previous => self.page = self.page.saturating_sub(1),
+            PageDirection::Next => self.page = self.page.saturating_add(1),
+        }
+        self.apply_page();
     }
 
     fn clear(&mut self) {
         self.input_buffer.clear();
+        self.window.clear();
+        self.page = 0;
         self.candidates.clear();
     }
 
@@ -229,7 +283,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE, MAX_CODE_LEN};
+    use crate::{
+        KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE, MAX_CODE_LEN,
+        MAX_CANDIDATES,
+    };
 
     const SAMPLE: &str = "a\t工\t100\n\
                           a\t戈\t90\n\
@@ -556,7 +613,8 @@ mod tests {
     }
 
     /// A config pushed into a live session must reach the next response,
-    /// including one typed mid-composition.
+    /// including one typed mid-composition. Shrinking the page to 1 also
+    /// proves the paging keys follow the new page size.
     #[test]
     fn set_config_takes_effect_mid_composition() {
         let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
@@ -565,14 +623,111 @@ mod tests {
         assert_eq!(r.candidates.len(), 4);
 
         s.set_config(Config { page_size: 1, max_code_len: 1, ..Config::default() });
-        let r = s.process_key(b'-' as u32); // swallowed; only re-renders
-        assert_eq!(r.candidates.len(), 1);
-        assert_eq!(r.candidates[0].text, "工");
+        let r = s.process_key(KEY_PAGE_DOWN); // re-renders one page, then turns it
+        assert_eq!(r.candidates.len(), 1, "the new page size holds");
+        assert_eq!(r.candidates[0].text, "戈", "= turns to the next 1-candidate page");
+
+        let r = s.process_key(KEY_PAGE_UP);
+        assert_eq!(r.candidates[0].text, "工", "- turns back to the first page");
 
         let r = s.process_key(KEY_G);
         assert_eq!(r.preedit, "a", "the code cap of 1 swallows further letters");
         let r = s.process_key(KEY_1);
         assert_eq!(r.commit_text.as_deref(), Some("工"));
+    }
+
+    /// Paging walks the whole window: `-`/`=` move a page, the window resets
+    /// to the first page when the encoding changes, and turning past an end
+    /// holds there. The fixture is the shipped default scheme (琉璃v1), whose
+    /// `d` encoding returns far more candidates than one page.
+    #[test]
+    fn paging_walks_pages_and_digits_select_within_the_page() {
+        let dict = Arc::new(Dictionary::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/schemes/liuli_v1/liuli_table.txt"
+        ))
+        .expect("default scheme table must load"));
+        let mut s = Session::new(Arc::clone(&dict));
+
+        let first = s.process_key(b'd' as u32);
+        assert_eq!(first.candidates.len(), MAX_CANDIDATES, "the first page is full");
+        assert_eq!(first.candidates[0].text, "的", "琉璃v1 ranks 的 first behind d");
+
+        // Digits keep addressing the page the shell renders, never a later one.
+        assert_eq!(
+            s.process_key(KEY_2).commit_text.as_deref(),
+            Some(first.candidates[1].text.as_str())
+        );
+
+        let second = {
+            let mut t = Session::new(Arc::clone(&dict));
+            t.process_key(b'd' as u32);
+            t.process_key(KEY_PAGE_DOWN)
+        };
+        assert_eq!(second.candidates.len(), MAX_CANDIDATES, "the second page is full");
+        assert_eq!(second.preedit, "d", "paging leaves the encoding untouched");
+        assert_ne!(
+            second.candidates[0].text, first.candidates[0].text,
+            "page 2 shows different candidates"
+        );
+
+        // Paging past the first page then back returns to the first page.
+        let back = {
+            let mut t = Session::new(Arc::clone(&dict));
+            t.process_key(b'd' as u32);
+            t.process_key(KEY_PAGE_DOWN);
+            t.process_key(KEY_PAGE_UP)
+        };
+        assert_eq!(back.candidates, first.candidates, "- returns to the first page");
+
+        // `-` on the first page holds (the key is consumed, nothing moves).
+        let held_up = {
+            let mut t = Session::new(Arc::clone(&dict));
+            t.process_key(b'd' as u32);
+            t.process_key(KEY_PAGE_UP)
+        };
+        assert!(held_up.handled);
+        assert_eq!(held_up.candidates, first.candidates);
+    }
+
+    /// Paging resets to the first page when the encoding changes, so a
+    /// deeper page never survives an edit.
+    #[test]
+    fn paging_resets_when_the_encoding_changes() {
+        let dict = Arc::new(Dictionary::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/schemes/liuli_v1/liuli_table.txt"
+        ))
+        .expect("default scheme table must load"));
+
+        // The page "d" shows on entry, for the final comparison.
+        let d_first_page = Session::new(Arc::clone(&dict)).process_key(b'd' as u32).candidates;
+
+        let mut s = Session::new(dict);
+        s.process_key(b'd' as u32);
+        let dd_first = s.process_key(b'd' as u32); // "dd", first page
+        let dd_second = s.process_key(KEY_PAGE_DOWN);
+        assert_eq!(dd_second.preedit, "dd");
+        assert_ne!(dd_second.candidates, dd_first.candidates, "turning changes the page");
+
+        // Backspace re-retrieves and must land on the first page of "d", not
+        // the page the deeper encoding was left on.
+        let r = s.process_key(KEY_BACKSPACE); // back to "d"
+        assert_eq!(r.preedit, "d");
+        assert_eq!(r.candidates, d_first_page, "editing resets to page 1");
+    }
+
+    /// Without a candidate to page through, `-`/`=` release to the host in
+    /// English mode instead of being consumed as page keys.
+    #[test]
+    fn paging_keys_pass_through_without_candidates() {
+        let mut s = session();
+        s.process_key(KEY_Q); // "q" has no candidate in the sample
+        for key in [KEY_PAGE_UP, KEY_PAGE_DOWN] {
+            let r = s.process_key(key);
+            assert!(!r.handled, "key {key} with no candidate must reach the host");
+            assert_eq!(r.preedit, "q", "the composition stands");
+        }
     }
 
     /// Switching lexicons (a scheme change) replaces the candidates and

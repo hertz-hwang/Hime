@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use crate::dictionary::Dictionary;
-use crate::filter::{DedupFilter, Filter, LimitFilter};
+use crate::filter::{DedupFilter, Filter};
 use crate::translator::{TableTranslator, Translator};
 use crate::types::Candidate;
-use crate::{FETCH_CANDIDATES, MAX_CANDIDATES};
+use crate::FETCH_CANDIDATES;
 
 /// The configured translator and filter chain.
 pub struct Pipeline {
@@ -34,29 +34,23 @@ impl Pipeline {
     ///
     /// Translators are asked in order and their reports are concatenated in
     /// that order, so a later `PinyinTranslator` sits beside the table source
-    /// and a filter can interleave the two. The last filter is responsible for
-    /// cutting the list to one page; [`Pipeline::table`] does that with
-    /// [`LimitFilter`].
+    /// and a filter can interleave the two. The chain returns the whole
+    /// retrieved window; cutting it into pages and paging through them is the
+    /// caller's job ([`Session`](crate::session::Session)), so a chain can add
+    /// or reorder candidates without any page-boundary awareness.
     pub fn new(translators: Vec<Box<dyn Translator>>, filters: Vec<Box<dyn Filter>>) -> Self {
         Self { translators, filters }
     }
 
-    /// The MVP chain: one 形码 table source, then de-duplicate, then cut the
-    /// page to the default size.
+    /// The MVP chain: one 形码 table source, then de-duplicate. Each translator
+    /// is asked for [`FETCH_CANDIDATES`] entries, so the window spans more than
+    /// one page and [`Session`](crate::session::Session) can page through it.
     pub fn table(dict: Arc<Dictionary>) -> Self {
-        Self::table_with_page_size(dict, MAX_CANDIDATES)
+        Self::new(vec![Box::new(TableTranslator::new(dict))], vec![Box::new(DedupFilter)])
     }
 
-    /// The MVP chain cut to `page_size` candidates (see
-    /// [`crate::Config::page_size`]).
-    pub fn table_with_page_size(dict: Arc<Dictionary>, page_size: usize) -> Self {
-        Self::new(
-            vec![Box::new(TableTranslator::new(dict))],
-            vec![Box::new(DedupFilter), Box::new(LimitFilter::new(page_size))],
-        )
-    }
-
-    /// Candidates for `code`, ready to render.
+    /// The full candidate window for `code`, best first: every match the
+    /// translators report after the filters run, wider than one page.
     pub fn retrieve(&self, code: &str) -> Vec<Candidate> {
         let merged: Vec<Candidate> = self
             .translators
@@ -74,7 +68,7 @@ mod tests {
     use super::*;
     use crate::filter::Filter;
     use crate::translator::Translator;
-    use crate::MAX_CANDIDATES;
+    use crate::{FETCH_CANDIDATES, MAX_CANDIDATES};
 
     fn dict(rows: &str) -> Arc<Dictionary> {
         Arc::new(Dictionary::parse_str(rows).expect("rows parse"))
@@ -108,9 +102,10 @@ mod tests {
     }
 
     /// The shipped sample maps `工` to `a`, `aaa` and `aaaa`, so the raw window
-    /// holds it three times. A page must still be full and free of repeats.
+    /// holds it three times. The window must be free of repeats yet still span
+    /// more than one page, so `Session` can page through it.
     #[test]
-    fn table_chain_returns_a_full_page_without_repeats() {
+    fn table_chain_returns_the_whole_window_without_repeats() {
         let pipeline = Pipeline::table(dict(concat!(
             "a\t工\t100\n",
             "a\t戈\t90\n",
@@ -120,9 +115,21 @@ mod tests {
             "aaaa\t㠭\t80\n",
             "ad\t匿\t100\n",
         )));
-        let page = pipeline.retrieve("a");
-        assert_eq!(texts(&page), vec!["工", "戈", "式", "匿", "㠭"]);
-        assert!(page.len() <= MAX_CANDIDATES);
+        let window = pipeline.retrieve("a");
+        assert_eq!(texts(&window), vec!["工", "戈", "式", "匿", "㠭"]);
+        assert!(window.len() <= FETCH_CANDIDATES);
+    }
+
+    /// The chain no longer cuts to a page: it hands back every match, wider
+    /// than the default page, and the caller does the page slicing.
+    #[test]
+    fn retrieve_spans_more_than_one_page() {
+        let rows: String = (0..12)
+            .map(|i| format!("a\t字{i}\t{}\n", 100 - i))
+            .collect();
+        let window = Pipeline::table(dict(&rows)).retrieve("a");
+        assert_eq!(window.len(), 12, "every distinct match survives to the caller");
+        assert!(window.len() > MAX_CANDIDATES, "wider than one page");
     }
 
     #[test]
