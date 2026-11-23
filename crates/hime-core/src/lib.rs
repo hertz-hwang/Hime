@@ -27,7 +27,7 @@ pub mod session;
 pub mod translator;
 pub mod types;
 
-pub use dictionary::Dictionary;
+pub use dictionary::{Dictionary, TableFormat};
 pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use pipeline::Pipeline;
 pub use processor::{Action, Processor};
