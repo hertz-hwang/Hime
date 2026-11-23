@@ -36,7 +36,7 @@ pub struct EngineResponse {
 ```
 
 ### 2.3 引擎配置 (`Config` - `hime_core::config`)
-首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义与截断候选页时读取它。除 `page_size` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。
+首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义与截断候选页时读取它。除 `page_size` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。其中 `code_type` 是方案的固有属性，面板只读展示，用户不可改。
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +44,7 @@ pub struct EngineResponse {
 pub struct Config {
     pub page_size: usize,         // 每页候选数，也是选词数字键 1..=N 的数量（1..=9）；方案不定义它，切换方案时保留
     pub max_code_len: usize,      // 单条编码最长字母数（1..=16），即 metadata 的 max_code
-    pub code_type: CodeType,      // 编码类型，即 metadata 的 type：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，JSON 里就是这个数字
+    pub code_type: CodeType,      // 编码类型，即 metadata 的 type：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，JSON 里就是这个数字；面板只读
     pub auto_commit: bool,        // 码长达到 auto_commit_length 且候选唯一时自动提交上屏
     pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效
     pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭
@@ -111,13 +111,13 @@ pub struct Config {
 | `name` | 字符串 | 方案码表名称（空白时取文件夹名），供「方案码表」选框显示 | 否（只读） |
 | `describe` | 字符串 | 方案描述 | 否（只读） |
 | `author` | 字符串 | 作者 | 否（只读） |
-| `type` | 0/1/2/3 | 编码类型：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，即 `Config.code_type`，供「编码类型」选框 | 是 |
+| `type` | 0/1/2/3 | 编码类型：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，即 `Config.code_type`，供「编码类型」只读展示 | 否（只读） |
 | `max_code` | 整数 | 码表最大码长，即 `Config.max_code_len` | 是 |
 | `auto_commit` | 布尔 | 候选唯一且码长达标时自动上屏 | 是 |
 | `auto_commit_length` | 整数 | 自动上屏所需码长，`auto_commit` 关闭时无效 | 是 |
 | `commit_next_code` | 整数 | 顶码提交的码位 N，0 为关闭 | 是 |
 
-- 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改；切换方案时再按新方案的元数据重载默认值（`page_size` 不由方案定义，跨方案保留）。
+- 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改（`type` 除外：编码类型由方案决定，面板只读跟随）；切换方案时再按新方案的元数据重载默认值（`page_size` 不由方案定义，跨方案保留）。
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
 - `scan_schemes(dir)` 按文件夹名排序扫描，目录不可读返回空表；缺 `metadata.toml` 的普通子文件夹不算方案，单个文件夹坏了记 stderr 跳过，不拖累其余。`load_scheme(dir)` 读取单个文件夹。对外壳的接口见 §6。
 
