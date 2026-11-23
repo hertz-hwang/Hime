@@ -5,7 +5,7 @@ use std::ffi::{CStr, CString};
 
 use hime_ffi::{
     hime_create_session, hime_destroy_session, hime_free_string, hime_get_config, hime_init,
-    hime_process_key, hime_set_config,
+    hime_process_key, hime_scan_schemes, hime_select_scheme, hime_set_config,
 };
 
 const KEY_A: u32 = 97;
@@ -36,6 +36,25 @@ fn get_config() -> serde_json::Value {
     let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
     unsafe { hime_free_string(ptr) };
     serde_json::from_str(&json).expect("config is valid JSON")
+}
+
+fn schemes_root() -> CString {
+    CString::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/schemes")).unwrap()
+}
+
+/// Call hime_scan_schemes and parse the JSON array it returns.
+fn scan_schemes(dir: &CStr) -> Vec<serde_json::Value> {
+    let ptr = unsafe { hime_scan_schemes(dir.as_ptr()) };
+    assert!(!ptr.is_null(), "hime_scan_schemes returned null");
+    let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+    unsafe { hime_free_string(ptr) };
+    serde_json::from_str(&json).expect("scheme list is valid JSON")
+}
+
+/// Call hime_select_scheme with a folder path, returning the status.
+fn select_scheme(path: &str) -> bool {
+    let c = CString::new(path).unwrap();
+    unsafe { hime_select_scheme(c.as_ptr()) }
 }
 
 /// Call hime_set_config with a JSON object, returning the status.
@@ -115,7 +134,7 @@ fn full_flow_through_c_abi() {
     assert_eq!(r["commit_text"], "戈", "digit 2 still selects within the smaller page");
 
     // The code-length cap follows the config: a 4th letter is swallowed.
-    for key in [b'a', b'b', b'c'] {
+    for key in *b"abc" {
         process(live, u32::from(key));
     }
     assert_eq!(process(live, b'd' as u32)["preedit"], "abc", "cap of 3 letters");
@@ -127,4 +146,45 @@ fn full_flow_through_c_abi() {
     assert_eq!(get_config()["max_code_len"], 1);
     assert!(set_config(r#"{"page_size":5,"max_code_len":4}"#));
     assert_eq!(get_config()["page_size"], 5);
+
+    // --- schemes: discovery (hime_scan_schemes) and selection ---
+
+    let schemes = scan_schemes(&schemes_root());
+    let liuli = schemes
+        .iter()
+        .find(|s| s["dir"] == "liuli_v1")
+        .expect("the shipped scheme is discovered");
+    assert_eq!(liuli["name"], "琉璃字词");
+    assert_eq!(liuli["type"], 2);
+    assert_eq!(liuli["max_code"], 4);
+    assert_eq!(liuli["auto_commit"], false);
+    assert_eq!(liuli["auto_commit_length"], 4);
+    assert_eq!(liuli["commit_next_code"], 5);
+
+    let unreadable = CString::new("/nonexistent/schemes-dir").unwrap();
+    assert!(scan_schemes(&unreadable).is_empty(), "an unreadable dir lists nothing");
+
+    // Switching while a live session is composing keeps the id, drops the
+    // composition, and replaces the config with the scheme defaults.
+    let live = hime_create_session();
+    process(live, KEY_A);
+    assert!(select_scheme(liuli["path"].as_str().unwrap()));
+
+    let cfg = get_config();
+    assert_eq!(cfg["page_size"], 5, "page size survives a scheme switch");
+    assert_eq!(cfg["max_code_len"], 4);
+    assert_eq!(cfg["code_type"], 2, "metadata type 2 = 形码");
+    assert_eq!(cfg["auto_commit_length"], 4);
+    assert_eq!(cfg["commit_next_code"], 5, "the metadata overflow rule is live");
+
+    // The session is idle (composition dropped) and answers from the 琉璃 table.
+    let r = process(live, KEY_SPACE);
+    assert_eq!(r["handled"], false, "the switch cleared the composition");
+    let r = process(live, b'd' as u32);
+    assert_eq!(r["candidates"][0]["text"], "的");
+    hime_destroy_session(live);
+
+    // A folder that is not a scheme leaves the engine untouched.
+    assert!(!select_scheme("/nonexistent/scheme-folder"));
+    assert_eq!(get_config()["commit_next_code"], 5);
 }

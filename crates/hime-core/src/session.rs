@@ -67,6 +67,16 @@ impl Session {
         self.config
     }
 
+    /// Switch to another lexicon (a scheme change): rebuilds the table
+    /// pipeline under the current config and drops the in-progress
+    /// composition. Sessions built with [`Session::with_pipeline`] keep a
+    /// custom chain they own; here the pipeline is the table chain again.
+    pub fn set_dict(&mut self, dict: Arc<Dictionary>) {
+        self.pipeline = Pipeline::table_with_page_size(Arc::clone(&dict), self.config.page_size);
+        self.dict = Some(dict);
+        self.clear();
+    }
+
     /// Apply a new configuration while live. Out-of-range values are
     /// clamped. The table pipeline is rebuilt for the new page size and the
     /// candidate list is re-retrieved, so a change made mid-composition
@@ -526,6 +536,19 @@ mod tests {
         assert_eq!(r.preedit, "a", "the code cap of 1 swallows further letters");
         let r = s.process_key(KEY_1);
         assert_eq!(r.commit_text.as_deref(), Some("工"));
+    }
+
+    /// Switching lexicons (a scheme change) replaces the candidates and
+    /// drops the in-progress composition, never showing stale entries.
+    #[test]
+    fn set_dict_swaps_the_lexicon_and_clears_the_composition() {
+        let mut s = Session::new(Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses")));
+        s.process_key(KEY_A);
+        s.set_dict(Arc::new(Dictionary::parse_str("a\t乙\t100\n").expect("sample parses")));
+        // The composition was discarded, so idle keys pass through again.
+        assert!(!s.process_key(KEY_SPACE).handled);
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.candidates[0].text, "乙", "the new lexicon answers");
     }
 
     /// Clamping protects typing from a broken stored value: the session
