@@ -28,7 +28,8 @@
    - 重写 `override func handle(_ event: NSEvent!, client sender: Any!) -> Bool`。
    - 仅处理 `event.type == .keyDown`。
    - 若包含 `.command` 或 `.control` 修饰键，直接返回 `false`。
-   - 将 `event.keyCode` / `event.characters` 映射为 `SPEC_MVP.md` 中定义的 ASCII 码（注意 macOS Virtual KeyCode：`36`->Enter(13), `49`->Space(32), `51`->Backspace(8), `53`->Escape(27)）。
+   - 映射为 `SPEC_MVP.md` 定义的 ASCII 码：四个特殊 keyCode 为 `36`->Enter(13)、`49`->Space(32)、`51`->Backspace(8)、`53`->Escape(27)；字母取 `charactersIgnoringModifiers` 的首字符，大写折成小写；其余可打印键取 `characters` 的首字符（最终字符，数字 49-57 与可打印符号 33-126 都走这一支），于是 `?`、`!`、`:`、`"` 这类上档符号以其自身的码进入引擎（SPEC_MVP §2.1/§3.1）；仍取不到可打印字符的键（Option 组合等）返回 `false` 交给宿主。
+   - 引擎返回 `handled: false` 时 `handle` 同样返回 `false`，按键直接落入宿主正文（空闲普通键与标点模式放行的符号，SPEC_MVP §3.1），组字状态与 Marked Text 不受影响。
 5. **渲染响应 (`EngineResponse`)**：
    - 调用 `hime_process_key` 解析 JSON。
    - 若 `commit_text` 非空，调用 `client.insertText(commitText, replacementRange: NSRange(location: NSNotFound, length: NSNotFound))`。

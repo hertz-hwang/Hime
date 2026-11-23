@@ -12,6 +12,7 @@
 使用统一的 ASCII 或虚拟键码表示：
 - 普通小写字母：`a`-`z` (ASCII 97-122)
 - 数字键：`1`-`9` (ASCII 49-57)
+- 标点键：按其最终字符的 ASCII 码（33-126）送入；带 Shift 的符号（`?`、`!`、`:`、`"`）就是它们自己的码，见 §3.1
 - 控制键常量：
   - `KEY_BACKSPACE = 8`
   - `KEY_ENTER = 13`
@@ -57,15 +58,16 @@ pub struct Config {
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
 - `Session::set_config` 会用新页长重建表管线并重取候选，编码输入中途改配置也能从下一次响应起生效。
-- `ascii_punct` 在 MVP 阶段只随配置存储与下发：§3 的按键模型尚未消费它，标点键行为不变（空闲时原样交给宿主的 app，编码中吞掉）；中文标点的转换行为留待后续实现。
+- `ascii_punct` 由 §3 的按键模型消费：`0` 英文标点，可打印符号全部原样放行给宿主；`1` 中文标点，标点映射表（§3.1）内的键被引擎拦截并输出全角文字，表外符号仍然放行。
 
 ## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
-按键语义集中在 `Processor::decide(key, code, candidate_count)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
+按键语义集中在 `Processor::decide(key, code, candidate_count, config)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
 1. **当 `input_buffer` 为空时（空闲状态）**：
    - 输入 `a`-`z`：追加到 `input_buffer`，查词库更新 `preedit` 和 `candidates`，返回 `handled: true`。
-   - 输入其他任何键（包括 Space, Backspace, Enter, 1-9）：输入法不拦截，返回 `handled: false`。
+   - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：对应中文标点直接进 `commit_text`，状态保持空闲，返回 `handled: true`（引号按开/闭交替，见 §3.1）。
+   - 输入其他任何键（包括 Space, Backspace, Enter, 1-9，以及任何模式下的表外可打印符号）：输入法不拦截，返回 `handled: false`。
 
 2. **当 `input_buffer` 不为空时（编码输入状态）**：
    - 输入 `a`-`z`（且长度 < `max_code_len`，默认 4，见 §2.3）：追加到 `input_buffer`，重新检索词库，返回 `handled: true`。
@@ -76,7 +78,26 @@ pub struct Config {
    - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
    - 输入 `1`-`N`（`N` = `page_size`，默认 5）：若对应索引（0 起）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
+   - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：第 1 候选（无候选则把已编码字母原样）拼接对应中文标点进 `commit_text`，清空状态，返回 `handled: true`。
+   - 两个模式共同：表外的可打印符号键放行，返回 `handled: false`，组字状态原样保留——宿主把符号直接插入正文，内嵌预编辑继续站立，后续按键照常回到引擎续编。这是「编码态每个键都被拦截」契约唯一的例外。
    - 其他任何按键（含超出码长限制的 `a`-`z`、对应索引无候选词或超出页长的数字、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
+
+### 3.1 标点键（`punct`，`Config.ascii_punct`）
+标点映射与引号配对在 `hime-core::punct`；`Processor` 依 `ascii_punct` 决定拦截或放行（§3），`Session` 执行提交并持有引号配对状态。
+
+- **英文标点（`ascii_punct = 0`）**：引擎不认领任何标点，可打印符号在空闲与编码态一律放行（返回 `handled: false`），宿主直接插入半角字符。
+- **中文标点（`ascii_punct = 1`）**：下表内的键由引擎拦截并输出全角文字（空闲直接进 `commit_text`；编码态先提交第 1 候选再拼接标点，见 §3），表外符号仍放行。匹配按键自身的 ASCII 码，与上档组合无关——`?`（63）本身就是表键。
+
+| 键 | 输出 | 键 | 输出 | 键 | 输出 | 键 | 输出 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `,` | `，` | `.` | `。` | `;` | `；` | `:` | `：` |
+| `?` | `？` | `!` | `！` | `(` | `（` | `)` | `）` |
+| `[` | `【` | `]` | `】` | `<` | `《` | `>` | `》` |
+| `/` | `、` | `-` | `——` | `~` | `……` | `` ` `` | `·` |
+| `'` | `‘` 与 `’` 交替 | `"` | `“` 与 `”` 交替 | | | | |
+
+- 每个映射都是固定字符串（`-` 出 `——`、`~` 出 `……`，各占两个码位），无需检索。
+- **引号配对**：`'` 与 `"` 首次输出开引号，此后按开→闭→开交替，两种引号各自独立计数。配对状态由 `Session` 持有，提交与清空编码不重置它（中途放弃编码不会让下一枚引号退回开引号），会话销毁才复位：段首 `"` 出 `“`，提交候选后再按 `"` 出 `”`。
 
 ## 4. 检索管线 (`Pipeline`：Translator → Filter)
 「编码进、候选页出」这一步必须是可扩展的三段管线，全拼/双拼才能作为新数据源接入而不改动状态机。
