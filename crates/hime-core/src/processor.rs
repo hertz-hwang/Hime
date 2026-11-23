@@ -1,4 +1,4 @@
-//! Key interpretation (SPEC_MVP §3).
+//! Key interpretation (SPEC §3).
 //!
 //! [`Processor`] is the single place that decides what a key *means*: append
 //! to the encoding, delete from it, pick a candidate, abandon the composition,

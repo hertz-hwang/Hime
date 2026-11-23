@@ -1,4 +1,4 @@
-//! Data types crossing the engine/shell boundary (SPEC_MVP §2.2).
+//! Data types crossing the engine/shell boundary (SPEC §2.2).
 
 use serde::{Deserialize, Serialize};
 

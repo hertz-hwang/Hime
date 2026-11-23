@@ -2,7 +2,7 @@
  *
  * Rust implementation: crates/hime-ffi (staticlib, libhime_ffi.a).
  * All structured data crosses this boundary as JSON strings; see
- * docs/SPEC_MVP.md §6.
+ * docs/SPEC.md §6.
  *
  * Threading: every function is safe to call from any thread; Rust guards
  * the engine with a mutex.
@@ -46,7 +46,7 @@ void hime_destroy_session(uint64_t session_id);
 /* Process one keystroke. Returns a NUL-terminated JSON string describing the
  * EngineResponse (fields: handled, commit_text, preedit, candidates), or NULL
  * on unknown session / uninitialized engine. modifiers is reserved and
- * ignored in the MVP. handled is false when the engine leaves the key to the
+ * ignored. handled is false when the engine leaves the key to the
  * host, which happens for idle ordinary keys and, in punctuation mode, for
  * punctuation the mapping does not claim. The caller must release the string
  * with hime_free_string. */

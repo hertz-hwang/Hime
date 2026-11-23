@@ -1,4 +1,4 @@
-# Hime MVP 技术规格书 (SPEC)
+# Hime 技术规格书 (SPEC)
 
 ## 1. Cargo Workspace 结构
 根 `Cargo.toml` 包含三个 crate：
@@ -25,7 +25,7 @@
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Candidate {
     pub text: String,    // 候选词文字，如 "工"
-    pub comment: String, // 编码提示（如后续编码补全提示），MVP 可为空字符串
+    pub comment: String, // 编码提示（如后续编码补全提示），当前可为空字符串
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,7 +61,7 @@ pub struct Config {
 - `Session::set_config` 只按新页长重切当前页（页码夹进新范围），不再重建检索链或重取候选——页长只影响切页，编码输入中途改配置也从下一次响应起生效。
 - `ascii_punct` 由 §3 的按键模型消费：`0` 英文标点，可打印符号全部原样放行给宿主；`1` 中文标点，标点映射表（§3.1）内的键被引擎拦截并输出该键的映射文字，表外符号仍然放行。
 
-## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
+## 3. 形码状态机逻辑 (`Session::process_key`)
 按键语义集中在 `Processor::decide(key, code, candidate_count, config)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。翻页（page）由 `Processor` 发 `PageUp`/`PageDown`、由 `Session` 维护页码，不动编码缓冲（详见 §3「翻页」条）。
 `candidate_count` 传入的是**当前页**渲染的候选数，因此数字键始终只选中当前页上的词，`-`/`=` 的「有候选」判据也只看当前页是否为空。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
@@ -112,7 +112,7 @@ pub struct Config {
 「编码进、候选窗口出」这一步必须是可扩展的管线，全拼/双拼才能作为新数据源接入而不改动状态机。管线交回的窗口宽于一页，切页与翻页由 `Session` 负责（§4.3）。
 
 ### 4.1 角色分工
-| 角色 | 职责 | MVP 实现 | 后续扩展 |
+| 角色 | 职责 | 当前实现 | 后续扩展 |
 | --- | --- | --- | --- |
 | `Processor` | 读按键 + 当前编码 + 当前候选数（当前页），决定追加编码、删码、选词、翻页、放弃、No-op 还是放行给系统 | `Processor::decide` → `Action`（含 `PageUp`/`PageDown`，见 §3） | 自定义翻页键 |
 | `Translator` | 把编码转换成候选词，按检索优先级上报，不做取舍 | `TableTranslator`（形码查表，包装 `Dictionary`） | `PinyinTranslator`（全拼/双拼，走音节图搜索） |

@@ -1,4 +1,4 @@
-//! The retrieval pipeline: translators, then filters (SPEC_MVP §4).
+//! The retrieval pipeline: translators, then filters (SPEC §4).
 //!
 //! [`Pipeline`] is the whole "encoding in, page of candidates out" step. It
 //! keeps no typing state — [`Session`](crate::session::Session) owns the
@@ -42,7 +42,7 @@ impl Pipeline {
         Self { translators, filters }
     }
 
-    /// The MVP chain: one 形码 table source, then de-duplicate. Each translator
+    /// The default chain: one 形码 table source, then de-duplicate. Each translator
     /// is asked for [`FETCH_CANDIDATES`] entries, so the window spans more than
     /// one page and [`Session`](crate::session::Session) can page through it.
     pub fn table(dict: Arc<Dictionary>) -> Self {

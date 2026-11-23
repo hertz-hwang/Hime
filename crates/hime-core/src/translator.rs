@@ -1,7 +1,7 @@
-//! Encoding to candidate retrieval (SPEC_MVP §4).
+//! Encoding to candidate retrieval (SPEC §4).
 //!
 //! A [`Translator`] turns the encoding typed so far into candidates. This is
-//! the main extension point of the engine: MVP ships [`TableTranslator`],
+//! the main extension point of the engine: it ships [`TableTranslator`],
 //! which queries the TSV lexicon; a later `PinyinTranslator` will walk a
 //! full/pinyin-syllable graph instead. Translators report raw matches in
 //! retrieval-priority order and drop nothing — dropping, reordering and

@@ -8,7 +8,7 @@
 
 ## 2. Development Workflow
 - Whenever the logic in `hime-core` is modified, you must also update the tests or run `cargo test`.
-- Keep the code as simple as possible (following the KISS principle); for the MVP phase, avoid introducing asynchronous runtimes (such as Tokio), and rely entirely on synchronous pure functions and explicit state machines.
+- Keep the code as simple as possible (following the KISS principle); avoid introducing asynchronous runtimes (such as Tokio), and rely entirely on synchronous pure functions and explicit state machines.
 
 ## Git (hard rule)
 

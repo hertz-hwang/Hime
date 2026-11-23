@@ -1,4 +1,4 @@
-//! Engine configuration (SPEC_MVP §2.3).
+//! Engine configuration (SPEC §2.3).
 //!
 //! [`Config`] carries the knobs the user can change from the preferences
 //! window; a selected scheme supplies its defaults from `metadata.toml`
@@ -29,7 +29,7 @@ pub enum CodeType {
     Quanpin,
     /// 双拼: one key per initial and final.
     Shuangpin,
-    /// 形码: shape (grapheme) codes; the MVP retrieval source is a table.
+    /// 形码: shape (grapheme) codes; the retrieval source is a table.
     Xingma,
     /// 形码整句: shape codes covering whole sentences.
     XingmaSentence,
@@ -84,7 +84,7 @@ pub struct Config {
     /// Maximum letters in one encoding.
     pub max_code_len: usize,
     /// How encodings are read; selects the candidate sources a future
-    /// pipeline wires up (MVP retrieves from the table either way).
+    /// pipeline wires up (the engine retrieves from the table either way).
     pub code_type: CodeType,
     /// Commit automatically once [`Self::auto_commit_length`] letters are
     /// typed and the candidate list holds exactly one entry.
@@ -142,7 +142,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.page_size, MAX_CANDIDATES);
         assert_eq!(config.max_code_len, MAX_CODE_LEN);
-        assert_eq!(config.code_type, CodeType::Xingma, "the MVP retrieves a 形码 table");
+        assert_eq!(config.code_type, CodeType::Xingma, "the engine retrieves a 形码 table");
         assert!(!config.auto_commit);
         assert_eq!(config.auto_commit_length, MAX_CODE_LEN);
         assert_eq!(config.commit_next_code, 0, "overflow commit is off by default");

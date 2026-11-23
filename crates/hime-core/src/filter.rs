@@ -1,4 +1,4 @@
-//! Candidate post-processing (SPEC_MVP §4).
+//! Candidate post-processing (SPEC §4).
 //!
 //! Filters run once, in registration order, after every translator has
 //! reported, so each one sees the merged cross-source list. This is where

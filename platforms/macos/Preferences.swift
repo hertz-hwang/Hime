@@ -18,7 +18,7 @@ import Cocoa
 import Combine
 import SwiftUI
 
-/// Mirror of hime-core's `Config` JSON (SPEC_MVP §2.3).
+/// Mirror of hime-core's `Config` JSON (SPEC §2.3).
 private struct EngineConfig: Codable, Equatable {
     var pageSize: Int
     var maxCodeLen: Int
@@ -39,7 +39,7 @@ private struct EngineConfig: Codable, Equatable {
     }
 }
 
-/// One entry of the `hime_scan_schemes` JSON array (SPEC_MVP §6). Only the
+/// One entry of the `hime_scan_schemes` JSON array (SPEC §6). Only the
 /// fields the panel displays are decoded; unknown keys are ignored.
 /// Internal (not private) because the internal model exposes it.
 struct SchemeInfo: Codable, Identifiable, Equatable {
@@ -91,7 +91,7 @@ final class PreferencesModel: ObservableObject {
     /// Point size of the IMKCandidates text; applied at render time.
     @Published var candidateFontSize: Double { didSet { persist() } }
 
-    /// Engine ranges (SPEC_MVP §2.3); the steppers cannot leave them.
+    /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
     static let maxCodeLenRange = 1...16
     static let autoCommitLengthRange = 1...16

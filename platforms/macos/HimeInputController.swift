@@ -7,7 +7,7 @@
 import Cocoa
 import InputMethodKit
 
-// JSON mirror of hime-core's EngineResponse (SPEC_MVP §2.2).
+// JSON mirror of hime-core's EngineResponse (SPEC §2.2).
 private struct Candidate: Decodable {
     let text: String
     let comment: String
@@ -29,7 +29,7 @@ private struct EngineResponse: Decodable {
 
 @objc(HimeInputController)
 final class HimeInputController: IMKInputController {
-    /// ASCII codes the engine maps onto candidate indexes 0-4 (SPEC_MVP §3:
+    /// ASCII codes the engine maps onto candidate indexes 0-4 (SPEC §3:
     /// digits `1`-`5` select candidates 0-4). The engine caps the list at 5.
     private let digitKeyCode: [UInt32] = [49, 50, 51, 52, 53]
 
@@ -63,7 +63,7 @@ final class HimeInputController: IMKInputController {
     }
 
     /// Maps a macOS virtual key code / character to the ASCII key code
-    /// accepted by hime_process_key (SPEC_MVP §2.1). Nil = unmapped.
+    /// accepted by hime_process_key (SPEC §2.1). Nil = unmapped.
     private func mappedKeyCode(for event: NSEvent) -> UInt32? {
         switch event.keyCode {
         case 36: return UInt32(HIME_KEY_ENTER)      // Return

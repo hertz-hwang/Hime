@@ -1,4 +1,4 @@
-//! Dictionary loading and table lookup (SPEC_MVP §5).
+//! Dictionary loading and table lookup (SPEC §5).
 //!
 //! Two lexicon row formats are recognized, detected from the column count of
 //! the first data row:

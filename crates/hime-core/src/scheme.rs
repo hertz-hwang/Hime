@@ -1,5 +1,5 @@
 //! Input schemes: the `metadata.toml` beside each table and the discovery of
-//! scheme folders under `data/schemes/` (SPEC_MVP §5).
+//! scheme folders under `data/schemes/` (SPEC §5).
 //!
 //! A scheme is one folder holding a `metadata.toml` (name, description,
 //! author, code type and the engine defaults the preferences window exposes)

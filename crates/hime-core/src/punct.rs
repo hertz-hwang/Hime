@@ -1,4 +1,4 @@
-//! ASCII → 中文标点 mapping for the `ascii_punct = 1` mode (SPEC_MVP §3).
+//! ASCII → 中文标点 mapping for the `ascii_punct = 1` mode (SPEC §3).
 //!
 //! Every mapping is a fixed string, so a punctuation key needs no retrieval.
 //! Quote pairing is the only state: `'` and `"` alternate between their
@@ -87,7 +87,7 @@ pub fn is_symbol(ascii: u8) -> bool {
 mod tests {
     use super::*;
 
-    /// The published table (SPEC_MVP §3.1): every key and the text it emits.
+    /// The published table (SPEC §3.1): every key and the text it emits.
     /// `/`, `~` and backtick stay halfwidth on purpose; the engine claims the
     /// key either way, so the mapping text is what reaches the host.
     const DOCUMENTED: &[(u8, &str)] = &[
@@ -115,7 +115,7 @@ mod tests {
 
     /// The symbols the table leaves out, so no punctuation is ever committed
     /// for them. `-` and `=` are the paging keys: `Processor` swallows them
-    /// while composing and releases them only when idle (SPEC_MVP §3).
+    /// while composing and releases them only when idle (SPEC §3).
     const RELEASED: &[u8] = b"#%&*+-=@_|";
 
     /// Every documented key maps to its documented text.
@@ -157,7 +157,7 @@ mod tests {
 
     /// The table's claim set is exactly the documented keys and the quotes:
     /// no other printable symbol may be claimed, or it would stop reaching
-    /// the host (SPEC_MVP §3).
+    /// the host (SPEC §3).
     #[test]
     fn unmapped_keys_have_no_text() {
         let claimed: Vec<u8> = (b'!'..=b'~')

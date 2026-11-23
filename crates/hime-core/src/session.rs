@@ -1,4 +1,4 @@
-//! Session state machine (SPEC_MVP §3).
+//! Session state machine (SPEC §3).
 //!
 //! `Session` is the only owner of typing state. It keeps the encoding and the
 //! rendered candidate list, asks [`Processor`] what a key means and applies
@@ -48,7 +48,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Session over a lexicon with the default configuration, using the MVP
+    /// Session over a lexicon with the default configuration, using the default
     /// pipeline (table lookup, then de-duplicate, then cut the page).
     pub fn new(dict: Arc<Dictionary>) -> Self {
         Self::with_config(dict, Config::default())
@@ -317,7 +317,7 @@ mod tests {
         Session::new(Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses")))
     }
 
-    /// The flow required by SPEC_MVP: `a` -> `Backspace` -> `a` -> `Space`
+    /// The flow required by SPEC: `a` -> `Backspace` -> `a` -> `Space`
     /// must commit "工" and leave the session idle.
     #[test]
     fn retype_after_backspace_then_space_commits_first_candidate() {

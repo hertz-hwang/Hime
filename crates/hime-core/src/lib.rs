@@ -40,14 +40,14 @@ pub use session::Session;
 pub use translator::{TableTranslator, Translator};
 pub use types::{Candidate, EngineResponse};
 
-// Virtual key codes (SPEC_MVP §2.1). Printable keys use their ASCII code:
+// Virtual key codes (SPEC §2.1). Printable keys use their ASCII code:
 // letters are 97..=122, digits are 49..=57.
 pub const KEY_BACKSPACE: u32 = 8;
 pub const KEY_ENTER: u32 = 13;
 pub const KEY_ESCAPE: u32 = 27;
 pub const KEY_SPACE: u32 = 32;
 
-/// Candidate paging keys (`SPEC_MVP` §3): `-` turns to the previous page,
+/// Candidate paging keys (`SPEC` §3): `-` turns to the previous page,
 /// `=` to the next. They carry their own ASCII code (the shell forwards
 /// printable keys unchanged) and only take effect while a candidate is shown.
 pub const KEY_PAGE_UP: u32 = 45; // b'-'
