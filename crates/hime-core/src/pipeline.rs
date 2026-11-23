@@ -42,11 +42,17 @@ impl Pipeline {
     }
 
     /// The MVP chain: one 形码 table source, then de-duplicate, then cut the
-    /// page.
+    /// page to the default size.
     pub fn table(dict: Arc<Dictionary>) -> Self {
+        Self::table_with_page_size(dict, MAX_CANDIDATES)
+    }
+
+    /// The MVP chain cut to `page_size` candidates (see
+    /// [`crate::Config::page_size`]).
+    pub fn table_with_page_size(dict: Arc<Dictionary>, page_size: usize) -> Self {
         Self::new(
             vec![Box::new(TableTranslator::new(dict))],
-            vec![Box::new(DedupFilter), Box::new(LimitFilter::new(MAX_CANDIDATES))],
+            vec![Box::new(DedupFilter), Box::new(LimitFilter::new(page_size))],
         )
     }
 

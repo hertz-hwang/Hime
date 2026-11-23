@@ -9,6 +9,7 @@
 use std::mem;
 use std::sync::Arc;
 
+use crate::config::Config;
 use crate::dictionary::Dictionary;
 use crate::pipeline::Pipeline;
 use crate::processor::{Action, Processor};
@@ -18,22 +19,64 @@ use crate::types::{Candidate, EngineResponse};
 /// [`EngineResponse`] they get back.
 #[derive(Debug)]
 pub struct Session {
+    /// The lexicon behind a table pipeline; `None` for a
+    /// [`Session::with_pipeline`] session, whose pipeline cannot be rebuilt.
+    dict: Option<Arc<Dictionary>>,
+    config: Config,
     pipeline: Pipeline,
     input_buffer: String,
     candidates: Vec<Candidate>,
 }
 
 impl Session {
-    /// Session over a lexicon, using the MVP pipeline (table lookup, then
-    /// de-duplicate, then cut the page).
+    /// Session over a lexicon with the default configuration, using the MVP
+    /// pipeline (table lookup, then de-duplicate, then cut the page).
     pub fn new(dict: Arc<Dictionary>) -> Self {
-        Self::with_pipeline(Pipeline::table(dict))
+        Self::with_config(dict, Config::default())
+    }
+
+    /// Session over a lexicon with a user configuration (see
+    /// [`Config`]). Values outside the supported range are clamped.
+    pub fn with_config(dict: Arc<Dictionary>, config: Config) -> Self {
+        let config = config.sanitized();
+        let pipeline = Pipeline::table_with_page_size(Arc::clone(&dict), config.page_size);
+        Self {
+            dict: Some(dict),
+            config,
+            pipeline,
+            input_buffer: String::new(),
+            candidates: Vec::new(),
+        }
     }
 
     /// Session over a custom pipeline, for a shell or test that wants to pick
     /// the candidate sources and post-processing itself.
     pub fn with_pipeline(pipeline: Pipeline) -> Self {
-        Self { pipeline, input_buffer: String::new(), candidates: Vec::new() }
+        Self {
+            dict: None,
+            config: Config::default(),
+            pipeline,
+            input_buffer: String::new(),
+            candidates: Vec::new(),
+        }
+    }
+
+    /// The configuration this session applies to keys and pages.
+    #[must_use]
+    pub fn config(&self) -> Config {
+        self.config
+    }
+
+    /// Apply a new configuration while live. Out-of-range values are
+    /// clamped. The table pipeline is rebuilt for the new page size and the
+    /// candidate list is re-retrieved, so a change made mid-composition
+    /// takes effect on the next rendered response.
+    pub fn set_config(&mut self, config: Config) {
+        self.config = config.sanitized();
+        if let Some(dict) = &self.dict {
+            self.pipeline = Pipeline::table_with_page_size(Arc::clone(dict), self.config.page_size);
+            self.refresh_candidates();
+        }
     }
 
     /// Feed one key (see the `KEY_*` constants and ASCII codes in
@@ -45,7 +88,8 @@ impl Session {
     /// behind them, any other key code) are swallowed as no-ops so the
     /// host's Marked Text keeps running.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
-        match Processor::decide(key, &self.input_buffer, self.candidates.len()) {
+        let decision = Processor::decide(key, &self.input_buffer, self.candidates.len(), self.config);
+        match decision {
             Action::Pass => self.response(false, None),
             Action::Noop => self.response(true, None),
             Action::AppendCode(byte) => {
@@ -373,5 +417,54 @@ mod tests {
         let mut s = Session::with_pipeline(pipeline);
         assert_eq!(s.process_key(b'x' as u32).candidates[0].text, "星");
         assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("星"));
+    }
+
+    /// What the preferences window promises: a smaller page means fewer
+    /// rendered candidates and fewer digit keys that reach one.
+    #[test]
+    fn config_shrinks_the_page_and_the_digit_keys() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { page_size: 2, max_code_len: 2 });
+        let r = s.process_key(KEY_A);
+        let texts: Vec<&str> = r.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["工", "戈"]);
+
+        let r = s.process_key(KEY_3);
+        assert!(r.handled, "3 is swallowed while the page only has 2 keys");
+        assert!(r.commit_text.is_none());
+        assert_eq!(r.preedit, "a");
+
+        let r = s.process_key(KEY_2);
+        assert_eq!(r.commit_text.as_deref(), Some("戈"));
+    }
+
+    /// A config pushed into a live session must reach the next response,
+    /// including one typed mid-composition.
+    #[test]
+    fn set_config_takes_effect_mid_composition() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::new(dict);
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.candidates.len(), 4);
+
+        s.set_config(Config { page_size: 1, max_code_len: 1 });
+        let r = s.process_key(b'-' as u32); // swallowed; only re-renders
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].text, "工");
+
+        let r = s.process_key(KEY_G);
+        assert_eq!(r.preedit, "a", "the code cap of 1 swallows further letters");
+        let r = s.process_key(KEY_1);
+        assert_eq!(r.commit_text.as_deref(), Some("工"));
+    }
+
+    /// Clamping protects typing from a broken stored value: the session
+    /// still runs with the nearest usable limits.
+    #[test]
+    fn out_of_range_config_is_clamped() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let s = Session::with_config(dict, Config { page_size: 0, max_code_len: 100 });
+        assert_eq!(s.config().page_size, 1);
+        assert_eq!(s.config().max_code_len, crate::MAX_CODE_LEN_LIMIT);
     }
 }

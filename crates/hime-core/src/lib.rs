@@ -19,6 +19,7 @@
 //! [`Pipeline`] wires the configured translators and filters together and is
 //! the only thing `Session` consults about candidates.
 
+pub mod config;
 pub mod dictionary;
 pub mod filter;
 pub mod pipeline;
@@ -27,6 +28,7 @@ pub mod session;
 pub mod translator;
 pub mod types;
 
+pub use config::{Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
 pub use dictionary::{Dictionary, TableFormat};
 pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use pipeline::Pipeline;
@@ -42,10 +44,11 @@ pub const KEY_ENTER: u32 = 13;
 pub const KEY_ESCAPE: u32 = 27;
 pub const KEY_SPACE: u32 = 32;
 
-/// Maximum length of a Xingma encoding.
+/// Default maximum length of a Xingma encoding (`Config::default`).
 pub const MAX_CODE_LEN: usize = 4;
 
-/// Candidates one page holds, and the number the shell may put behind a key.
+/// Default candidates per page (`Config::default`); the user may set a
+/// different page size through [`Config`].
 pub const MAX_CANDIDATES: usize = 5;
 
 /// Candidates each translator is asked for, before filters run.

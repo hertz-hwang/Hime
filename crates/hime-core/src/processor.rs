@@ -11,7 +11,8 @@
 //! own `Action` variants here and `Session` moves a page cursor instead of
 //! touching the encoding.
 
-use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE, MAX_CANDIDATES, MAX_CODE_LEN};
+use crate::config::Config;
+use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
 /// What the engine should do about one key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,8 @@ impl Processor {
     /// `code` is the encoding typed so far — empty means idle — and
     /// `candidate_count` is the length of the list the shell is rendering, so
     /// a selection is validated against exactly what the user can see.
-    pub fn decide(key: u32, code: &str, candidate_count: usize) -> Action {
+    /// `config` supplies this session's code-length cap and page size.
+    pub fn decide(key: u32, code: &str, candidate_count: usize, config: Config) -> Action {
         let letter = (ASCII_A..=ASCII_Z).contains(&key).then(|| key as u8);
 
         // Idle: only a letter starts a composition; everything else belongs to
@@ -59,7 +61,7 @@ impl Processor {
         }
 
         if let Some(byte) = letter {
-            return if code.len() < MAX_CODE_LEN {
+            return if code.len() < config.max_code_len {
                 Action::AppendCode(byte)
             } else {
                 Action::Noop
@@ -76,9 +78,9 @@ impl Processor {
             KEY_ENTER => Action::CommitRaw,
             // A digit whose candidate is missing, or one beyond the keys the
             // page can offer, is swallowed rather than released.
-            key if is_selection_key(key) => {
+            key if is_selection_key(key, config) => {
                 let index = (key - ASCII_1) as usize;
-                if index < candidate_count.min(MAX_CANDIDATES) {
+                if index < candidate_count.min(config.page_size) {
                     Action::Select(index)
                 } else {
                     Action::Noop
@@ -92,9 +94,9 @@ impl Processor {
     }
 }
 
-/// Digits that can name a candidate: `1` up to `MAX_CANDIDATES`.
-fn is_selection_key(key: u32) -> bool {
-    (ASCII_1..ASCII_1 + MAX_CANDIDATES as u32).contains(&key)
+/// Digits that can name a candidate: `1` up to the configured page size.
+fn is_selection_key(key: u32, config: Config) -> bool {
+    (ASCII_1..ASCII_1 + config.page_size as u32).contains(&key)
 }
 
 #[cfg(test)]
@@ -108,14 +110,15 @@ mod tests {
     const KEY_2: u32 = 50;
     const KEY_5: u32 = 53;
     const KEY_6: u32 = 54;
+    const KEY_7: u32 = 55;
     const KEY_9: u32 = 57;
 
     fn idle(key: u32) -> Action {
-        Processor::decide(key, "", 0)
+        Processor::decide(key, "", 0, Config::default())
     }
 
     fn composing(key: u32, code: &str, candidates: usize) -> Action {
-        Processor::decide(key, code, candidates)
+        Processor::decide(key, code, candidates, Config::default())
     }
 
     #[test]
@@ -168,5 +171,23 @@ mod tests {
         for key in [b'-' as u32, b'0' as u32, 0, 0x1000] {
             assert_eq!(composing(key, "a", 5), Action::Noop, "key {key}");
         }
+    }
+
+    /// The preferences window moves both limits, and the decision table
+    /// follows the session's config rather than the compiled-in defaults.
+    #[test]
+    fn config_moves_the_page_and_code_limits() {
+        let custom = Config { page_size: 6, max_code_len: 2 };
+        assert_eq!(Processor::decide(KEY_6, "a", 6, custom), Action::Select(5));
+        assert_eq!(
+            Processor::decide(KEY_7, "a", 6, custom),
+            Action::Noop,
+            "7 is beyond a 6-key page"
+        );
+        assert_eq!(
+            Processor::decide(KEY_A, "ab", 1, custom),
+            Action::Noop,
+            "a letter over the configured code cap is swallowed"
+        );
     }
 }
