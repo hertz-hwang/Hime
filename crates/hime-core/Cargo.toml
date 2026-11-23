@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
+toml = "1.2.2"
 
 [dev-dependencies]
 serde_json.workspace = true
