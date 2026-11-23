@@ -26,6 +26,7 @@ private struct EngineConfig: Codable, Equatable {
     var autoCommit: Bool
     var autoCommitLength: Int
     var commitNextCode: Int
+    var asciiPunct: Int
 
     enum CodingKeys: String, CodingKey {
         case pageSize = "page_size"
@@ -34,6 +35,7 @@ private struct EngineConfig: Codable, Equatable {
         case autoCommit = "auto_commit"
         case autoCommitLength = "auto_commit_length"
         case commitNextCode = "commit_next_code"
+        case asciiPunct = "ascii_punct"
     }
 }
 
@@ -84,6 +86,8 @@ final class PreferencesModel: ObservableObject {
     @Published var autoCommitLength: Int { didSet { settingChanged() } }
     /// N-th-letter overflow commit; 0 = off (`commit_next_code`).
     @Published var commitNextCode: Int { didSet { settingChanged() } }
+    /// Punctuation output (`ascii_punct`): 0 英文标点 / 1 中文标点.
+    @Published var asciiPunct: Int { didSet { settingChanged() } }
     /// Point size of the IMKCandidates text; applied at render time.
     @Published var candidateFontSize: Double { didSet { persist() } }
 
@@ -99,6 +103,7 @@ final class PreferencesModel: ObservableObject {
     private static let autoCommitKey = "engineAutoCommit"
     private static let autoCommitLengthKey = "engineAutoCommitLength"
     private static let commitNextCodeKey = "engineCommitNextCode"
+    private static let asciiPunctKey = "engineAsciiPunct"
     private static let schemeDirKey = "schemeDir"
     private static let fontSizeKey = "candidateFontSize"
 
@@ -119,6 +124,7 @@ final class PreferencesModel: ObservableObject {
         autoCommit = false
         autoCommitLength = 4
         commitNextCode = 0
+        asciiPunct = 0
         candidateFontSize = defaults.object(forKey: Self.fontSizeKey) as? Double ?? 16
     }
 
@@ -152,6 +158,13 @@ final class PreferencesModel: ObservableObject {
     /// engine, never through a direct field write.
     var schemeSelection: Binding<String> {
         Binding(get: { self.schemeDir }, set: { self.selectScheme($0) })
+    }
+
+    /// Binding for the 中文标点 switch: the engine key is the number 0/1,
+    /// the control is a Bool; only the mapping lives here.
+    var asciiPunctSwitch: Binding<Bool> {
+        Binding(get: { self.asciiPunct == 1 },
+                set: { self.asciiPunct = $0 ? 1 : 0 })
     }
 
     /// Switch schemes: the engine reloads the table and the metadata
@@ -193,6 +206,7 @@ final class PreferencesModel: ObservableObject {
         autoCommit = value(Self.autoCommitKey, config.autoCommit)
         autoCommitLength = value(Self.autoCommitLengthKey, config.autoCommitLength)
         commitNextCode = value(Self.commitNextCodeKey, config.commitNextCode)
+        asciiPunct = value(Self.asciiPunctKey, config.asciiPunct)
     }
 
     /// Engine call: hand the current values to hime_set_config.
@@ -209,7 +223,8 @@ final class PreferencesModel: ObservableObject {
                                   codeType: codeType,
                                   autoCommit: autoCommit,
                                   autoCommitLength: autoCommitLength,
-                                  commitNextCode: commitNextCode)
+                                  commitNextCode: commitNextCode,
+                                  asciiPunct: asciiPunct)
         guard let data = try? JSONEncoder().encode(config),
               let json = String(data: data, encoding: .utf8),
               let cString = json.cString(using: .utf8)
@@ -225,6 +240,7 @@ final class PreferencesModel: ObservableObject {
         defaults.set(autoCommit, forKey: Self.autoCommitKey)
         defaults.set(autoCommitLength, forKey: Self.autoCommitLengthKey)
         defaults.set(commitNextCode, forKey: Self.commitNextCodeKey)
+        defaults.set(asciiPunct, forKey: Self.asciiPunctKey)
         defaults.set(schemeDir, forKey: Self.schemeDirKey)
         defaults.set(candidateFontSize, forKey: Self.fontSizeKey)
     }
@@ -394,6 +410,11 @@ private struct BasicView: View {
                                hint: "将该长度之前的编码候选提交并驻留，0 为关闭",
                                value: $model.commitNextCode,
                                range: PreferencesModel.commitNextCodeRange)
+                }
+                Section("标点") {
+                    switchRow(title: "中文标点",
+                              hint: "开启输出中文标点，关闭输出英文标点",
+                              isOn: model.asciiPunctSwitch)
                 }
                 Section("候选窗") {
                     LabeledContent("候选字号") {
