@@ -31,12 +31,12 @@ fn process(session: u64, key: u32) -> serde_json::Value {
 #[test]
 fn full_flow_through_c_abi() {
     // Bad init arguments are rejected without poisoning the engine.
-    assert!(!hime_init(std::ptr::null()));
+    assert!(!unsafe { hime_init(std::ptr::null()) });
     let missing = CString::new("/nonexistent/hime-dict.tsv").unwrap();
-    assert!(!hime_init(missing.as_ptr()));
+    assert!(!unsafe { hime_init(missing.as_ptr()) });
 
     let dict = sample_dict_path();
-    assert!(hime_init(dict.as_ptr()));
+    assert!(unsafe { hime_init(dict.as_ptr()) });
 
     // Session 0 / unknown ids never resolve.
     let orphan = hime_process_key(0, KEY_A, 0);

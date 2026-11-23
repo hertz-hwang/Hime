@@ -57,8 +57,11 @@ fn with_engine<T: Default>(what: &str, f: impl FnOnce(&mut Option<Engine>) -> T)
 /// `dict_path` is a NUL-terminated path to the TSV lexicon. Returns `false`
 /// on a null/invalid path, an unreadable file, or a parse error. Calling
 /// this again re-initializes the engine and drops all live sessions.
+///
+/// # Safety
+/// `dict_path` must be null or point to a valid NUL-terminated C string.
 #[no_mangle]
-pub extern "C" fn hime_init(dict_path: *const c_char) -> bool {
+pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
     if dict_path.is_null() {
         eprintln!("hime-ffi: hime_init called with a null dict_path");
         return false;
@@ -150,14 +153,16 @@ pub extern "C" fn hime_process_key(
 }
 
 /// Free a string returned by [`hime_process_key`]. Null is a no-op.
+///
+/// # Safety
+/// `ptr` must be null or a value returned by [`hime_process_key`] in this
+/// process and not yet freed.
 #[no_mangle]
-pub extern "C" fn hime_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn hime_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
-        drop(CString::from_raw(ptr));
-    }));
+    let outcome = catch_unwind(AssertUnwindSafe(|| drop(CString::from_raw(ptr))));
     if outcome.is_err() {
         eprintln!("hime-ffi: panic while freeing string (leaked)");
     }
