@@ -51,7 +51,6 @@ const DIRECT: &[(u8, &str)] = &[
     (b'>', "》"),
     (b'/', "/"),
     (b'\\', "、"),
-    (b'-', "——"),
 ];
 
 /// The full-width text one ASCII punctuation key produces in Chinese mode.
@@ -97,7 +96,6 @@ mod tests {
         (b'(', "（"),
         (b')', "）"),
         (b',', "，"),
-        (b'-', "——"),
         (b'.', "。"),
         (b'/', "/"),
         (b':', "："),

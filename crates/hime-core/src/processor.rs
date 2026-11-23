@@ -81,7 +81,9 @@ impl Processor {
         if code.is_empty() {
             return match letter {
                 Some(byte) => Action::AppendCode(byte),
-                None if chinese_punct(config) && is_punct_key(key) => Action::CommitPunct(key as u8),
+                None if chinese_punct(config) && is_punct_key(key) => {
+                    Action::CommitPunct(key as u8)
+                }
                 None => Action::Pass,
             };
         }
@@ -185,7 +187,16 @@ mod tests {
     fn idle_only_starts_on_a_letter() {
         assert_eq!(idle(KEY_A), Action::AppendCode(b'a'));
         assert_eq!(idle(KEY_D), Action::AppendCode(b'd'));
-        for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9, b'-' as u32, 0] {
+        for key in [
+            KEY_SPACE,
+            KEY_BACKSPACE,
+            KEY_ENTER,
+            KEY_ESCAPE,
+            KEY_1,
+            KEY_9,
+            b'-' as u32,
+            0,
+        ] {
             assert_eq!(idle(key), Action::Pass, "idle key {key} must pass through");
         }
     }
@@ -220,9 +231,21 @@ mod tests {
         assert_eq!(composing(KEY_1, "a", 1), Action::Select(0));
         assert_eq!(composing(KEY_2, "a", 5), Action::Select(1));
         assert_eq!(composing(KEY_5, "a", 5), Action::Select(4));
-        assert_eq!(composing(KEY_2, "ad", 1), Action::Noop, "no candidate behind 2");
-        assert_eq!(composing(KEY_6, "a", 5), Action::Noop, "6 is beyond the page keys");
-        assert_eq!(composing(KEY_9, "a", 5), Action::Noop, "9 is beyond the page keys");
+        assert_eq!(
+            composing(KEY_2, "ad", 1),
+            Action::Noop,
+            "no candidate behind 2"
+        );
+        assert_eq!(
+            composing(KEY_6, "a", 5),
+            Action::Noop,
+            "6 is beyond the page keys"
+        );
+        assert_eq!(
+            composing(KEY_9, "a", 5),
+            Action::Noop,
+            "9 is beyond the page keys"
+        );
         assert_eq!(composing(KEY_1, "a", 0), Action::Noop);
     }
 
@@ -255,8 +278,16 @@ mod tests {
     fn page_keys_only_fire_with_candidates() {
         assert_eq!(composing(KEY_PAGE_UP, "a", 1), Action::PageUp);
         assert_eq!(composing(KEY_PAGE_DOWN, "a", 1), Action::PageDown);
-        assert_eq!(composing(KEY_PAGE_UP, "q", 0), Action::Pass, "no candidate: - releases");
-        assert_eq!(composing(KEY_PAGE_DOWN, "q", 0), Action::Pass, "no candidate: = releases");
+        assert_eq!(
+            composing(KEY_PAGE_UP, "q", 0),
+            Action::Pass,
+            "no candidate: - releases"
+        );
+        assert_eq!(
+            composing(KEY_PAGE_DOWN, "q", 0),
+            Action::Pass,
+            "no candidate: = releases"
+        );
         assert_eq!(idle(KEY_PAGE_UP), Action::Pass);
         assert_eq!(idle(KEY_PAGE_DOWN), Action::Pass);
     }
@@ -265,12 +296,15 @@ mod tests {
     /// shown; with none, `-` keeps committing its mapped punctuation.
     #[test]
     fn page_keys_outrank_chinese_punctuation_only_with_candidates() {
-        let cn = Config { ascii_punct: 1, ..Config::default() };
+        let cn = Config {
+            ascii_punct: 1,
+            ..Config::default()
+        };
         assert_eq!(Processor::decide(KEY_PAGE_UP, "a", 1, cn), Action::PageUp);
         assert_eq!(
             Processor::decide(KEY_PAGE_UP, "q", 0, cn),
             Action::CommitCandidatePunct(b'-'),
-            "without a candidate - still emits ——"
+            "without a candidate - still emits -"
         );
     }
 
@@ -278,8 +312,14 @@ mod tests {
     /// digits and editing keys keep their own meanings.
     #[test]
     fn chinese_mode_claims_mapped_punctuation() {
-        let cn = Config { ascii_punct: 1, ..Config::default() };
-        assert_eq!(Processor::decide(b',' as u32, "", 0, cn), Action::CommitPunct(b','));
+        let cn = Config {
+            ascii_punct: 1,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(b',' as u32, "", 0, cn),
+            Action::CommitPunct(b',')
+        );
         assert_eq!(
             Processor::decide(b',' as u32, "a", 1, cn),
             Action::CommitCandidatePunct(b','),
@@ -295,9 +335,15 @@ mod tests {
             Action::Pass,
             "unmapped keys are released even mid-composition"
         );
-        assert_eq!(Processor::decide(KEY_A, "", 0, cn), Action::AppendCode(b'a'));
+        assert_eq!(
+            Processor::decide(KEY_A, "", 0, cn),
+            Action::AppendCode(b'a')
+        );
         assert_eq!(Processor::decide(KEY_1, "a", 1, cn), Action::Select(0));
-        assert_eq!(Processor::decide(KEY_BACKSPACE, "a", 1, cn), Action::DeleteCode);
+        assert_eq!(
+            Processor::decide(KEY_BACKSPACE, "a", 1, cn),
+            Action::DeleteCode
+        );
         assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn), Action::Select(0));
     }
 
@@ -305,7 +351,11 @@ mod tests {
     /// follows the session's config rather than the compiled-in defaults.
     #[test]
     fn config_moves_the_page_and_code_limits() {
-        let custom = Config { page_size: 6, max_code_len: 2, ..Config::default() };
+        let custom = Config {
+            page_size: 6,
+            max_code_len: 2,
+            ..Config::default()
+        };
         assert_eq!(Processor::decide(KEY_6, "a", 6, custom), Action::Select(5));
         assert_eq!(
             Processor::decide(KEY_7, "a", 6, custom),
@@ -323,7 +373,11 @@ mod tests {
     /// appending or swallowing; 0 keeps the old capped behavior.
     #[test]
     fn commit_next_code_overflows_at_the_nth_letter() {
-        let overflow = Config { max_code_len: 4, commit_next_code: 5, ..Config::default() };
+        let overflow = Config {
+            max_code_len: 4,
+            commit_next_code: 5,
+            ..Config::default()
+        };
         assert_eq!(
             Processor::decide(KEY_D, "abcd", 3, overflow),
             Action::OverflowCommit(b'd'),
@@ -340,15 +394,37 @@ mod tests {
             "without a candidate the raw letters are what overflow commits"
         );
 
-        let off = Config { max_code_len: 4, commit_next_code: 0, ..Config::default() };
-        assert_eq!(Processor::decide(KEY_D, "abcd", 1, off), Action::Noop, "0 turns the rule off");
+        let off = Config {
+            max_code_len: 4,
+            commit_next_code: 0,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 1, off),
+            Action::Noop,
+            "0 turns the rule off"
+        );
 
         // Unreachable above the cap: the cap keeps swallowing.
-        let unreachable = Config { max_code_len: 4, commit_next_code: 6, ..Config::default() };
-        assert_eq!(Processor::decide(KEY_D, "abcd", 1, unreachable), Action::Noop);
+        let unreachable = Config {
+            max_code_len: 4,
+            commit_next_code: 6,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 1, unreachable),
+            Action::Noop
+        );
 
         // Reachable below the cap: overflow wins before the code grows on.
-        let below_cap = Config { max_code_len: 6, commit_next_code: 4, ..Config::default() };
-        assert_eq!(Processor::decide(KEY_D, "abc", 1, below_cap), Action::OverflowCommit(b'd'));
+        let below_cap = Config {
+            max_code_len: 6,
+            commit_next_code: 4,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(KEY_D, "abc", 1, below_cap),
+            Action::OverflowCommit(b'd')
+        );
     }
 }
