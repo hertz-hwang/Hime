@@ -47,15 +47,16 @@ pub struct Config {
     pub page_size: usize,         // 每页候选数，也是选词数字键 1..=N 的数量（1..=9）；方案不定义它，切换方案时保留
     pub max_code_len: usize,      // 单条编码最长字母数（1..=16），即 metadata 的 max_code
     pub code_type: CodeType,      // 编码类型，即 metadata 的 type：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，JSON 里就是这个数字；面板只读
-    pub auto_commit: bool,        // 码长达到 auto_commit_length 且候选唯一时自动提交上屏
-    pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效
-    pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭
+    pub auto_commit: bool,        // 自动上屏开关：形码下=码长达 auto_commit_length 且候选唯一时提交；形码整句(type=3)下=概率/空码整句自动上屏开关（见 §7.6）
+    pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效；形码整句下无效
+    pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭；形码整句下无效
     pub ascii_punct: u8,          // 标点输出：0 英文标点 / 1 中文标点，即 metadata 的 ascii_punct，JSON 里就是这个数字（非布尔）；sanitized() 把其它值钳到 1
 }
 ```
 
 - 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
+- 形码整句（`code_type = 3`）下 `max_code_len`、`auto_commit_length`、`commit_next_code` 均为无效配置（整句不按词码长截断、不顶码提交，自动上屏走 §7.6 的整句算法而非唯一候选规则）；macOS 面板在 `type = 3` 时置灰这三行，`auto_commit` 保留可编辑。见 §7.4。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
 - `Session::set_config` 只按新页长重切当前页（页码夹进新范围），不再重建检索链或重取候选——页长只影响切页，编码输入中途改配置也从下一次响应起生效。
@@ -74,7 +75,7 @@ pub struct Config {
 2. **当 `input_buffer` 不为空时（编码输入状态）**：
    - 输入 `a`-`z`（且长度 < `max_code_len`，默认 4，见 §2.3）：追加到 `input_buffer`，重新检索词库，返回 `handled: true`。
    - 顶码提交（`Config.commit_next_code = N ≥ 2`）：编码长度恰为 `N-1` 时再输入字母，把当前第 1 候选放入 `commit_text`（无候选则把已编码字母原样提交），清空状态后把刚输入的字母作为新编码的第 1 位重新检索，返回 `handled: true`（琉璃v1：`max_code = 4`、`N = 5`，连打不断流）。该判定排在码长上限之前：规则生效时有效码长就是 `N-1`；`N-1` 大于 `max_code_len` 时编码到不了 `N-1`，规则自然不可达。`0`/`1` 均为关闭，关闭时超限字母仍按下一条 No-op 吞掉。
-   - 自动上屏（`Config.auto_commit`）：追加字母并重新检索后，若码长达到 `auto_commit_length` 且候选恰好只剩 1 个，该候选直接进 `commit_text` 并清空状态，返回 `handled: true`；同一次按键若已因顶码产生提交，两段文字拼接在同一个 `commit_text` 里。只由追加字母触发；Backspace 或改配置恰好留下唯一候选都不触发。
+   - 自动上屏（`Config.auto_commit`）：追加字母并重新检索后，若码长达到 `auto_commit_length` 且候选恰好只剩 1 个，该候选直接进 `commit_text` 并清空状态，返回 `handled: true`；同一次按键若已因顶码产生提交，两段文字拼接在同一个 `commit_text` 里。只由追加字母触发；Backspace 或改配置恰好留下唯一候选都不触发。本规则只作用于词码会话；形码整句（`code_type = 3`）的 `auto_commit` 走 §7.6 的概率 / 空码整句自动上屏，不受 `auto_commit_length` 约束。
    - 输入 `KEY_BACKSPACE`：删除 `input_buffer` 最后一个字符。若删空，清空 `preedit` 和 `candidates`；若未删空，重新检索词库。返回 `handled: true`。
    - 输入 `KEY_ESCAPE`：清空 `input_buffer`、清空候选，返回 `handled: true`。
    - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
@@ -259,7 +260,9 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
 
 延迟项（与 Fire 中无学习 / 用户数据时等价关闭，均为无数据时归零的附加分项）：
 学习通道 A/B/C1、Aho-Corasick 加权词补充、按会话增量 lattice（纯延迟优化，
-此处每次全量重建）、拼音、概率提前上屏。
+此处每次全量重建）、拼音。概率提前上屏（Fire 的 early-commit）已移植到
+`sentence::auto_commit`，见 §7.6；解码器为它额外暴露 `decode_with_evidence`，
+返回各候选的路径分段与每个前缀的后验份额等证据（`decode` 的候选输出不变）。
 
 ### 7.4 引擎门面与状态机
 
@@ -268,11 +271,16 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   跨会话共享。`SentenceTranslator` 把引擎适配为 `Translator`，整句候选因此接入
   既有检索管线（`Pipeline::sentence`，无需去重——解码本就一文本一候选）；整段
   编码已被消费，候选不带 `~剩余码` 注释。
-- 状态机（§3）：`code_type = 形码整句` 时字母只受解码器上限 `MAX_RAW_LENGTH =
-  256` 约束——不按 `max_code_len` 截断、也不触发 `commit_next_code` 顶码提交，
-  再按一个字母是延长整句；其余键义不变（空格选首条 / 数字选备选 / 退格删码 /
-  Esc 丢弃 / 回车提交原始码）。`Session::sentence(engine, config)` 装配整句会话
-  并强制 `code_type = 形码整句`，分页、数字、空格据此列出并提交整句。
+- 状态机（§3）：`code_type = 形码整句` 时字母只受解码器上限约束——不按
+  `max_code_len` 截断、也不触发 `commit_next_code` 顶码提交，再按一个字母是延长
+  整句。上限随自动上屏开关二选一：关闭时取手动上限 `MAX_RAW_LENGTH = 256`（手动
+  逐键打完整句），开启时取更紧的 `AUTO_COMMIT_MAX_RAW_LENGTH = 64`，让近顶回退能在
+  键流泄漏前提交成熟前缀（见 §7.6）。因此 `max_code`、`auto_commit_length`、
+  `commit_next_code` 三个键在整句下都是无效配置——macOS 面板在 `type = 3` 时置灰
+  这三行（`auto_commit` 保留可编辑，作为整句自动上屏开关）。其余键义不变（空格选
+  首条 / 数字选备选 / 退格删码 / Esc 丢弃 / 回车提交原始码）。
+  `Session::sentence(engine, config)` 装配整句会话并强制 `code_type = 形码整句`，
+  分页、数字、空格据此列出并提交整句。
 
 ### 7.5 经外壳接入
 
@@ -286,3 +294,37 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   `~/.config/hime/sentence-ngram.hng` 即会被 `find_model_path` 命中（外壳也可
   `HIME_SENTENCE_MODEL` 指向随应用分发的模型）。外壳首次运行可调用
   `ensure_config_layout` 建好目录，属外壳后续接线项。
+
+### 7.6 整句自动上屏（`sentence::auto_commit`，`Config.auto_commit`）
+
+整句候选管线（§7.3）本身无状态：给一个编码返回一个排序候选列表。"在用户按空格
+之前就把整句上屏"是跨按键的会话级决策，故其状态放在 `Session` 内的
+`SentenceAutoCommit`（胖核心，AGENTS §1）：外壳仍只转发按键并按
+`EngineResponse` 刷新。整套逻辑由 `Config.auto_commit` 开关门控——关闭时
+`key_pressed` 每键清空证据直接返回不上屏，整句行为与 §7.4 完全一致；唯一候选的
+码表自动上屏规则（§3）也只在非整句会话生效，整句会话改走下述算法。移植自 Fire
+`SentenceEngine` 的两条机制：
+
+- **概率提前上屏**（`try_early_commit`）：每键重解整段编码，度量各"止于闭合原始
+  边界的文本前缀"承载的整句后验份额。一个前缀连续多代稳定持有高份额即"成熟"，
+  成熟即上屏、未消费的键尾留在组字区继续打字。门控：前 `FIRST_KEYS_IMMUNITY = 4`
+  键永不计证据；beam 去重截断（`confidence_truncated`）使本代证据作废，唯接近上限
+  时例外——近顶回退（`near_cap_last_resort`）按最深闭合边界吐字，使键不泄漏。阈值：
+  份额 `EARLY_COMMIT_MINIMUM_SHARE = 0.995`（近顶放宽到 `NEAR_CAP_MINIMUM_SHARE =
+  0.9`）、闭合边界 `EARLY_COMMIT_CLOSED_BOUNDARY_SHARE`、成熟需连续
+  `EARLY_COMMIT_REQUIRED_EVIDENCE = 3` 代或 `EARLY_COMMIT_REQUIRED_STRONG = 2` 次强
+  确认；低置信或合并未完成尾的"中性代"只保留既有 tracker、不计代（容忍
+  `EARLY_COMMIT_MAXIMUM_NEUTRAL_GAP = 3`）。每次提前上屏保留
+  `EARLY_COMMIT_RETAINED_RAW_LENGTH = 3` 键尾，故提交文本恒为整句的前缀、尾字留给
+  手动上屏。
+- **空码上屏**（`try_empty_code_commit`）：上一码可完整解码，但新字母使剩余尾段无法
+  被任何词图边覆盖、且末段不再是合法码前缀时，提交上一码的首候选，保留新字母作为
+  新码起点。
+
+会话挂起与复位对齐 Fire：翻页 / 候选高亮循环 → `suspend`（本条整句内挂起自动上屏
+并清空证据）；退格 → `evidence_invalidated`（仅作废证据、会话保留，继续敲可重新
+积累）；空格 / 数字 / Esc / 回车等消费整码 → `reset`（清空全部状态，仅保留已上屏
+片段作跨提交左上下文，供下一条整句打分）。解码用的左上下文取最近至多两条已上屏
+片段（`context_text`）；候选展示管线仍用空上下文，二者差异由 ≥0.995 份额、闭合边界
+与 `prefix_belongs_to_visible` 约束兜住。Fire 的 supplement（加权词）通道延后，故
+`acceptedTop` 守卫恒成立，已并入上文。
