@@ -29,7 +29,7 @@
    - 重写 `override func handle(_ event: NSEvent!, client sender: Any!) -> Bool`。
    - 仅处理 `event.type == .keyDown`。
    - 若包含 `.command` 或 `.control` 修饰键，直接返回 `false`。
-   - **中/英文切换由系统完成，Shell 只兜底**（§2 `TICapsLockLanguageSwitchCapable`）：系统设置开启后，短按中/英键由系统切换输入源 Hime ↔ ABC，**不翻大写灯**——ABC 侧小写键入，切回 Hime 恢复中文组字；长按进入全大写键入（留在 Hime，灯亮，敲大写），再长按灯灭。中/英键的 keyDown（keyCode `57`）若仍到达 `handle`（系统切换关闭、或事件先于输入源切换送达），先以 `KEY_ENTER` 经引擎结束当前组字（编码原文上屏、Marked Text 清空；空闲则无副作用），返回 `true` 吞掉该键，状态灯由系统维护。此后凡 `modifierFlags` 含 `.capsLock` 的 keyDown 一律返回 `false` 交给宿主——全大写灯亮状态所有键归宿主，字母以原形进正文。
+   - **中/英文切换由系统完成，Shell 只兜底且不吞键**（§2 `TICapsLockLanguageSwitchCapable`）：系统设置开启后，短按中/英键由系统切换输入源 Hime ↔ ABC，**不翻大写灯**——ABC 侧小写键入，切回 Hime 恢复中文组字；长按进入全大写键入（留在 Hime，灯亮，敲大写），再长按灯灭。中/英键的 keyDown（keyCode `57`）到达 `handle` 时（系统切换关闭、或事件先于输入源切换送达）只做两件事：以 `KEY_ENTER` 经引擎结束当前组字（编码原文上屏、Marked Text 清空；空闲则无副作用），随后 `return false` 原样放行——系统的切换逻辑只作用于未被输入法消费的 Caps Lock 事件，吞键会杀死系统切换。`handle` 对每个 Caps Lock 事件记一行 NSLog（事件类型与灯位标志）：macOS 在 HID 层过滤注入的 Caps Lock，该路径无法自动化测试，日志是唯一可回读的行为证据。此后凡 `modifierFlags` 含 `.capsLock` 的 keyDown 一律返回 `false` 交给宿主——全大写灯亮状态所有键归宿主，字母以原形进正文。
    - **中文模式下 Shift+字母直接敲大写**：`modifierFlags` 含 `.shift` 且键是字母（`charactersIgnoringModifiers` 首字符 A-Z/a-z）时返回 `false`，大写字母进宿主正文，不进引擎、不被折成小写；上档符号（`?`、`!` 等）不在此列，照常按最终字符送引擎（SPEC_MVP §3.1）。
    - 映射为 `SPEC_MVP.md` 定义的 ASCII 码：四个特殊 keyCode 为 `36`->Enter(13)、`49`->Space(32)、`51`->Backspace(8)、`53`->Escape(27)；字母取 `charactersIgnoringModifiers` 的首字符，大写折成小写；其余可打印键取 `characters` 的首字符（最终字符，数字 49-57 与可打印符号 33-126 都走这一支），于是 `?`、`!`、`:`、`"` 这类上档符号以其自身的码进入引擎（SPEC_MVP §2.1/§3.1）；仍取不到可打印字符的键（Option 组合等）返回 `false` 交给宿主。
    - 引擎返回 `handled: false` 时 `handle` 同样返回 `false`，按键直接落入宿主正文（空闲普通键与标点模式放行的符号，SPEC_MVP §3.1），组字状态与 Marked Text 不受影响。
