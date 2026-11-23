@@ -550,15 +550,26 @@ impl NgramModel {
     }
 }
 
-/// Locate the whole-sentence model file: the `HIME_SENTENCE_MODEL` environment
-/// override if it points at a readable file, else the repository
-/// `data/sentence-ngram.hng` (which is loaded by path, not committed), else
-/// `None`. Shared by the engine, the CLI and the tests so they agree on where
-/// the model lives.
+/// Locate the whole-sentence model file. Shared by the engine, the CLI and the
+/// tests so they agree on where the model lives. Search order, first readable
+/// file wins:
+///
+/// 1. `HIME_SENTENCE_MODEL` — the explicit override for tests and for a shell
+///    that ships its own model;
+/// 2. the user data folder `~/.config/hime/sentence-ngram.hng` (macOS; see
+///    [`crate::paths`]) — where an installed model is meant to live, since the
+///    large model is neither committed nor bundled;
+/// 3. the repository `data/sentence-ngram.hng` (a development checkout);
+/// 4. `data/sentence-ngram.hng` relative to the current directory.
 #[must_use]
 pub fn find_model_path() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("HIME_SENTENCE_MODEL") {
         let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(path) = crate::paths::model_path() {
         if path.is_file() {
             return Some(path);
         }
