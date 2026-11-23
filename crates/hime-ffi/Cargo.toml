@@ -1,0 +1,13 @@
+[package]
+name = "hime-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# `staticlib` is the shipping artifact for the macOS shell; `rlib` only exists
+# so integration tests can link against the crate from Rust.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+hime-core.workspace = true
+serde_json.workspace = true

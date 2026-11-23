@@ -1,0 +1,8 @@
+[package]
+name = "hime-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hime-core.workspace = true
+serde_json.workspace = true
