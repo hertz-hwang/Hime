@@ -1,3 +1,7 @@
 **/.DS_Store
 /target
 /platforms/macos/build/
+
+# Trained HFNGMF v1 whole-sentence model (191 MB, binary). Loaded at runtime by path;
+# not committed — obtain from the Hime model release, same file as Fire.
+sentence-ngram.hng

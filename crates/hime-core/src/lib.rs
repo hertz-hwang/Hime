@@ -22,6 +22,7 @@
 pub mod config;
 pub mod dictionary;
 pub mod filter;
+pub mod ngram;
 pub mod pipeline;
 pub mod processor;
 pub mod punct;
@@ -33,6 +34,7 @@ pub mod types;
 pub use config::{CodeType, Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
 pub use dictionary::{Dictionary, TableFormat};
 pub use filter::{DedupFilter, Filter, LimitFilter};
+pub use ngram::NgramModel;
 pub use pipeline::Pipeline;
 pub use processor::{Action, Processor};
 pub use scheme::{load_scheme, scan_schemes, SchemeError, SchemeInfo, SchemeMetadata};
