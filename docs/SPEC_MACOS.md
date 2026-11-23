@@ -36,7 +36,7 @@
 6. **候选面板不抢状态**（`IMKCandidates` 的两个默认行为都会绕过 Rust 会话，必须关掉）：
    - 面板创建后立即 `sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])`。默认值为 NO，即按键先给候选面板；面板的选择键默认就是数字 1-9，会自行完成选择，导致 `SPEC_MVP.md` §3 规定由引擎处理的 `1`-`5` 落到面板上，引擎仍保留旧编码继续组字。设为 YES 后按键先经 Controller（即 `hime_process_key`），未被消费的按键仍会回落到面板。
    - 重写 `override func candidateSelected(_ candidateString: NSAttributedString!)`（`IMKInputController` 基类已有实现，会自行把面板字符串上屏），在 `currentCandidates` 中按文字找到索引，向引擎回灌对应数字键 `49 + index`，由引擎完成上屏与状态清空；找不到对应候选时只记 `NSLog` 并保持组字状态。
-7. **词库路径**：`build.sh` 需将 `data/xingma_sample.tsv` 拷贝到 `Hime.app/Contents/Resources/` 下，Swift 启动时通过 `Bundle.main.path(forResource: "xingma_sample", ofType: "tsv")` 获取路径传给 `hime_init`。
+7. **词库路径**：`build.sh` 需将默认方案码表 `data/schemes/liuli_v1/liuli_table.txt`（琉璃v1）拷贝为 `Hime.app/Contents/Resources/liuli_table.txt`，Swift 启动时通过 `Bundle.main.path(forResource: "liuli_table", ofType: "txt")` 获取路径传给 `hime_init`。`data/xingma_sample.tsv` 仅作为程序测试夹具，不再进 bundle。
 
 ## 4. 命名与图标
 
