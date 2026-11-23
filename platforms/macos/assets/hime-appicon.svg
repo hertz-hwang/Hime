@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Hime 应用图标（AppIcon.icns 的设计源）：macOS 图标网格，1024 画布上
+       824x824 圆角容器（圆角 185 ≈ 22.4%），标记按 hime-mark.svg 的几何放大居中。 -->
+  <defs>
+    <linearGradient id="himeTile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC24B"/>
+      <stop offset="1" stop-color="#FF5A6E"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#himeTile)"/>
+  <g transform="translate(218.25 218.25) scale(5.875)">
+    <g fill="#FFFFFF">
+      <rect x="12" y="10" width="17" height="80" rx="8.5"/>
+      <rect x="71" y="10" width="17" height="80" rx="8.5"/>
+    </g>
+    <path d="M22 46 Q50 62 78 46" fill="none" stroke="#FFFFFF" stroke-width="17" stroke-linecap="round"/>
+  </g>
+</svg>

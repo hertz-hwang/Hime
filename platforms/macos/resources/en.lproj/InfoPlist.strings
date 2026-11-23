@@ -1,0 +1,6 @@
+/* Hime — English display name. Keys are the CFBundle* keys and the TIS input
+   source ids; the values are what System Settings and the input menu show. */
+CFBundleDisplayName = "Hime";
+CFBundleName = "Hime";
+"com.hime.inputmethod.Hime" = "Hime";
+"com.hime.inputmethod.Hime.Hans" = "Hime";
