@@ -52,8 +52,6 @@ const DIRECT: &[(u8, &str)] = &[
     (b'/', "/"),
     (b'\\', "、"),
     (b'-', "——"),
-    (b'~', "……"),
-    (b'`', "·"),
 ];
 
 /// The full-width text one ASCII punctuation key produces in Chinese mode.
@@ -128,6 +126,17 @@ mod tests {
             assert_eq!(map(*key, &mut quotes), Some(*text), "key {key:?}");
             assert!(is_mapped(*key));
         }
+    }
+
+    /// A key listed twice can never emit its second text: [`map`] keeps the
+    /// first match, so the later row is dead weight that reads as a mapping.
+    #[test]
+    fn table_has_no_duplicate_keys() {
+        let mut keys: Vec<u8> = DIRECT.iter().map(|(key, _)| *key).collect();
+        keys.sort_unstable();
+        let unique = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), unique, "DIRECT lists a punctuation key twice");
     }
 
     /// Quotes alternate open/close, each kind on its own counter.
