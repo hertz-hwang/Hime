@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn config_shrinks_the_page_and_the_digit_keys() {
         let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
-        let mut s = Session::with_config(dict, Config { page_size: 2, max_code_len: 2 });
+        let mut s = Session::with_config(dict, Config { page_size: 2, max_code_len: 2, ..Config::default() });
         let r = s.process_key(KEY_A);
         let texts: Vec<&str> = r.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["工", "戈"]);
@@ -447,7 +447,7 @@ mod tests {
         let r = s.process_key(KEY_A);
         assert_eq!(r.candidates.len(), 4);
 
-        s.set_config(Config { page_size: 1, max_code_len: 1 });
+        s.set_config(Config { page_size: 1, max_code_len: 1, ..Config::default() });
         let r = s.process_key(b'-' as u32); // swallowed; only re-renders
         assert_eq!(r.candidates.len(), 1);
         assert_eq!(r.candidates[0].text, "工");
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn out_of_range_config_is_clamped() {
         let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
-        let s = Session::with_config(dict, Config { page_size: 0, max_code_len: 100 });
+        let s = Session::with_config(dict, Config { page_size: 0, max_code_len: 100, ..Config::default() });
         assert_eq!(s.config().page_size, 1);
         assert_eq!(s.config().max_code_len, crate::MAX_CODE_LEN_LIMIT);
     }

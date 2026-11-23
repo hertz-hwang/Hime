@@ -28,7 +28,7 @@ pub mod session;
 pub mod translator;
 pub mod types;
 
-pub use config::{Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
+pub use config::{CodeType, Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
 pub use dictionary::{Dictionary, TableFormat};
 pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use pipeline::Pipeline;

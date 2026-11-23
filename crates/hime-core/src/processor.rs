@@ -177,7 +177,7 @@ mod tests {
     /// follows the session's config rather than the compiled-in defaults.
     #[test]
     fn config_moves_the_page_and_code_limits() {
-        let custom = Config { page_size: 6, max_code_len: 2 };
+        let custom = Config { page_size: 6, max_code_len: 2, ..Config::default() };
         assert_eq!(Processor::decide(KEY_6, "a", 6, custom), Action::Select(5));
         assert_eq!(
             Processor::decide(KEY_7, "a", 6, custom),
