@@ -309,7 +309,8 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 ///
 /// A 形码整句 scheme (`type = 3` in its metadata) decodes whole sentences and
 /// additionally needs the HFNGMF n-gram model; it is located as everywhere
-/// else (the `HIME_SENTENCE_MODEL` environment variable, else the bundled
+/// else (see `find_model_path`: `HIME_SENTENCE_MODEL`, then the user folder
+/// `~/.config/hime/sentence-ngram.hng`, then the bundled
 /// `data/sentence-ngram.hng`). If that model is absent, selecting such a
 /// scheme fails and leaves the engine unchanged.
 ///
@@ -345,7 +346,7 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
         CodeType::XingmaSentence => {
             let Some(model) = find_model_path() else {
                 eprintln!(
-                    "hime-ffi: scheme {path:?} is 形码整句 but no .hng model was found (set HIME_SENTENCE_MODEL)"
+                    "hime-ffi: scheme {path:?} is 形码整句 but no .hng model was found (set HIME_SENTENCE_MODEL or place ~/.config/hime/sentence-ngram.hng)"
                 );
                 return false;
             };

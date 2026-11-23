@@ -85,7 +85,8 @@ char* hime_scan_schemes(const char* dir);
  * 形码整句 scheme). Initializes the engine if needed.
  *
  * A 形码整句 scheme (metadata "type" 3) decodes whole sentences and also needs
- * the HFNGMF n-gram model, located via HIME_SENTENCE_MODEL or the bundled
+ * the HFNGMF n-gram model, located via HIME_SENTENCE_MODEL, else the user
+ * folder ~/.config/hime/sentence-ngram.hng, else the bundled
  * data/sentence-ngram.hng; if the model is absent this fails and the engine is
  * unchanged. Returns false on an invalid path or unloadable scheme/model. */
 bool hime_select_scheme(const char* scheme_dir);

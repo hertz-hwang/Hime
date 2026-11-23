@@ -154,6 +154,25 @@ pub struct Config {
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
 - `scan_schemes(dir)` 按文件夹名排序扫描，目录不可读返回空表；缺 `metadata.toml` 的普通子文件夹不算方案，单个文件夹坏了记 stderr 跳过，不拖累其余。`load_scheme(dir)` 读取单个文件夹。对外壳的接口见 §6。
 
+### 5.2 用户数据目录 (`paths`)
+
+- 每个用户有自己的数据目录，**目录结构与仓库 `data/` 一致**：合法方案目录在
+  `<数据目录>/schemes/<名字>`（与随应用打包的 `data/schemes/` 并列），整句 `.hng`
+  模型放在 `<数据目录>/sentence-ngram.hng`。模型体积大、不入库、不随 bundle 复制，
+  用户目录是其部署位置。
+- 数据目录解析（`hime-core::paths` 是唯一来源，引擎 / CLI / 外壳 / 测试共用），按
+  下列顺序取第一个非空值；空字符串视作未设置：
+  1. `HIME_CONFIG_HOME`：直接使用，它本身就指向数据目录；
+  2. `XDG_CONFIG_HOME`：追加 `hime` 子目录；
+  3. `HOME`：取 `$HOME/.config/hime`。
+- macOS 不设 XDG 变量，因此落在 `~/.config/hime`（方案目录 `~/.config/hime/schemes`，
+  模型 `~/.config/hime/sentence-ngram.hng`）。三者皆未设置时无数据目录，相关取值
+  函数返回空。
+- 对外 API：`config_dir()`、`schemes_dir()`、`model_path()`（无论文件是否存在都返回
+  路径，只用于定位；真正找可读模型仍走 `ngram::find_model_path()`）、
+  `ensure_config_layout()`（按需创建数据目录与 `schemes` 子目录并返回数据目录，
+  绝不创建模型文件，无位置可解析时返回 `NotFound`）。
+
 ## 6. C-ABI 接口定义 (`hime-ffi`)
 头文件 `hime.h` 需暴露以下 9 个函数：
 ```c
@@ -213,9 +232,11 @@ AGENTS.md §1）。`code_type` 随方案固定（§2.3、§5.1，面板只读）
   BOS / EOS 控制码点为 `CP_BOS = 0x0002`、`CP_EOS = 0x0003`。
 - `NgramModel::load` 仅做 open + mmap + 头校验即就绪（无逐进程反序列化拷贝），
   查表为直接索引；`Mmap` 是 `Send + Sync`，故 `Arc<NgramModel>` 可服务所有线程。
-- 模型文件 `data/sentence-ngram.hng` 约 191 MB，体积大、按路径加载、不入库。
-  定位顺序封装在 `ngram::find_model_path()`，引擎 / CLI / 测试共用：
-  `HIME_SENTENCE_MODEL` 环境变量 → 仓库 `data/sentence-ngram.hng` → 相对路径。
+- 模型文件 `data/sentence-ngram.hng` 约 191 MB，体积大、按路径加载、不入库，部署
+  时放在用户数据目录 `~/.config/hime/sentence-ngram.hng`（见 §5.2）。定位顺序封装
+  在 `ngram::find_model_path()`，引擎 / CLI / 测试共用，命中第一个可读文件：
+  `HIME_SENTENCE_MODEL` 环境变量 → 用户数据目录 `~/.config/hime/sentence-ngram.hng`
+  → 仓库 `data/sentence-ngram.hng` → 相对路径。
 
 ### 7.2 词图（`sentence::lexicon`）
 
@@ -261,6 +282,7 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   中的编码），词库与整句模式可互相切换。
 - CLI：`cargo run -p hime-cli -- --sentence [整句表]` 进入整句模式逐键调试；缺
   模型时打印指引并以失败退出。
-- macOS 打包：`.hng` 当前不随 bundle 复制；外壳在选中整句方案前需把
-  `HIME_SENTENCE_MODEL` 指向随应用分发的模型（或在 Resources 内置并使
-  `find_model_path` 命中），属外壳后续接线项。
+- macOS 打包：`.hng` 当前不随 bundle 复制；模型放在用户数据目录
+  `~/.config/hime/sentence-ngram.hng` 即会被 `find_model_path` 命中（外壳也可
+  `HIME_SENTENCE_MODEL` 指向随应用分发的模型）。外壳首次运行可调用
+  `ensure_config_layout` 建好目录，属外壳后续接线项。

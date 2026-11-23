@@ -11,8 +11,9 @@
 //! Without `--sentence` the table is a 形码 word table and each encoding looks
 //! up words. With `--sentence` the encoding decodes to whole sentences (形码整句)
 //! using the n-gram model; it needs the `.hng` model located the same way as
-//! everywhere else (the `HIME_SENTENCE_MODEL` environment variable, else the
-//! bundled `data/sentence-ngram.hng`).
+//! everywhere else (see `ngram::find_model_path`: `HIME_SENTENCE_MODEL`, then
+//! the user folder `~/.config/hime/sentence-ngram.hng`, then the bundled
+//! `data/sentence-ngram.hng`).
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -87,7 +88,7 @@ fn main() -> ExitCode {
     let mut session = if sentence {
         let Some(model) = find_model_path() else {
             eprintln!(
-                "hime-cli: --sentence needs a .hng model (set HIME_SENTENCE_MODEL or add data/sentence-ngram.hng)"
+                "hime-cli: --sentence needs a .hng model (set HIME_SENTENCE_MODEL, place ~/.config/hime/sentence-ngram.hng, or add data/sentence-ngram.hng)"
             );
             return ExitCode::FAILURE;
         };
