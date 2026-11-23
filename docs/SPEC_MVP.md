@@ -49,6 +49,7 @@ pub struct EngineResponse {
    - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
    - 输入 `1`-`5`：若对应索引（0-4）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
+   - 其他任何按键（含超出 4 码限制的 `a`-`z`、对应索引无候选词的 `1`-`9`、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
 
 ## 4. 词库检索 (`Dictionary`)
 - 解析 TSV 文件（`编码\t词组\t权重`）。
