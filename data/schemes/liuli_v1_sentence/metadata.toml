@@ -1,0 +1,10 @@
+name = "琉璃整句"
+describe = "单字二码、三码连打"
+author = "荒"
+type = 3
+
+max_code = 0
+auto_commit = false
+auto_commit_length = 4
+commit_next_code = 0
+ascii_punct = 1
