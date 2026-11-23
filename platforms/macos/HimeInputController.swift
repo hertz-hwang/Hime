@@ -29,6 +29,10 @@ private struct EngineResponse: Decodable {
 
 @objc(HimeInputController)
 final class HimeInputController: IMKInputController {
+    /// ASCII codes the engine maps onto candidate indexes 0-4 (SPEC_MVP §3:
+    /// digits `1`-`5` select candidates 0-4). The engine caps the list at 5.
+    private let digitKeyCode: [UInt32] = [49, 50, 51, 52, 53]
+
     private var sessionId: UInt64 = 0
     private var currentCandidates: [Candidate] = []
 
@@ -69,22 +73,27 @@ final class HimeInputController: IMKInputController {
         return try? JSONDecoder().decode(EngineResponse.self, from: data)
     }
 
+    /// Sends one key to the engine and renders whatever it returns.
+    @discardableResult
+    private func sendKey(_ keyCode: UInt32, to client: IMKTextInput?) -> Bool {
+        guard sessionId != 0, let jsonPtr = hime_process_key(sessionId, keyCode, 0) else {
+            return false
+        }
+        defer { hime_free_string(jsonPtr) }
+        guard let response = parseResponse(String(cString: jsonPtr)) else { return false }
+        currentCandidates = response.candidates
+        render(response, to: client)
+        return response.handled
+    }
+
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard event.type == .keyDown,
               !event.modifierFlags.contains(.command),
               !event.modifierFlags.contains(.control),
-              sessionId != 0,
               let keyCode = mappedKeyCode(for: event)
         else { return false }
 
-        guard let jsonPtr = hime_process_key(sessionId, keyCode, 0) else { return false }
-        defer { hime_free_string(jsonPtr) }
-        let json = String(cString: jsonPtr)
-        guard let response = parseResponse(json) else { return false }
-
-        currentCandidates = response.candidates
-        render(response, to: sender as? IMKTextInput)
-        return response.handled
+        return sendKey(keyCode, to: sender as? IMKTextInput)
     }
 
     // MARK: - Rendering
@@ -116,5 +125,21 @@ final class HimeInputController: IMKInputController {
 
     override func candidates(_ sender: Any!) -> [Any]! {
         currentCandidates.map { $0.text }
+    }
+
+    /// The panel reports a finished mouse selection here, without a key event.
+    /// Replay it to the engine as the matching digit instead of letting the
+    /// IMK base class commit text, so the Rust session stays the only owner of
+    /// the composition.
+    override func candidateSelected(_ candidateString: NSAttributedString!) {
+        let text = candidateString?.string
+        guard let index = currentCandidates.firstIndex(where: { $0.text == text }),
+              index < digitKeyCode.count
+        else {
+            NSLog("Hime: selected candidate %@ is not in the current list",
+                  candidateString?.string ?? "<nil>")
+            return
+        }
+        sendKey(digitKeyCode[index], to: client())
     }
 }

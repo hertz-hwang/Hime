@@ -30,5 +30,10 @@ guard server != nil else {
 
 sharedCandidates = IMKCandidates(server: server,
                                  panelType: kIMKSingleRowSteppingCandidatePanel)
+// Route keystrokes to the controller (that is, to the Rust engine) before the
+// panel sees them. By default the panel takes key events first and commits its
+// own selection-key choice itself, which would leave the engine composing a
+// stale encoding.
+sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
 
 NSApplication.shared.run()
