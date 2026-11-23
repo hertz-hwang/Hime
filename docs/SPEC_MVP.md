@@ -31,9 +31,26 @@ pub struct EngineResponse {
     pub handled: bool,               // true 表示输入法拦截该按键；false 表示交还给系统处理
     pub commit_text: Option<String>, // 需要直接上屏的文本
     pub preedit: String,             // 输入框内带下划线的内嵌编码预览
-    pub candidates: Vec<Candidate>,  // 当前候选词列表（最多返回前 5 个）
+    pub candidates: Vec<Candidate>,  // 当前候选词列表（长度不超过 page_size，见 §2.3）
 }
 ```
+
+### 2.3 引擎配置 (`Config` - `hime_core::config`)
+首选项窗口能改的两个数值参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义与截断候选页时读取它。
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub page_size: usize,    // 每页候选数，也是选词数字键 1..=N 的数量（1..=9）
+    pub max_code_len: usize, // 单条编码最长字母数（1..=16）
+}
+```
+
+- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`），未设置时行为与从前完全一致。
+- 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
+- `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
+- `Session::set_config` 会用新页长重建表管线并重取候选，编码输入中途改配置也能从下一次响应起生效。
 
 ## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
 按键语义集中在 `Processor::decide(key, code, candidate_count)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
@@ -44,13 +61,13 @@ pub struct EngineResponse {
    - 输入其他任何键（包括 Space, Backspace, Enter, 1-9）：输入法不拦截，返回 `handled: false`。
 
 2. **当 `input_buffer` 不为空时（编码输入状态）**：
-   - 输入 `a`-`z`（且长度 < 4）：追加到 `input_buffer`，重新检索词库，返回 `handled: true`。
+   - 输入 `a`-`z`（且长度 < `max_code_len`，默认 4，见 §2.3）：追加到 `input_buffer`，重新检索词库，返回 `handled: true`。
    - 输入 `KEY_BACKSPACE`：删除 `input_buffer` 最后一个字符。若删空，清空 `preedit` 和 `candidates`；若未删空，重新检索词库。返回 `handled: true`。
    - 输入 `KEY_ESCAPE`：清空 `input_buffer`、清空候选，返回 `handled: true`。
    - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
-   - 输入 `1`-`5`：若对应索引（0-4）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。
+   - 输入 `1`-`N`（`N` = `page_size`，默认 5）：若对应索引（0 起）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
-   - 其他任何按键（含超出 4 码限制的 `a`-`z`、对应索引无候选词的 `1`-`9`、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
+   - 其他任何按键（含超出码长限制的 `a`-`z`、对应索引无候选词或超出页长的数字、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
 
 ## 4. 检索管线 (`Pipeline`：Translator → Filter)
 「编码进、候选页出」这一步必须是可扩展的三段管线，全拼/双拼才能作为新数据源接入而不改动状态机。
@@ -69,7 +86,7 @@ pub struct EngineResponse {
 同一个词可以挂在多个编码下（`a`、`aaa`、`aaaa` 都是「工」），将来全拼源还会再报一次。`Dictionary::lookup` 是纯粹的表查询，同一文字按编码逐条上报；`DedupFilter` 才决定一页展示什么：保留首次出现的那条（精确匹配或权重最高，`comment` 随之保留），后面的重复项丢弃。原因有两个：去重是跨数据源的策略（只有 Filter 看得见合并结果），而候选窗以候选文字作标识，重复文字会塌成一格、编号却仍按数组位置计数（曾出现只剩 `2 戈 / 3 式 / 5 工`、1 和 4 空号的错乱窗口）。
 
 ### 4.3 每页数量与检索窗口
-- `MAX_CANDIDATES = 5`：一页的候选数，也是候选窗编号 `1`-`5` 能选中的数量，即 `EngineResponse.candidates` 的长度上限。
+- 一页的候选数（也是候选窗编号数字键能选中的数量、`EngineResponse.candidates` 的长度上限）由 `Config.page_size` 决定（§2.3）；默认值 `MAX_CANDIDATES = 5`。
 - `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量。
 - 顺序是「先取满窗口 → 跑完所有 Filter → 最后截断到 5」，因此被丢弃的重复项会让后面的匹配补位，而不是让这一页变短。`LimitFilter` 必须是链上最后一个 Filter。
 
@@ -80,7 +97,7 @@ pub struct EngineResponse {
 - 支持**前缀匹配**（两种格式一致）：例如输入 `a`，不仅匹配编码精确为 `a` 的词（`comment` 为空），还应匹配 `aa`, `ad` 等以 `a` 开头的词（此时 `comment` 设为剩余编码如 `~a`, `~d`）；精确匹配优先，组内排序按上述格式各自的规则，再按检索预算（`FETCH_CANDIDATES`）截断。
 
 ## 6. C-ABI 接口定义 (`hime-ffi`)
-头文件 `hime.h` 需暴露以下 5 个函数：
+头文件 `hime.h` 需暴露以下 7 个函数：
 ```c
 #include <stdint.h>
 #include <stdbool.h>
@@ -95,6 +112,13 @@ void hime_destroy_session(uint64_t session_id);
 // 处理按键，返回 EngineResponse 序列化后的 JSON 字符串指针（需调用方释放）
 char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifiers);
 
-// 释放 Rust 分配的 C 字符串
+// 读取当前引擎配置为 JSON（键见 §2.3），hime_init 前返回默认值（需调用方释放）
+char* hime_get_config(void);
+
+// 应用 JSON 形式的配置：缺失字段取默认值、越界值钳位，对现有会话与之后
+// 创建的会话都生效；null/非法 JSON 返回 false，已存储的配置保持不变
+bool hime_set_config(const char* json);
+
+// 释放 Rust 分配的 C 字符串（hime_process_key / hime_get_config 均用它）
 void hime_free_string(char* ptr);
 ```

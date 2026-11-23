@@ -2,8 +2,9 @@
 
 ## 1. 目录结构 (`platforms/macos/`)
 - `Info.plist`：macOS 输入法配置清单
-- `main.swift`：程序入口，初始化 `hime_init` 并启动 `IMKServer`
-- `HimeInputController.swift`：继承自 `IMKInputController`，对接 `hime-ffi`
+- `main.swift`：程序入口，初始化 `hime_init`、下发已保存的偏好（`PreferencesModel`）、启动 `IMKServer`
+- `HimeInputController.swift`：继承自 `IMKInputController`，对接 `hime-ffi`；重写 `menu()` 在输入法菜单里提供「Hime 首选项…」入口
+- `Preferences.swift`：「Hime 首选项」设置窗口（SwiftUI，见 §5），含 `PreferencesModel`（UserDefaults 持久化 + `hime_set_config` 下发引擎）
 - `assets/hime-appicon.svg`、`assets/hime-mark.svg`：图标设计源（SVG，矢量），见 §4
 - `resources/zh-Hans.lproj/InfoPlist.strings`、`resources/en.lproj/InfoPlist.strings`：显示名本地化文案，见 §4
 - `tools/make-icons.swift`：把 SVG 渲染成 `AppIcon.iconset` 与 `HimeMenuIcon.pdf` 的构建期工具，仅依赖 AppKit/Quartz
@@ -14,7 +15,7 @@
 - `CFBundleName`: `Hime`
 - `InputMethodConnectionName`: `Hime_1_Connection`
 - `InputMethodServerControllerClass`: `HimeInputController`
-- `LSBackgroundOnly`: `true`
+- `LSUIElement`: `true`（agent 应用，无 Dock 图标；IMK server 常驻后台，同时允许显示并聚焦首选项窗口。原先的 `LSBackgroundOnly` 进程无法成为前台、无法取得键盘焦点，不适合带设置界面的输入法）
 - `tsInputMethodIconFileKey` / `tsInputModeMenuIconFileKey` / `tsInputModeAlternateMenuIconFileKey`: 指向 `HimeMenuIcon.pdf`，`CFBundleIconFile` 指向 `AppIcon`，见 §4
 
 ## 3. Swift 关键实现细节
@@ -61,3 +62,13 @@
 - 输入法菜单：菜单由 `TextInputMenuAgent` 渲染并自带一份输入模式列表缓存。版本号不变的原地覆盖安装不会让它失效，菜单会一直保留第一次注册时读到的名称和系统通用图标。`build.sh --install` 结尾 `killall TextInputMenuAgent`，该 agent 由 launchd 按需重新拉起。（同样失效时可再 `killall imklaunchagent`；最后的手段是重新登录。）
 
 验证名称用 `kTISPropertyLocalizedName` 与 `kTISPropertyIconImageURL` 两条 TIS 属性，图标那条应指向包内的 `HimeMenuIcon.pdf`。读属性要在一个真正的 GUI 应用里做：签一个 `LSUIElement` 的小包、`open -g` 启动、在它内部枚举 `TISCreateInputSourceList`。命令行进程里 `Bundle.preferredLocalizations` 恒为 `en`（即使是 `AppleLanguages` 为 `zh-Hans-CN` 的 GUI 包也一样），它既说明不了系统设置用哪张表，也说明不了菜单用哪张表，据此推断会把正确的改动判成回归。界面上的最终确认由用户点开输入法菜单与系统设置的输入法列表完成（`osascript` 模拟点击需要辅助访问权限）。
+
+## 5. 首选项窗口（`Preferences.swift`）
+
+仿业火（Fire）输入法的设置面板：左侧栏按组分列（编码与输入 → 基本；应用 → 关于），右侧 grouped form，每行标题在左、控件右对齐，说明文字以灰色小字跟在标题后面。实现用 SwiftUI（`NavigationSplitView` + `Form`/`LabeledContent`），经 `NSHostingController` 装进 `NSWindow`。
+
+- **入口**：`HimeInputController.menu()` 返回的菜单项显示在输入法菜单的应用名分组下（就是业火那个「Fire」分组的位置），标题「Hime 首选项…」，target 指向 `PreferencesWindowController.shared`。备用入口：`applicationShouldHandleReopen`——`open -a Hime` 或双击 Hime.app 直接打开面板（IME 没有 Dock 图标，这是无菜单时的进法）。
+- **状态边界**：设置面板持有的是偏好与窗口 UI 状态，不是打字状态；引擎侧数值全部经 `hime_set_config`（SPEC_MVP §2.3）交给 Rust，Shell 只把用户请求存进 `UserDefaults` 并在 `main.swift` 启动时下发一次，「Fat Core, Thin Shell」不受影响。
+- **生效项**：候选词数量、最大码长 → 引擎（现有会话即时生效）；候选字号 → 纯 Shell 渲染参数，每次渲染候选窗前把 `NSFont` 合入 `IMKCandidates` 的样式属性（该字典同时携带启动时设置的按键转发标志，必须合并后整体 `setAttributes`，不能覆盖）。
+- **命令行编译约束**：macOS 上没有 Xcode、只有 Command Line Tools，SwiftUI 的宏插件 `SwiftUIMacros` 不在工具链里，`@State`/`@Observable` 等属性宏无法展开。首选项视图因此只用非宏的 `ObservableObject` + `@Published`：侧栏选中态放在 `PanelSelection` 对象里经 `@EnvironmentObject` 注入，不写 `@State`。给这个 target 新增 SwiftUI 代码前先确认没用宏。
+- **窗口聚焦**：`LSUIElement` 进程平时无前台，`showPreferences` 必须先 `NSApp.activate` 再 `makeKeyAndOrderFront`，否则窗口出现在用户应用背后且拿不到键盘焦点。
