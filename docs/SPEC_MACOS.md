@@ -28,6 +28,7 @@
    - 重写 `override func handle(_ event: NSEvent!, client sender: Any!) -> Bool`。
    - 仅处理 `event.type == .keyDown`。
    - 若包含 `.command` 或 `.control` 修饰键，直接返回 `false`。
+   - **Caps Lock（keyCode `57`，中文键盘的「中/英」键）即中/英文切换**：按下时先以 `KEY_ENTER` 经引擎结束当前组字（编码原文上屏、Marked Text 清空；空闲则无副作用），`handle` 返回 `true` 吞掉该键；状态灯由系统自行维护，Shell 不存灯状态。此后凡 `modifierFlags` 含 `.capsLock` 的 keyDown 一律直接返回 `false` 交给宿主——灯亮即英文模式，所有键归宿主，字母以上原形进正文。「大写折成小写」的字母映射只发生在中文模式：若在进引擎前把大写折成小写，灯亮状态将打不出大写字母。
    - 映射为 `SPEC_MVP.md` 定义的 ASCII 码：四个特殊 keyCode 为 `36`->Enter(13)、`49`->Space(32)、`51`->Backspace(8)、`53`->Escape(27)；字母取 `charactersIgnoringModifiers` 的首字符，大写折成小写；其余可打印键取 `characters` 的首字符（最终字符，数字 49-57 与可打印符号 33-126 都走这一支），于是 `?`、`!`、`:`、`"` 这类上档符号以其自身的码进入引擎（SPEC_MVP §2.1/§3.1）；仍取不到可打印字符的键（Option 组合等）返回 `false` 交给宿主。
    - 引擎返回 `handled: false` 时 `handle` 同样返回 `false`，按键直接落入宿主正文（空闲普通键与标点模式放行的符号，SPEC_MVP §3.1），组字状态与 Marked Text 不受影响。
 5. **渲染响应 (`EngineResponse`)**：
