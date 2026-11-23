@@ -102,19 +102,22 @@ final class HimeInputController: IMKInputController {
         else { return false }
 
         if event.keyCode == capsLockKeyCode {
-            // The 中/英 switch. Close any standing composition through the
-            // engine exactly as Enter would (raw letters committed, Marked
-            // Text cleared) so nothing is left dangling in 英文 mode; the LED
-            // itself is driven by the system. Consuming the key keeps the
-            // bare modifier press out of the host.
+            // The 中/英 switch itself is the system's job (ABC source switch,
+            // enabled by TICapsLockLanguageSwitchCapable, SPEC_MACOS §3.4).
+            // When the press still reaches Hime — the system switch is off, or
+            // the key arrived before the source change — close any standing
+            // composition through the engine exactly as Enter would, so no
+            // Marked Text is left dangling, and keep the bare modifier press
+            // out of the host.
             sendKey(UInt32(HIME_KEY_ENTER), to: sender as? IMKTextInput)
             return true
         }
         if event.modifierFlags.contains(.capsLock) {
-            // LED on = 英文 mode: every key belongs to the host, which
-            // inserts the uppercase characters itself. Folding letters to
-            // lowercase into the engine here is what made uppercase letters
-            // untypeable while the light was on.
+            // 全大写键入 (the switch's long-press state): Caps Lock is held
+            // on inside Hime, so every key belongs to the host, which inserts
+            // the uppercase characters itself. Folding letters to lowercase
+            // into the engine here is what made uppercase untypeable while the
+            // light was on.
             return false
         }
 
