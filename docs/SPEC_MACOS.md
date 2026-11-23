@@ -42,11 +42,12 @@
 
 ![Hime 图标与显示名](assets/hime-icon-preview.png)
 
-**中文名**：内部标识保持英文 `Hime`（`CFBundleIdentifier`、可执行名、`InputMethodConnectionName` 都不变），对用户只暴露中文名“嗨输入法”。显示名由本地化解析得到，`Info.plist` 里的 `CFBundleName` 只是 `CFBundleDevelopmentRegion` 的兜底值：
+**中文名**：内部标识保持英文 `Hime`（`CFBundleIdentifier`、可执行名、`InputMethodConnectionName` 都不变），对用户只暴露中文名“嗨输入法”。系统设置的输入法列表每个条目有两行文字，分别取自本地化表里不同的键（业火输入法的“业火输入法 / Fire”就是这个布局）：
 
-- `Contents/Resources/zh-Hans.lproj/InfoPlist.strings`：`CFBundleName`、`CFBundleDisplayName` 与两个 TIS 输入源 ID（`com.hime.inputmethod.Hime`、`com.hime.inputmethod.Hime.Hans`）都映射为 `嗨输入法`；`en.lproj` 用同样四个键映射为 `Hime`。缺这些条目时，系统设置的输入法列表会直接把输入源 ID 字符串当作名称显示。
+- 主标题：以 TIS 输入源 ID 作键，即 `com.hime.inputmethod.Hime` 与 `com.hime.inputmethod.Hime.Hans`，`zh-Hans.lproj` 里值为 `嗨输入法`，`en.lproj` 里为 `Hime`。缺这些条目时列表会直接把输入源 ID 字符串当作名称显示。
+- 主标题下方的小字：包的本地化名称，也就是 `CFBundleName` / `CFBundleDisplayName`，两个 lproj 里都保持英文 `Hime`。把这两个键也改成中文，小字就会跟主标题重复。
 - `Info.plist` 需要 `LSHasLocalizedDisplayName` 为 `true`，LaunchServices 才会改用本地化名称。
-- 输入模式 dict 里 `TISIconLabels.Primary` 设为 `嗨`，供系统在需要文字标签时（无障碍、图标不可用）使用；列表与输入法菜单里的完整名称仍来自上面的 strings。
+- 输入模式 dict 里 `TISIconLabels.Primary` 设为 `嗨`，供系统在需要文字标签时（无障碍、图标不可用）使用，不影响上面两行。
 
 **图标**：标记是字母 H：两根胶囊竖笔之间用一条下凹的微笑弧线作横笔，呼应“嗨”的问候语气。100 网格上竖笔宽 17、圆角 8.5，保证 16px 下仍是实心笔画。
 
@@ -54,4 +55,4 @@
 - `assets/hime-mark.svg`：纯黑剪影标记。`build.sh` 由它生成 19pt 页面的 `HimeMenuIcon.pdf`，由 `tsInputMethodIconFileKey` 与 `tsInputModeMenuIconFileKey`、`tsInputModeAlternateMenuIconFileKey` 引用；黑色单色矢量会被系统当作模板图标，深色菜单栏自动反色。
 - `tools/make-icons.swift`：`xcrun swift tools/make-icons.swift <assets-dir> <out-dir>`，用 `NSImage` 解码 SVG、`CGContext` 输出 PNG 与 PDF（PDF 内保留矢量路径），再由 `iconutil -c icns` 打包，不引入外部光栅化依赖。两份 SVG 里的标记几何必须保持一致。
 
-**生效与验证**：`build.sh --install` 在签名后执行 `lsregister -f` 刷新 LaunchServices 的名称与图标缓存，再调用 `TISRegisterInputSource`。验证读取 TIS 属性即可：`kTISPropertyLocalizedName` 应为 `嗨输入法`，`kTISPropertyIconImageURL` 应指向包内的 `HimeMenuIcon.pdf`。
+**生效与验证**：`build.sh --install` 在签名后执行 `lsregister -f` 刷新 LaunchServices 的名称与图标缓存，再调用 `TISRegisterInputSource`。图标可以读 TIS 属性验证：`kTISPropertyIconImageURL` 应指向包内的 `HimeMenuIcon.pdf`。名称要以系统设置界面为准：命令行工具进程没有 GUI 应用的语言偏好，`Bundle.preferredLocalizations` 会落到 `en`，所以在 CLI 里读 `kTISPropertyLocalizedName` 拿到的是 `en.lproj` 的英文值，看不到中文那一行。
