@@ -54,6 +54,14 @@ final class HimeInputController: IMKInputController {
 
     // MARK: - Key handling
 
+    /// Whether the event is a letter key whatever Shift or Caps Lock add to
+    /// it. `charactersIgnoringModifiers` skips Shift, so letters report a-z.
+    private func isLetterKey(_ event: NSEvent) -> Bool {
+        guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first?.value
+        else { return false }
+        return (65...90).contains(scalar) || (97...122).contains(scalar)
+    }
+
     /// Maps a macOS virtual key code / character to the ASCII key code
     /// accepted by hime_process_key (SPEC_MVP §2.1). Nil = unmapped.
     private func mappedKeyCode(for event: NSEvent) -> UInt32? {
@@ -118,6 +126,13 @@ final class HimeInputController: IMKInputController {
             // the uppercase characters itself. Folding letters to lowercase
             // into the engine here is what made uppercase untypeable while the
             // light was on.
+            return false
+        }
+        if event.modifierFlags.contains(.shift), isLetterKey(event) {
+            // Shift + letter = capital letter: like every macOS CJK input
+            // method, the capital goes straight to the host and never into a
+            // lowercase encoding; a standing composition and its Marked Text
+            // stay untouched.
             return false
         }
 
