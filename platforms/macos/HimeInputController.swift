@@ -104,21 +104,27 @@ final class HimeInputController: IMKInputController {
     }
 
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+        // Field diagnostic: the Caps Lock path is only reachable from real
+        // hardware (macOS filters injected Caps Lock events), so the event
+        // shape it delivers can only be observed here.
+        if event.keyCode == capsLockKeyCode {
+            NSLog("Hime: Caps Lock event type=%d capsLockFlag=%d",
+                  event.type.rawValue, event.modifierFlags.contains(.capsLock) ? 1 : 0)
+        }
         guard event.type == .keyDown,
               !event.modifierFlags.contains(.command),
               !event.modifierFlags.contains(.control)
         else { return false }
 
         if event.keyCode == capsLockKeyCode {
-            // The 中/英 switch itself is the system's job (ABC source switch,
-            // enabled by TICapsLockLanguageSwitchCapable, SPEC_MACOS §3.4).
-            // When the press still reaches Hime — the system switch is off, or
-            // the key arrived before the source change — close any standing
-            // composition through the engine exactly as Enter would, so no
-            // Marked Text is left dangling, and keep the bare modifier press
-            // out of the host.
+            // The 中/英 switch is the system's job (ABC source switch, gated
+            // by TICapsLockLanguageSwitchCapable, SPEC_MACOS §2/§3.4) and
+            // acts on a Caps Lock event the IME did not consume. Close any
+            // standing composition through the engine exactly as Enter would
+            // so no Marked Text dangles across a source change, then release
+            // the key untouched.
             sendKey(UInt32(HIME_KEY_ENTER), to: sender as? IMKTextInput)
-            return true
+            return false
         }
         if event.modifierFlags.contains(.capsLock) {
             // 全大写键入 (the switch's long-press state): Caps Lock is held
