@@ -1,5 +1,7 @@
-/* Hime — 简体中文显示名。键为 CFBundle* 与 TIS 输入源 ID，值即系统设置与输入法菜单里显示的文案。 */
-CFBundleDisplayName = "嗨输入法";
-CFBundleName = "嗨输入法";
+/* Hime — 简体中文显示名。
+   TIS 输入源 ID 作键的值是输入法列表与菜单里的主标题；CFBundleName 与
+   CFBundleDisplayName 保持英文 Hime，列表主标题下方那行小字显示的就是它。 */
+CFBundleDisplayName = "Hime";
+CFBundleName = "Hime";
 "com.hime.inputmethod.Hime" = "嗨输入法";
 "com.hime.inputmethod.Hime.Hans" = "嗨输入法";
