@@ -207,7 +207,7 @@ private struct BasicView: View {
                                value: $model.pageSize,
                                range: PreferencesModel.pageSizeRange)
                     stepperRow(title: "最大码长",
-                               hint: "琉璃v1 编码最长为 4",
+                               hint: "单次编码的最长字母数",
                                value: $model.maxCodeLen,
                                range: PreferencesModel.maxCodeLenRange)
                 }
@@ -270,7 +270,7 @@ private struct AboutView: View {
                     .fontWeight(.semibold)
                 Text("版本 \(version)")
                     .foregroundStyle(.secondary)
-                Text("琉璃v1 形码 · Rust 引擎")
+                Text("Rust 引擎")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
