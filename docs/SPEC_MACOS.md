@@ -2,7 +2,7 @@
 
 ## 1. 目录结构 (`platforms/macos/`)
 - `Info.plist`：macOS 输入法配置清单
-- `main.swift`：程序入口，初始化 `hime_init`、下发已保存的偏好（`PreferencesModel`）、启动 `IMKServer`
+- `main.swift`：程序入口，经 `PreferencesModel.startup` 用包内方案启动引擎（扫描 `Resources/schemes`、`hime_select_scheme` 选中持久化的或第一个方案、回放已保存的偏好）、启动 `IMKServer`
 - `HimeInputController.swift`：继承自 `IMKInputController`，对接 `hime-ffi`；重写 `menu()` 在输入法菜单里提供「Hime 首选项…」入口
 - `Preferences.swift`：「Hime 首选项」设置窗口（SwiftUI，见 §5），含 `PreferencesModel`（UserDefaults 持久化 + `hime_set_config` 下发引擎）
 - `assets/hime-appicon.svg`、`assets/hime-mark.svg`：图标设计源（SVG，矢量），见 §4
@@ -37,7 +37,7 @@
 6. **候选面板不抢状态**（`IMKCandidates` 的两个默认行为都会绕过 Rust 会话，必须关掉）：
    - 面板创建后立即 `sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])`。默认值为 NO，即按键先给候选面板；面板的选择键默认就是数字 1-9，会自行完成选择，导致 `SPEC_MVP.md` §3 规定由引擎处理的 `1`-`5` 落到面板上，引擎仍保留旧编码继续组字。设为 YES 后按键先经 Controller（即 `hime_process_key`），未被消费的按键仍会回落到面板。
    - 重写 `override func candidateSelected(_ candidateString: NSAttributedString!)`（`IMKInputController` 基类已有实现，会自行把面板字符串上屏），在 `currentCandidates` 中按文字找到索引，向引擎回灌对应数字键 `49 + index`，由引擎完成上屏与状态清空；找不到对应候选时只记 `NSLog` 并保持组字状态。
-7. **词库路径**：`build.sh` 需将默认方案码表 `data/schemes/liuli_v1/liuli_table.txt`（琉璃v1）拷贝为 `Hime.app/Contents/Resources/liuli_table.txt`，Swift 启动时通过 `Bundle.main.path(forResource: "liuli_table", ofType: "txt")` 获取路径传给 `hime_init`。`data/xingma_sample.tsv` 仅作为程序测试夹具，不再进 bundle。
+7. **方案打包与启动选择**：`build.sh` 把整个 `data/schemes/` 拷成 `Hime.app/Contents/Resources/schemes`（每方案一个文件夹），Swift 启动时 `Bundle.main.path(forResource: "schemes", ofType: nil)` 取目录，`hime_scan_schemes` 列出方案、`hime_select_scheme` 加载选中的方案，不再单独打包 `liuli_table.txt`，也不再调用 `hime_init`。选中的方案文件夹名（如 `liuli_v1`）持久化在 UserDefaults，下次启动仍在候选内时沿用，否则取扫描结果的第一个。`data/xingma_sample.tsv` 仅作为程序测试夹具，不进 bundle。
 
 ## 4. 命名与图标
 
@@ -69,7 +69,7 @@
 仿业火（Fire）输入法的设置面板：左侧栏按组分列（编码与输入 → 基本；应用 → 关于），右侧 grouped form，每行标题在左、控件右对齐，说明文字以灰色小字跟在标题后面。实现用 SwiftUI（`NavigationSplitView` + `Form`/`LabeledContent`），经 `NSHostingController` 装进 `NSWindow`。
 
 - **入口**：`HimeInputController.menu()` 返回的菜单项显示在输入法菜单的应用名分组下（就是业火那个「Fire」分组的位置），标题「Hime 首选项…」。分发机制：TextInputMenuAgent 对菜单项做特殊处理——action 必须声明为 `showPreferences:`，选中时系统调用**活跃 controller 实例**上的同名方法，`NSMenuItem.target` 被忽略；因此 `HimeInputController` 重写 `showPreferences(_:)`（默认实现找 preferences.nib，本工程没有）转发给 `PreferencesWindowController.shared`。备用入口：`applicationShouldHandleReopen`——`open -a Hime` 或双击 Hime.app 直接打开面板（IME 没有 Dock 图标，这是无菜单时的进法）。注意：`menu()` 只在存在活跃输入会话（有客户端连上 IMK server）时才会被调用并出现在菜单里。
-- **状态边界**：设置面板持有的是偏好与窗口 UI 状态，不是打字状态；引擎侧数值全部经 `hime_set_config`（SPEC_MVP §2.3）交给 Rust，Shell 只把用户请求存进 `UserDefaults` 并在 `main.swift` 启动时下发一次，「Fat Core, Thin Shell」不受影响。
-- **生效项**：候选词数量、最大码长 → 引擎（现有会话即时生效）；候选字号 → 纯 Shell 渲染参数，每次渲染候选窗前把 `NSFont` 合入 `IMKCandidates` 的样式属性（该字典同时携带启动时设置的按键转发标志，必须合并后整体 `setAttributes`，不能覆盖）。
+- **状态边界**：设置面板持有的是偏好与窗口 UI 状态，不是打字状态。引擎是这些值的唯一所有者：方案列表来自 `hime_scan_schemes`，面板初值来自 `hime_get_config`（启动流程：先 `hime_select_scheme` 让引擎落在方案默认值上，再叠加 UserDefaults 里用户上次请求的值下发回去），用户改动全部经 `hime_set_config`（SPEC_MVP §2.3）交给 Rust，「Fat Core, Thin Shell」不受影响。UserDefaults 始终保存「最后一次生效的值」，用于重启回放。
+- **基本页的行**：方案组——「方案码表」选框（选项来自扫描结果的 `name`，切换走 `hime_select_scheme`，见 SPEC_MVP §5.1/§6：引擎重载该方案默认值，面板随后镜像引擎的新值并覆盖存盘，因此上次方案的改动随切换作废）、「方案说明 / 作者」两行只读展示元数据的 `describe`/`author`；编码组——「编码类型」选框（`type`，形码/全拼/双拼/形码整句，值即 2/0/1/3）、「最大码长」（`max_code`）、「自动上屏」开关（`auto_commit`）、「自动上屏码长」（`auto_commit_length`，关闭时禁用控件）、「次码提交」（`commit_next_code`，0 为关闭）；候选窗组——候选字号。候选词数量、编码类型与上述编码组数值 → 引擎（现有会话即时生效）；候选字号 → 纯 Shell 渲染参数，每次渲染候选窗前把 `NSFont` 合入 `IMKCandidates` 的样式属性（该字典同时携带启动时设置的按键转发标志，必须合并后整体 `setAttributes`，不能覆盖）。
 - **命令行编译约束**：macOS 上没有 Xcode、只有 Command Line Tools，SwiftUI 的宏插件 `SwiftUIMacros` 不在工具链里，`@State`/`@Observable` 等属性宏无法展开。首选项视图因此只用非宏的 `ObservableObject` + `@Published`：侧栏选中态放在 `PanelSelection` 对象里经 `@EnvironmentObject` 注入，不写 `@State`。给这个 target 新增 SwiftUI 代码前先确认没用宏。
 - **窗口聚焦**：`LSUIElement` 进程平时无前台。`showPreferences` 先 `makeKeyAndOrderFront`，再在下一个 runloop 周期 `NSApp.activate(ignoringOtherApps:)`（macOS 14+ 的无参 `activate()` 在本进程实测无效）。输入法菜单路径的激活请求可能被系统焦点窃取防护拦下：窗口会正常浮到前台，但键盘焦点留在原前台应用，用户点一下窗口即恢复；`open -a Hime` 的 reopen 路径能正常拿到前台。
