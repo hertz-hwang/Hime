@@ -3,8 +3,8 @@
        824x824 圆角容器（圆角 185 ≈ 22.4%），标记按 hime-mark.svg 的几何放大居中。 -->
   <defs>
     <linearGradient id="himeTile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFC24B"/>
-      <stop offset="1" stop-color="#FF5A6E"/>
+      <stop offset="0" stop-color="#17A99A"/>
+      <stop offset="1" stop-color="#0E8078"/>
     </linearGradient>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#himeTile)"/>
