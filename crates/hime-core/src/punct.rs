@@ -113,8 +113,10 @@ mod tests {
         (b'~', "~"),
     ];
 
-    /// The symbols the table leaves out: released to the host in both modes.
-    const RELEASED: &[u8] = b"#%&*+=@_|";
+    /// The symbols the table leaves out, so no punctuation is ever committed
+    /// for them. `-` and `=` are the paging keys: `Processor` swallows them
+    /// while composing and releases them only when idle (SPEC_MVP §3).
+    const RELEASED: &[u8] = b"#%&*+-=@_|";
 
     /// Every documented key maps to its documented text.
     #[test]

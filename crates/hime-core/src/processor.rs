@@ -11,8 +11,9 @@
 //! the encoding: `-` turns to the previous page and `=` to the next, reported
 //! as [`Action::PageUp`] / [`Action::PageDown`] and applied by
 //! [`Session`](crate::session::Session). They fire only while a candidate is on
-//! screen, so with nothing to page through `-`/`=` keep their punctuation or
-//! pass-through meaning.
+//! screen; while composing with nothing to page through both keys are
+//! swallowed, so neither reaches the host nor commits any text. Idle, they stay
+//! ordinary keys the application types.
 
 use crate::config::Config;
 use crate::punct;
@@ -111,10 +112,13 @@ impl Processor {
             KEY_SPACE => Action::CommitRaw,
             KEY_ENTER => Action::CommitRaw,
             // Paging turns the candidate list but only while a candidate is
-            // shown; with nothing to page through `-`/`=` fall through to the
-            // punctuation/passthrough arms below.
+            // shown. With nothing to page through the key is swallowed:
+            // neither `-` nor `=` may leak to the host mid-composition, and
+            // neither commits punctuation.
             KEY_PAGE_UP if candidate_count > 0 => Action::PageUp,
+            KEY_PAGE_UP => Action::Noop,
             KEY_PAGE_DOWN if candidate_count > 0 => Action::PageDown,
+            KEY_PAGE_DOWN => Action::Noop,
             // A digit whose candidate is missing, or one beyond the keys the
             // page can offer, is swallowed rather than released.
             key if is_selection_key(key, config) => {
@@ -272,30 +276,30 @@ mod tests {
     }
 
     /// The paging keys turn the list only while a candidate is shown. With no
-    /// candidate — and always when idle — they fall through to their ordinary
-    /// punctuation/passthrough meaning, so `-`/`=` reach the host.
+    /// candidate they are swallowed — nothing is committed and nothing reaches
+    /// the host — and only when idle do they stay ordinary typed keys.
     #[test]
     fn page_keys_only_fire_with_candidates() {
         assert_eq!(composing(KEY_PAGE_UP, "a", 1), Action::PageUp);
         assert_eq!(composing(KEY_PAGE_DOWN, "a", 1), Action::PageDown);
         assert_eq!(
             composing(KEY_PAGE_UP, "q", 0),
-            Action::Pass,
-            "no candidate: - releases"
+            Action::Noop,
+            "no candidate: - does nothing"
         );
         assert_eq!(
             composing(KEY_PAGE_DOWN, "q", 0),
-            Action::Pass,
-            "no candidate: = releases"
+            Action::Noop,
+            "no candidate: = does nothing"
         );
         assert_eq!(idle(KEY_PAGE_UP), Action::Pass);
         assert_eq!(idle(KEY_PAGE_DOWN), Action::Pass);
     }
 
-    /// Paging wins over 中文标点 for `-` (a mapped key) while a candidate is
-    /// shown; with none, `-` keeps committing its mapped punctuation.
+    /// Swallowing the page keys does not depend on 中文标点: `-` emits no
+    /// punctuation there either, with or without a candidate.
     #[test]
-    fn page_keys_outrank_chinese_punctuation_only_with_candidates() {
+    fn page_keys_stay_silent_in_chinese_punct_mode() {
         let cn = Config {
             ascii_punct: 1,
             ..Config::default()
@@ -303,8 +307,13 @@ mod tests {
         assert_eq!(Processor::decide(KEY_PAGE_UP, "a", 1, cn), Action::PageUp);
         assert_eq!(
             Processor::decide(KEY_PAGE_UP, "q", 0, cn),
-            Action::CommitCandidatePunct(b'-'),
-            "without a candidate - still emits -"
+            Action::Noop,
+            "no candidate: - emits nothing"
+        );
+        assert_eq!(
+            Processor::decide(KEY_PAGE_DOWN, "q", 0, cn),
+            Action::Noop,
+            "no candidate: = emits nothing"
         );
     }
 

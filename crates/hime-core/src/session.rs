@@ -717,15 +717,16 @@ mod tests {
         assert_eq!(r.candidates, d_first_page, "editing resets to page 1");
     }
 
-    /// Without a candidate to page through, `-`/`=` release to the host in
-    /// English mode instead of being consumed as page keys.
+    /// Without a candidate to page through, `-`/`=` are consumed silently: no
+    /// commit, nothing reaching the host, composition left intact.
     #[test]
-    fn paging_keys_pass_through_without_candidates() {
+    fn paging_keys_do_nothing_without_candidates() {
         let mut s = session();
         s.process_key(KEY_Q); // "q" has no candidate in the sample
         for key in [KEY_PAGE_UP, KEY_PAGE_DOWN] {
             let r = s.process_key(key);
-            assert!(!r.handled, "key {key} with no candidate must reach the host");
+            assert!(r.handled, "no candidate: the key stays with the engine");
+            assert_eq!(r.commit_text, None, "key {key} commits nothing");
             assert_eq!(r.preedit, "q", "the composition stands");
         }
     }
