@@ -124,6 +124,10 @@ pub extern "C" fn hime_destroy_session(session_id: u64) {
 /// Process one keystroke and return the `EngineResponse` as a
 /// NUL-terminated JSON string owned by the caller (release it with
 /// [`hime_free_string`]). `modifiers` is reserved and ignored in the MVP.
+/// Printable keys pass their ASCII code, punctuation included: in the
+/// `ascii_punct = 1` mode the engine commits full-width punctuation for
+/// mapped keys, and answers `handled: false` for the rest so the host
+/// inserts them itself.
 ///
 /// Returns null if the engine is uninitialized, the session id is unknown,
 /// or serialization fails.

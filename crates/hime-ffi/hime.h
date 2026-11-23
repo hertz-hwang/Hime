@@ -22,7 +22,8 @@ extern "C" {
 #endif
 
 /* Virtual key codes accepted by hime_process_key. Printable keys pass their
- * ASCII code: lowercase letters are 97..122, digits are 49..57. */
+ * ASCII code: lowercase letters are 97..122, digits are 49..57, punctuation
+ * its own shifted code (e.g. '?' is 63). */
 #define HIME_KEY_BACKSPACE 8
 #define HIME_KEY_ENTER 13
 #define HIME_KEY_ESCAPE 27
@@ -45,8 +46,10 @@ void hime_destroy_session(uint64_t session_id);
 /* Process one keystroke. Returns a NUL-terminated JSON string describing the
  * EngineResponse (fields: handled, commit_text, preedit, candidates), or NULL
  * on unknown session / uninitialized engine. modifiers is reserved and
- * ignored in the MVP. The caller must release the string with
- * hime_free_string. */
+ * ignored in the MVP. handled is false when the engine leaves the key to the
+ * host, which happens for idle ordinary keys and, in punctuation mode, for
+ * punctuation the mapping does not claim. The caller must release the string
+ * with hime_free_string. */
 char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifiers);
 
 /* Read the current engine config as JSON:

@@ -191,6 +191,18 @@ fn full_flow_through_c_abi() {
     assert_eq!(r["handled"], false, "the switch cleared the composition");
     let r = process(live, b'd' as u32);
     assert_eq!(r["candidates"][0]["text"], "的");
+
+    // The scheme's ascii_punct = 1 is live: the comma commits the candidate
+    // with the full-width form, and stays in the engine.
+    let r = process(live, b',' as u32);
+    assert_eq!(r["handled"], true);
+    assert_eq!(r["commit_text"], "的，");
+    assert_eq!(r["preedit"], "");
+    let r = process(live, b',' as u32);
+    assert_eq!(r["commit_text"], "，", "idle punctuation commits on its own");
+    // An unmapped symbol still reaches the host application.
+    let r = process(live, b'%' as u32);
+    assert_eq!(r["handled"], false, "unmapped punctuation is released");
     hime_destroy_session(live);
 
     // A folder that is not a scheme leaves the engine untouched.
