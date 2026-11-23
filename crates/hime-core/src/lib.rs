@@ -24,6 +24,7 @@ pub mod dictionary;
 pub mod filter;
 pub mod pipeline;
 pub mod processor;
+pub mod punct;
 pub mod scheme;
 pub mod session;
 pub mod translator;

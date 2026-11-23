@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::dictionary::Dictionary;
 use crate::pipeline::Pipeline;
 use crate::processor::{Action, Processor};
+use crate::punct::{self, QuotePair};
 use crate::types::{Candidate, EngineResponse};
 
 /// One typing session. All typing state lives here; shells just render the
@@ -26,6 +27,9 @@ pub struct Session {
     pipeline: Pipeline,
     input_buffer: String,
     candidates: Vec<Candidate>,
+    /// Quote pairing for 中文标点; deliberately survives [`Session::clear`]
+    /// so a quote opened before a commit still closes after it.
+    quotes: QuotePair,
 }
 
 impl Session {
@@ -46,6 +50,7 @@ impl Session {
             pipeline,
             input_buffer: String::new(),
             candidates: Vec::new(),
+            quotes: QuotePair::default(),
         }
     }
 
@@ -58,6 +63,7 @@ impl Session {
             pipeline,
             input_buffer: String::new(),
             candidates: Vec::new(),
+            quotes: QuotePair::default(),
         }
     }
 
@@ -92,11 +98,14 @@ impl Session {
     /// Feed one key (see the `KEY_*` constants and ASCII codes in
     /// `hime_core`) and return the full state the shell must render.
     ///
-    /// While idle, only letters are consumed; every other key returns
-    /// `handled: false`. Once composing, every key returns `handled: true`:
-    /// unrecognized keys (letters over the cap, digits without a candidate
-    /// behind them, any other key code) are swallowed as no-ops so the
-    /// host's Marked Text keeps running.
+    /// While idle, letters and — in the 中文标点 mode of
+    /// [`Config::ascii_punct`] — mapped punctuation keys are consumed; every
+    /// other key returns `handled: false`. Once composing, every key returns
+    /// `handled: true` except printable punctuation the punctuation mode
+    /// releases, which keeps `handled: false` so the character reaches the
+    /// host; unrecognized keys (letters over the cap, digits without a
+    /// candidate behind them, any other key code) are swallowed as no-ops so
+    /// the host's Marked Text keeps running.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
         let decision = Processor::decide(key, &self.input_buffer, self.candidates.len(), self.config);
         match decision {
@@ -126,6 +135,28 @@ impl Session {
             }
             Action::CommitRaw => {
                 let commit = mem::take(&mut self.input_buffer);
+                self.clear();
+                self.response(true, Some(commit))
+            }
+            Action::CommitPunct(byte) => match punct::map(byte, &mut self.quotes) {
+                Some(text) => self.response(true, Some(text.to_owned())),
+                // Processor gates on the same table, so this only guards
+                // the two from ever disagreeing.
+                None => self.response(false, None),
+            },
+            Action::CommitCandidatePunct(byte) => {
+                let Some(punctuation) = punct::map(byte, &mut self.quotes) else {
+                    return self.response(true, None);
+                };
+                // Same commit choice as Space: the first candidate, or the
+                // letters themselves when nothing matches.
+                let mut commit = self
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.text.clone())
+                    .or_else(|| Some(mem::take(&mut self.input_buffer)))
+                    .unwrap_or_default();
+                commit.push_str(punctuation);
                 self.clear();
                 self.response(true, Some(commit))
             }
@@ -267,7 +298,8 @@ mod tests {
     #[test]
     fn idle_passes_through_non_letters() {
         let mut s = session();
-        for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9, b'-' as u32] {
+        for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9,
+                    b'-' as u32, b',' as u32, b'"' as u32] {
             let r = s.process_key(key);
             assert!(!r.handled, "idle key {key} must pass through");
             assert!(r.commit_text.is_none());
@@ -448,13 +480,18 @@ mod tests {
     fn undefined_keys_are_swallowed_while_composing() {
         let mut s = session();
         s.process_key(KEY_A);
-        for key in [b'-' as u32, b'0' as u32, 0, 0x1000] {
+        for key in [b'0' as u32, 0, 0x1000] {
             let r = s.process_key(key);
             assert!(r.handled, "key {key} must be swallowed while composing");
             assert!(r.commit_text.is_none());
             assert_eq!(r.preedit, "a");
             assert!(!r.candidates.is_empty());
         }
+        // Printable punctuation is the exception: English mode releases it
+        // to the host even mid-composition, without disturbing the encoding.
+        let r = s.process_key(b',' as u32);
+        assert!(!r.handled, "English punctuation must reach the host");
+        assert_eq!(r.preedit, "a");
         // The composition is untouched and still functional.
         let r = s.process_key(KEY_SPACE);
         assert_eq!(r.commit_text.as_deref(), Some("工"));
@@ -635,5 +672,53 @@ mod tests {
         assert_eq!(r.commit_text.as_deref(), Some("五工"), "overflow for gg plus auto-commit for a");
         assert_eq!(r.preedit, "");
         assert!(!s.process_key(KEY_SPACE).handled);
+    }
+
+    /// 中文标点 mode: mapped keys commit their full-width text straight
+    /// away, with no composition ever opening.
+    #[test]
+    fn chinese_mode_commits_full_width_punctuation_when_idle() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        let r = s.process_key(b',' as u32);
+        assert!(r.handled, "the engine claims the key");
+        assert_eq!(r.commit_text.as_deref(), Some("\u{FF0C}"));
+        assert!(r.preedit.is_empty());
+        assert!(r.candidates.is_empty());
+        // A letter still opens a composition after a punctuation commit.
+        assert!(s.process_key(KEY_A).handled);
+        assert_eq!(s.process_key(KEY_A).preedit, "aa");
+    }
+
+    /// Mid-composition punctuation goes on screen with the first candidate;
+    /// without any candidate it commits the raw letters (the Space fallback).
+    #[test]
+    fn chinese_mode_punctuation_commits_the_candidate_with_it() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        s.process_key(KEY_A); // 工/戈/式/匿
+        let r = s.process_key(b',' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("\u{5DE5}\u{FF0C}"));
+        assert!(r.preedit.is_empty());
+        assert!(!s.process_key(KEY_SPACE).handled, "the composition ended");
+
+        s.process_key(KEY_Q); // "q" has no candidate in the sample
+        let r = s.process_key(b'.' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("q\u{3002}"));
+    }
+
+    /// Quote pairing is session state that crosses commits: the second quote
+    /// typed after an unrelated commit is still the closing glyph.
+    #[test]
+    fn chinese_mode_quote_pairing_crosses_commits() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        assert_eq!(s.process_key(b'"' as u32).commit_text.as_deref(), Some("\u{201C}"));
+        s.process_key(KEY_A);
+        let r = s.process_key(KEY_1); // commits 工
+        assert_eq!(r.commit_text.as_deref(), Some("\u{5DE5}"));
+        assert_eq!(s.process_key(b'"' as u32).commit_text.as_deref(), Some("\u{201D}"));
+        // Unmapped symbols still pass through in Chinese mode.
+        assert!(!s.process_key(b'%' as u32).handled);
     }
 }

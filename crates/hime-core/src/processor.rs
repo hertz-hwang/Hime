@@ -12,6 +12,7 @@
 //! touching the encoding.
 
 use crate::config::Config;
+use crate::punct;
 use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
 /// What the engine should do about one key.
@@ -34,6 +35,13 @@ pub enum Action {
     OverflowCommit(u8),
     /// Commit the encoding letters as typed.
     CommitRaw,
+    /// Commit the 中文标点 text of this ASCII punctuation key (the
+    /// `Config::ascii_punct = 1` mode) and stay idle.
+    CommitPunct(u8),
+    /// Commit the current encoding's first candidate (the raw letters when
+    /// no candidate matches) followed by the 中文标点 text of this key, and
+    /// end the composition.
+    CommitCandidatePunct(u8),
     /// Intercepted with no effect, so the host's Marked Text keeps running.
     Noop,
 }
@@ -52,15 +60,17 @@ impl Processor {
     /// `code` is the encoding typed so far — empty means idle — and
     /// `candidate_count` is the length of the list the shell is rendering, so
     /// a selection is validated against exactly what the user can see.
-    /// `config` supplies this session's code-length cap and page size.
+    /// `config` supplies this session's code-length cap, page size and
+    /// punctuation mode.
     pub fn decide(key: u32, code: &str, candidate_count: usize, config: Config) -> Action {
         let letter = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8);
 
-        // Idle: only a letter starts a composition; everything else belongs to
-        // the application.
+        // Idle: a letter starts a composition, 中文标点 mode commits its
+        // mapped punctuation, everything else belongs to the application.
         if code.is_empty() {
             return match letter {
                 Some(byte) => Action::AppendCode(byte),
+                None if chinese_punct(config) && is_punct_key(key) => Action::CommitPunct(key as u8),
                 None => Action::Pass,
             };
         }
@@ -97,7 +107,15 @@ impl Processor {
                     Action::Noop
                 }
             }
-            // Any other key code is swallowed the same way: composition state
+            // 中文标点 mode consumes the keys its table maps; the mapped
+            // text joins the candidate on commit.
+            key if chinese_punct(config) && is_punct_key(key) => {
+                Action::CommitCandidatePunct(key as u8)
+            }
+            // Printable punctuation the mode does not map stays with the
+            // application: releasing it leaves the Marked Text standing.
+            key if is_symbol_key(key) => Action::Pass,
+            // Any other key code is swallowed: composition state
             // stays untouched so the host's Marked Text is never interrupted
             // mid-composition.
             _ => Action::Noop,
@@ -108,6 +126,21 @@ impl Processor {
 /// Digits that can name a candidate: `1` up to the configured page size.
 fn is_selection_key(key: u32, config: Config) -> bool {
     (ASCII_1..ASCII_1 + config.page_size as u32).contains(&key)
+}
+
+/// The 中文标点 mode of `Config::ascii_punct`; any other value is English.
+fn chinese_punct(config: Config) -> bool {
+    config.ascii_punct == 1
+}
+
+/// An ASCII punctuation key whose key the 中文标点 mapping covers.
+fn is_punct_key(key: u32) -> bool {
+    u8::try_from(key).is_ok_and(punct::is_mapped)
+}
+
+/// A printable ASCII punctuation/symbol key (letters and digits excluded).
+fn is_symbol_key(key: u32) -> bool {
+    u8::try_from(key).is_ok_and(punct::is_symbol)
 }
 
 #[cfg(test)]
@@ -179,9 +212,50 @@ mod tests {
 
     #[test]
     fn anything_else_is_swallowed_while_composing() {
-        for key in [b'-' as u32, b'0' as u32, 0, 0x1000] {
+        for key in [b'0' as u32, 0, 0x1000] {
             assert_eq!(composing(key, "a", 5), Action::Noop, "key {key}");
         }
+    }
+
+    /// English punctuation mode (the default) never claims a punctuation
+    /// key: idle releases it and composing releases it too.
+    #[test]
+    fn english_mode_releases_punctuation() {
+        for key in [b',' as u32, b'.' as u32, b'?' as u32, b'"' as u32, b'-' as u32] {
+            assert_eq!(idle(key), Action::Pass, "idle key {key}");
+            assert_eq!(
+                composing(key, "a", 1),
+                Action::Pass,
+                "composing key {key} must reach the host"
+            );
+        }
+    }
+
+    /// The 中文标点 mode claims only the keys its table maps; letters,
+    /// digits and editing keys keep their own meanings.
+    #[test]
+    fn chinese_mode_claims_mapped_punctuation() {
+        let cn = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(Processor::decide(b',' as u32, "", 0, cn), Action::CommitPunct(b','));
+        assert_eq!(
+            Processor::decide(b',' as u32, "a", 1, cn),
+            Action::CommitCandidatePunct(b','),
+            "mid-composition punctuation joins the candidate commit"
+        );
+        assert_eq!(
+            Processor::decide(b'%' as u32, "", 0, cn),
+            Action::Pass,
+            "unmapped keys stay passed through"
+        );
+        assert_eq!(
+            Processor::decide(b'%' as u32, "a", 1, cn),
+            Action::Pass,
+            "unmapped keys are released even mid-composition"
+        );
+        assert_eq!(Processor::decide(KEY_A, "", 0, cn), Action::AppendCode(b'a'));
+        assert_eq!(Processor::decide(KEY_1, "a", 1, cn), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_BACKSPACE, "a", 1, cn), Action::DeleteCode);
+        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn), Action::Select(0));
     }
 
     /// The preferences window moves both limits, and the decision table
