@@ -80,6 +80,11 @@ final class PreferencesModel: ObservableObject {
         default: return "形码"
         }
     }
+    /// 形码整句 (`code_type = 3`). The word-code knobs — `max_code`,
+    /// `auto_commit_length`, `commit_next_code` — are inert under it, so the
+    /// panel greys them out; `auto_commit` stays live as the sentence
+    /// auto-commit switch (SPEC §7.6).
+    var isSentence: Bool { codeType == 3 }
     /// Commit a unique candidate automatically (`auto_commit`).
     @Published var autoCommit: Bool { didSet { settingChanged() } }
     /// Code length auto-commit needs (`auto_commit_length`).
@@ -398,6 +403,7 @@ private struct BasicView: View {
                                hint: "单次编码的最长字母数",
                                value: $model.maxCodeLen,
                                range: PreferencesModel.maxCodeLenRange)
+                        .disabled(model.isSentence)
                     switchRow(title: "自动上屏",
                               hint: "唯一候选达到码长时直接提交",
                               isOn: $model.autoCommit)
@@ -405,11 +411,12 @@ private struct BasicView: View {
                                hint: "触发自动上屏的最短码长",
                                value: $model.autoCommitLength,
                                range: PreferencesModel.autoCommitLengthRange)
-                        .disabled(!model.autoCommit)
+                        .disabled(!model.autoCommit || model.isSentence)
                     stepperRow(title: "顶屏码长",
                                hint: "将该长度之前的编码候选提交并驻留，0 为关闭",
                                value: $model.commitNextCode,
                                range: PreferencesModel.commitNextCodeRange)
+                        .disabled(model.isSentence)
                 }
                 Section("标点") {
                     switchRow(title: "中文标点",
