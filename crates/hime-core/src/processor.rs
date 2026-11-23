@@ -27,6 +27,11 @@ pub enum Action {
     Discard,
     /// Commit candidate `index` of the rendered list (0-based).
     Select(usize),
+    /// Commit the encoding's current best candidate (the raw letters when no
+    /// candidate matches) and start a fresh encoding with this letter. The
+    /// `Config::commit_next_code` rule: the N-th letter commits the first
+    /// N-1 letters.
+    OverflowCommit(u8),
     /// Commit the encoding letters as typed.
     CommitRaw,
     /// Intercepted with no effect, so the host's Marked Text keeps running.
@@ -61,6 +66,12 @@ impl Processor {
         }
 
         if let Some(byte) = letter {
+            // The overflow rule wins over the cap: at exactly N-1 letters the
+            // N-th letter commits and restarts the encoding, even where the
+            // cap would otherwise swallow it (琉璃: max_code 4, N 5).
+            if config.commit_next_code >= 2 && code.len() == config.commit_next_code - 1 {
+                return Action::OverflowCommit(byte);
+            }
             return if code.len() < config.max_code_len {
                 Action::AppendCode(byte)
             } else {
@@ -189,5 +200,38 @@ mod tests {
             Action::Noop,
             "a letter over the configured code cap is swallowed"
         );
+    }
+
+    /// `commit_next_code`: the N-th letter commits and restarts instead of
+    /// appending or swallowing; 0 keeps the old capped behavior.
+    #[test]
+    fn commit_next_code_overflows_at_the_nth_letter() {
+        let overflow = Config { max_code_len: 4, commit_next_code: 5, ..Config::default() };
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 3, overflow),
+            Action::OverflowCommit(b'd'),
+            "the 5th letter commits at N=5"
+        );
+        assert_eq!(
+            Processor::decide(KEY_D, "abc", 3, overflow),
+            Action::AppendCode(b'd'),
+            "the 4th letter still extends the encoding"
+        );
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 0, overflow),
+            Action::OverflowCommit(b'd'),
+            "without a candidate the raw letters are what overflow commits"
+        );
+
+        let off = Config { max_code_len: 4, commit_next_code: 0, ..Config::default() };
+        assert_eq!(Processor::decide(KEY_D, "abcd", 1, off), Action::Noop, "0 turns the rule off");
+
+        // Unreachable above the cap: the cap keeps swallowing.
+        let unreachable = Config { max_code_len: 4, commit_next_code: 6, ..Config::default() };
+        assert_eq!(Processor::decide(KEY_D, "abcd", 1, unreachable), Action::Noop);
+
+        // Reachable below the cap: overflow wins before the code grows on.
+        let below_cap = Config { max_code_len: 6, commit_next_code: 4, ..Config::default() };
+        assert_eq!(Processor::decide(KEY_D, "abc", 1, below_cap), Action::OverflowCommit(b'd'));
     }
 }

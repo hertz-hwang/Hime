@@ -92,9 +92,18 @@ impl Session {
         match decision {
             Action::Pass => self.response(false, None),
             Action::Noop => self.response(true, None),
-            Action::AppendCode(byte) => {
-                self.push_letter(byte);
-                self.response(true, None)
+            Action::AppendCode(byte) => self.push_letter(byte, None),
+            Action::OverflowCommit(byte) => {
+                // The full encoding's best candidate (or the letters
+                // themselves) is committed; the pressing letter starts the
+                // next encoding and stays visible in the preedit.
+                let commit = self
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.text.clone())
+                    .or_else(|| Some(mem::take(&mut self.input_buffer)));
+                self.clear();
+                self.push_letter(byte, commit)
             }
             Action::DeleteCode => {
                 self.input_buffer.pop();
@@ -123,9 +132,33 @@ impl Session {
         }
     }
 
-    fn push_letter(&mut self, byte: u8) {
+    /// Append one letter, re-retrieve, then apply the auto-commit rule: with
+    /// the setting on, once the encoding is at least `auto_commit_length`
+    /// letters and exactly one candidate remains, that candidate is committed
+    /// right away. `pending` carries an already-earned commit (from overflow)
+    /// that joins this response in front of the auto-committed text.
+    ///
+    /// The rule triggers on appended letters only; Backspace or a config
+    /// change that happens to leave one candidate does not commit.
+    fn push_letter(&mut self, byte: u8, pending: Option<String>) -> EngineResponse {
         self.input_buffer.push(char::from(byte));
         self.refresh_candidates();
+        if self.config.auto_commit
+            && self.input_buffer.len() >= self.config.auto_commit_length
+            && self.candidates.len() == 1
+        {
+            let text = self.candidates[0].text.clone();
+            self.clear();
+            let commit = match pending {
+                Some(mut committed) => {
+                    committed.push_str(&text);
+                    committed
+                }
+                None => text,
+            };
+            return self.response(true, Some(commit));
+        }
+        self.response(true, pending)
     }
 
     fn refresh_candidates(&mut self) {
@@ -346,6 +379,43 @@ mod tests {
         assert!(r.candidates.is_empty());
     }
 
+    /// `commit_next_code`: the N-th letter commits the first N-1 letters'
+    /// candidate and stays in the preedit as the start of the next encoding.
+    #[test]
+    fn overflow_commits_the_candidate_and_keeps_the_pressing_letter() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s =
+            Session::with_config(dict, Config { commit_next_code: 3, ..Config::default() });
+        s.process_key(KEY_G);
+        let r = s.process_key(KEY_G); // "gg" = 五
+        assert_eq!(r.candidates[0].text, "五");
+
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.commit_text.as_deref(), Some("五"), "the 3rd letter commits gg");
+        assert_eq!(r.preedit, "a", "the pressing letter starts the next encoding");
+        assert_eq!(r.candidates[0].text, "工");
+
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("工"), "the new encoding types on");
+    }
+
+    /// With no candidate behind the full encoding, overflow commits the
+    /// letters as typed — the same fallback Space performs.
+    #[test]
+    fn overflow_without_candidates_commits_raw_letters() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            dict,
+            Config { max_code_len: 4, commit_next_code: 5, ..Config::default() },
+        );
+        for key in [KEY_G, KEY_G, KEY_G, KEY_G] {
+            s.process_key(key);
+        }
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.commit_text.as_deref(), Some("gggg"));
+        assert_eq!(r.preedit, "a");
+    }
+
     #[test]
     fn encoding_capped_at_max_code_len() {
         let mut s = session();
@@ -466,5 +536,81 @@ mod tests {
         let s = Session::with_config(dict, Config { page_size: 0, max_code_len: 100, ..Config::default() });
         assert_eq!(s.config().page_size, 1);
         assert_eq!(s.config().max_code_len, crate::MAX_CODE_LEN_LIMIT);
+    }
+
+    /// `auto_commit`: once the code is long enough and exactly one candidate
+    /// remains, the engine commits without waiting for a selection key.
+    #[test]
+    fn auto_commits_a_unique_candidate_once_the_code_is_long_enough() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            dict,
+            Config { auto_commit: true, auto_commit_length: 2, ..Config::default() },
+        );
+        let r = s.process_key(KEY_A); // four candidates: nothing to commit
+        assert!(r.commit_text.is_none());
+        assert_eq!(r.preedit, "a");
+
+        let r = s.process_key(b'd' as u32); // "ad" narrows to exactly 匿
+        assert_eq!(r.commit_text.as_deref(), Some("匿"));
+        assert_eq!(r.preedit, "");
+        assert!(r.candidates.is_empty());
+        // The session is idle again; keys belong to the application.
+        assert!(!s.process_key(KEY_SPACE).handled);
+    }
+
+    /// Auto-commit needs both conditions: a long-enough code and a unique
+    /// candidate. Either one missing keeps normal composition.
+    #[test]
+    fn auto_commit_waits_while_short_or_ambiguous() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+
+        // Unique ("ad" = 匿) but shorter than the requested length.
+        let mut s = Session::with_config(
+            Arc::clone(&dict),
+            Config { auto_commit: true, auto_commit_length: 4, ..Config::default() },
+        );
+        s.process_key(KEY_A);
+        let r = s.process_key(b'd' as u32);
+        assert!(r.commit_text.is_none(), "unique but below auto_commit_length");
+        assert_eq!(r.preedit, "ad");
+        assert_eq!(r.candidates[0].text, "匿");
+        s.process_key(KEY_ESCAPE);
+
+        // Long enough but ambiguous: 'a' already reaches length 1.
+        let mut s = Session::with_config(
+            dict,
+            Config { auto_commit: true, auto_commit_length: 1, ..Config::default() },
+        );
+        let r = s.process_key(KEY_A);
+        assert!(r.commit_text.is_none(), "several candidates keep the composition open");
+        assert_eq!(r.preedit, "a");
+    }
+
+    /// An overflow commit and the auto-commit it restarts share one response:
+    /// the phrase for the full code, then the restart letter's own word.
+    #[test]
+    fn overflow_then_auto_commit_join_into_one_commit() {
+        let dict = Arc::new(
+            Dictionary::parse_str("g\t王\t100\ngg\t五\t100\nggg\t武\t100\na\t工\t100\n")
+                .expect("sample parses"),
+        );
+        let mut s = Session::with_config(
+            dict,
+            Config {
+                commit_next_code: 3,
+                auto_commit: true,
+                auto_commit_length: 1,
+                ..Config::default()
+            },
+        );
+        s.process_key(KEY_G); // 王, 五(~g)
+        let r = s.process_key(KEY_G); // "gg" = 五, 武(~g): still ambiguous
+        assert!(r.commit_text.is_none());
+
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.commit_text.as_deref(), Some("五工"), "overflow for gg plus auto-commit for a");
+        assert_eq!(r.preedit, "");
+        assert!(!s.process_key(KEY_SPACE).handled);
     }
 }
