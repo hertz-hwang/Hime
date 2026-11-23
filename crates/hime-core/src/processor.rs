@@ -49,7 +49,7 @@ impl Processor {
     /// a selection is validated against exactly what the user can see.
     /// `config` supplies this session's code-length cap and page size.
     pub fn decide(key: u32, code: &str, candidate_count: usize, config: Config) -> Action {
-        let letter = (ASCII_A..=ASCII_Z).contains(&key).then(|| key as u8);
+        let letter = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8);
 
         // Idle: only a letter starts a composition; everything else belongs to
         // the application.
