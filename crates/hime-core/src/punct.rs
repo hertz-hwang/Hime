@@ -90,29 +90,41 @@ pub fn is_symbol(ascii: u8) -> bool {
 mod tests {
     use super::*;
 
-    /// The published table: every key maps to its documented full-width text.
+    /// The published table (SPEC_MVP §3.1): every key and the text it emits.
+    /// `/`, `~` and backtick stay halfwidth on purpose; the engine claims the
+    /// key either way, so the mapping text is what reaches the host.
+    const DOCUMENTED: &[(u8, &str)] = &[
+        (b'!', "！"),
+        (b'$', "￥"),
+        (b'(', "（"),
+        (b')', "）"),
+        (b',', "，"),
+        (b'-', "——"),
+        (b'.', "。"),
+        (b'/', "/"),
+        (b':', "："),
+        (b';', "；"),
+        (b'<', "《"),
+        (b'>', "》"),
+        (b'?', "？"),
+        (b'[', "【"),
+        (b'\\', "、"),
+        (b']', "】"),
+        (b'^', "……"),
+        (b'`', "`"),
+        (b'{', "「"),
+        (b'}', "」"),
+        (b'~', "~"),
+    ];
+
+    /// The symbols the table leaves out: released to the host in both modes.
+    const RELEASED: &[u8] = b"#%&*+=@_|";
+
+    /// Every documented key maps to its documented text.
     #[test]
     fn maps_the_documented_table() {
         let mut quotes = QuotePair::default();
-        let expected: &[(u8, &str)] = &[
-            (b',', "，"),
-            (b'.', "。"),
-            (b';', "；"),
-            (b':', "："),
-            (b'?', "？"),
-            (b'!', "！"),
-            (b'(', "（"),
-            (b')', "）"),
-            (b'[', "【"),
-            (b']', "】"),
-            (b'<', "《"),
-            (b'>', "》"),
-            (b'/', "、"),
-            (b'-', "——"),
-            (b'~', "……"),
-            (b'`', "·"),
-        ];
-        for (key, text) in expected {
+        for (key, text) in DOCUMENTED {
             assert_eq!(map(*key, &mut quotes), Some(*text), "key {key:?}");
             assert!(is_mapped(*key));
         }
@@ -134,12 +146,21 @@ mod tests {
         assert_eq!(map(b'"', &mut quotes), Some("“"));
     }
 
+    /// The table's claim set is exactly the documented keys and the quotes:
+    /// no other printable symbol may be claimed, or it would stop reaching
+    /// the host (SPEC_MVP §3).
     #[test]
     fn unmapped_keys_have_no_text() {
+        let claimed: Vec<u8> = (b'!'..=b'~')
+            .filter(|key| is_symbol(*key))
+            .filter(|key| !is_mapped(*key))
+            .collect();
+        assert_eq!(claimed.as_slice(), RELEASED);
+
         let mut quotes = QuotePair::default();
-        for key in *b"01a%@#$*\\|{}" {
-            assert_eq!(map(key, &mut quotes), None, "key {key:?}");
-            assert!(!is_mapped(key), "key {key:?} must pass through");
+        for key in RELEASED.iter().chain(b"01a") {
+            assert_eq!(map(*key, &mut quotes), None, "key {key:?}");
+            assert!(!is_mapped(*key), "key {key:?} must pass through");
         }
     }
 
