@@ -33,6 +33,9 @@ final class HimeInputController: IMKInputController {
     /// digits `1`-`5` select candidates 0-4). The engine caps the list at 5.
     private let digitKeyCode: [UInt32] = [49, 50, 51, 52, 53]
 
+    /// macOS Caps Lock — the 中/英 key of Chinese keyboards (SPEC_MACOS §3.4).
+    private let capsLockKeyCode: UInt16 = 57
+
     private var sessionId: UInt64 = 0
     private var currentCandidates: [Candidate] = []
 
@@ -95,10 +98,27 @@ final class HimeInputController: IMKInputController {
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard event.type == .keyDown,
               !event.modifierFlags.contains(.command),
-              !event.modifierFlags.contains(.control),
-              let keyCode = mappedKeyCode(for: event)
+              !event.modifierFlags.contains(.control)
         else { return false }
 
+        if event.keyCode == capsLockKeyCode {
+            // The 中/英 switch. Close any standing composition through the
+            // engine exactly as Enter would (raw letters committed, Marked
+            // Text cleared) so nothing is left dangling in 英文 mode; the LED
+            // itself is driven by the system. Consuming the key keeps the
+            // bare modifier press out of the host.
+            sendKey(UInt32(HIME_KEY_ENTER), to: sender as? IMKTextInput)
+            return true
+        }
+        if event.modifierFlags.contains(.capsLock) {
+            // LED on = 英文 mode: every key belongs to the host, which
+            // inserts the uppercase characters itself. Folding letters to
+            // lowercase into the engine here is what made uppercase letters
+            // untypeable while the light was on.
+            return false
+        }
+
+        guard let keyCode = mappedKeyCode(for: event) else { return false }
         return sendKey(keyCode, to: sender as? IMKTextInput)
     }
 
