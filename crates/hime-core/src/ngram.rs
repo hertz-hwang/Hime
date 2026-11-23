@@ -183,8 +183,8 @@ impl NgramModel {
         }
 
         let mut sect = [0usize; SECT_COUNT];
-        for i in 0..SECT_COUNT {
-            sect[i] = u64_at(56 + 8 * i) as usize;
+        for (i, slot) in sect.iter_mut().enumerate() {
+            *slot = u64_at(56 + 8 * i) as usize;
         }
         // Section starts: ordered, ≥ header, aligned, within file.
         let mut end = [0usize; SECT_COUNT];
