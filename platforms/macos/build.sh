@@ -130,5 +130,8 @@ if enabled.isEmpty { exit(1) }
 SWIFT_EOF
 
     killall Hime 2>/dev/null || true
+    # The input menu keeps its own cache of the mode list, so replacing the bundle
+    # in place leaves the old label and icon there; the agent relaunches on demand.
+    killall TextInputMenuAgent 2>/dev/null || true
     echo "==> Installed to ${INSTALL_DIR}"
 fi

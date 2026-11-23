@@ -1,6 +1,10 @@
-/* Hime — English display name. Keys are the CFBundle* keys and the TIS input
-   source ids; the values are what System Settings and the input menu show. */
+/* Hime — display names.
+   The input menu and TIS resolve kTISPropertyLocalizedName out of this English
+   table whatever the UI language is, so the TIS input source ids carry the
+   Chinese product name here as well; only System Settings picks zh-Hans.lproj.
+   CFBundleName / CFBundleDisplayName stay English: they feed the smaller line
+   under the title in System Settings. */
 CFBundleDisplayName = "Hime";
 CFBundleName = "Hime";
-"com.hime.inputmethod.Hime" = "Hime";
-"com.hime.inputmethod.Hime.Hans" = "Hime";
+"com.hime.inputmethod.Hime" = "嗨输入法";
+"com.hime.inputmethod.Hime.Hans" = "嗨输入法";
