@@ -65,8 +65,19 @@ final class PreferencesModel: ObservableObject {
     @Published var pageSize: Int { didSet { settingChanged() } }
     /// Maximum letters in one encoding (`max_code`).
     @Published var maxCodeLen: Int { didSet { settingChanged() } }
-    /// 编码类型: 0 全拼 / 1 双拼 / 2 形码 / 3 形码整句 (`type`).
-    @Published var codeType: Int { didSet { settingChanged() } }
+    /// 编码类型: 0 全拼 / 1 双拼 / 2 形码 / 3 形码整句 (`type`). Owned by the
+    /// scheme metadata; the panel only mirrors the engine's value.
+    @Published private(set) var codeType: Int
+
+    /// Panel label for `codeType`.
+    var codeTypeName: String {
+        switch codeType {
+        case 0: return "全拼"
+        case 1: return "双拼"
+        case 3: return "形码整句"
+        default: return "形码"
+        }
+    }
     /// Commit a unique candidate automatically (`auto_commit`).
     @Published var autoCommit: Bool { didSet { settingChanged() } }
     /// Code length auto-commit needs (`auto_commit_length`).
@@ -85,7 +96,6 @@ final class PreferencesModel: ObservableObject {
 
     private static let pageSizeKey = "enginePageSize"
     private static let maxCodeLenKey = "engineMaxCodeLen"
-    private static let codeTypeKey = "engineCodeType"
     private static let autoCommitKey = "engineAutoCommit"
     private static let autoCommitLengthKey = "engineAutoCommitLength"
     private static let commitNextCodeKey = "engineCommitNextCode"
@@ -178,7 +188,8 @@ final class PreferencesModel: ObservableObject {
         }
         pageSize = value(Self.pageSizeKey, config.pageSize)
         maxCodeLen = value(Self.maxCodeLenKey, config.maxCodeLen)
-        codeType = value(Self.codeTypeKey, config.codeType)
+        // 编码类型 is scheme metadata: the engine value always wins.
+        codeType = config.codeType
         autoCommit = value(Self.autoCommitKey, config.autoCommit)
         autoCommitLength = value(Self.autoCommitLengthKey, config.autoCommitLength)
         commitNextCode = value(Self.commitNextCodeKey, config.commitNextCode)
@@ -211,7 +222,6 @@ final class PreferencesModel: ObservableObject {
     private func persist() {
         defaults.set(pageSize, forKey: Self.pageSizeKey)
         defaults.set(maxCodeLen, forKey: Self.maxCodeLenKey)
-        defaults.set(codeType, forKey: Self.codeTypeKey)
         defaults.set(autoCommit, forKey: Self.autoCommitKey)
         defaults.set(autoCommitLength, forKey: Self.autoCommitLengthKey)
         defaults.set(commitNextCode, forKey: Self.commitNextCodeKey)
@@ -363,18 +373,11 @@ private struct BasicView: View {
                             Text(scheme.name).tag(scheme.dir)
                         }
                     }
+                    infoRow(title: "编码类型", value: model.codeTypeName)
                     infoRow(title: "方案说明", value: model.selectedScheme?.describe ?? "—")
                     infoRow(title: "作者", value: model.selectedScheme?.author ?? "—")
                 }
                 Section("编码") {
-                    pickerRow(title: "编码类型",
-                              hint: "方案规定的编码方式",
-                              selection: $model.codeType) {
-                        Text("形码").tag(2)
-                        Text("全拼").tag(0)
-                        Text("双拼").tag(1)
-                        Text("形码整句").tag(3)
-                    }
                     stepperRow(title: "最大码长",
                                hint: "单次编码的最长字母数",
                                value: $model.maxCodeLen,
