@@ -1,6 +1,6 @@
 //! C-ABI boundary for the Hime engine (SPEC_MVP §6).
 //!
-//! Only five flat C functions cross this boundary; every structured value is
+//! Only seven flat C functions cross this boundary; every structured value is
 //! serialized to a JSON string first. The global engine owns the dictionary
 //! and all sessions (`Mutex<Option<Engine>>`), so any thread holding the
 //! `hime.h` contract may call in. Every export catches panics so Rust
@@ -13,18 +13,19 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use hime_core::{Dictionary, Session};
+use hime_core::{Config, Dictionary, Session};
 
 /// Global engine state, present only after a successful `hime_init`.
 struct Engine {
     dict: Arc<Dictionary>,
+    config: Config,
     sessions: HashMap<u64, Session>,
     next_session_id: u64,
 }
 
 impl Engine {
     fn new(dict: Arc<Dictionary>) -> Self {
-        Self { dict, sessions: HashMap::new(), next_session_id: 1 }
+        Self { dict, config: Config::default(), sessions: HashMap::new(), next_session_id: 1 }
     }
 }
 
@@ -102,7 +103,8 @@ pub extern "C" fn hime_create_session() -> u64 {
         Some(engine) => {
             let id = engine.next_session_id;
             engine.next_session_id += 1;
-            engine.sessions.insert(id, Session::new(Arc::clone(&engine.dict)));
+            let session = Session::with_config(Arc::clone(&engine.dict), engine.config);
+            engine.sessions.insert(id, session);
             id
         }
     })
@@ -150,6 +152,72 @@ pub extern "C" fn hime_process_key(
                 eprintln!("hime-ffi: failed to serialize EngineResponse");
                 ptr::null_mut()
             }
+        }
+    })
+}
+
+/// Read the current engine configuration as a NUL-terminated JSON string
+/// owned by the caller (release it with [`hime_free_string`]). The shape is
+/// `{"page_size":<n>,"max_code_len":<n>}` (see [`hime_set_config`]).
+///
+/// Before `hime_init` the default configuration is reported. Returns null
+/// only if serialization fails.
+#[no_mangle]
+pub extern "C" fn hime_get_config() -> *mut c_char {
+    let config = with_engine("hime_get_config", |slot| {
+        slot.as_ref().map(|engine| engine.config).unwrap_or_default()
+    });
+    match serde_json::to_string(&config).ok().and_then(|json| CString::new(json).ok()) {
+        Some(s) => s.into_raw(),
+        None => {
+            eprintln!("hime-ffi: failed to serialize Config");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Apply a configuration to every live session and to all sessions created
+/// afterwards. `json` is a NUL-terminated JSON object; missing fields keep
+/// their defaults and out-of-range values are clamped (see
+/// [`hime_core::Config::sanitized`]).
+///
+/// Returns `false` on a null pointer, invalid UTF-8, malformed JSON, or an
+/// uninitialized engine; the stored configuration survives a failed call
+/// unchanged.
+///
+/// # Safety
+/// `json` must be null or point to a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn hime_set_config(json: *const c_char) -> bool {
+    if json.is_null() {
+        eprintln!("hime-ffi: hime_set_config called with a null json");
+        return false;
+    }
+    let text = match unsafe { CStr::from_ptr(json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("hime-ffi: hime_set_config json is not valid UTF-8");
+            return false;
+        }
+    };
+    let config = match serde_json::from_str::<Config>(text) {
+        Ok(config) => config.sanitized(),
+        Err(e) => {
+            eprintln!("hime-ffi: failed to parse config {text:?}: {e}");
+            return false;
+        }
+    };
+    with_engine("hime_set_config", |slot| match slot.as_mut() {
+        None => {
+            eprintln!("hime-ffi: hime_set_config before hime_init");
+            false
+        }
+        Some(engine) => {
+            engine.config = config;
+            for session in engine.sessions.values_mut() {
+                session.set_config(config);
+            }
+            true
         }
     })
 }

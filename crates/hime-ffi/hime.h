@@ -6,8 +6,9 @@
  *
  * Threading: every function is safe to call from any thread; Rust guards
  * the engine with a mutex.
- * Memory: hime_process_key returns a heap string owned by the caller, which
- * must release it with hime_free_string. Do not free it with free().
+ * Memory: hime_process_key and hime_get_config return heap strings owned by
+ * the caller, which must release them with hime_free_string. Do not free
+ * them with free().
  */
 
 #ifndef HIME_H
@@ -48,7 +49,19 @@ void hime_destroy_session(uint64_t session_id);
  * hime_free_string. */
 char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifiers);
 
-/* Release a string returned by hime_process_key. NULL is a no-op. */
+/* Read the current engine config as JSON: {"page_size":5,"max_code_len":4}.
+ * Reports the defaults before hime_init. The caller must release the string
+ * with hime_free_string. */
+char* hime_get_config(void);
+
+/* Apply a config given as JSON (keys: page_size, max_code_len). Missing
+ * fields keep their defaults, out-of-range values are clamped. Applies to
+ * live sessions and to every session created afterwards. Returns false on
+ * NULL, malformed JSON, or an uninitialized engine. */
+bool hime_set_config(const char* json);
+
+/* Release a string returned by hime_process_key or hime_get_config.
+ * NULL is a no-op. */
 void hime_free_string(char* ptr);
 
 #ifdef __cplusplus
