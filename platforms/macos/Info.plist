@@ -24,7 +24,7 @@
 	<string>0.1.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<key>LSBackgroundOnly</key>
+	<key>LSUIElement</key>
 	<true/>
 	<key>LSHasLocalizedDisplayName</key>
 	<true/>

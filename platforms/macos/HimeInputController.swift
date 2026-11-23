@@ -116,9 +116,31 @@ final class HimeInputController: IMKInputController {
         if response.candidates.isEmpty {
             sharedCandidates.hide()
         } else {
+            // The preferences window owns the candidate font size; merging it
+            // into the style attributes (which also carry the key-routing flag
+            // set at startup) on every render lets a change show up as soon
+            // as the panel updates.
+            var attributes = sharedCandidates.attributes() ?? [:]
+            attributes[NSAttributedString.Key.font] =
+                NSFont.systemFont(ofSize: PreferencesModel.shared.candidateFontSize)
+            sharedCandidates.setAttributes(attributes)
             sharedCandidates.update()
             sharedCandidates.show(kIMKLocateCandidatesBelowHint)
         }
+    }
+
+    // MARK: - Input menu
+
+    /// Commands shown in the text input menu, in the section headed by the
+    /// app's name — the layout 业火 exposes as its "Fire" group.
+    override func menu() -> NSMenu! {
+        let item = NSMenuItem(title: "Hime 首选项…",
+                              action: #selector(PreferencesWindowController.showPreferences(_:)),
+                              keyEquivalent: "")
+        item.target = PreferencesWindowController.shared
+        let menu = NSMenu(title: "Hime")
+        menu.addItem(item)
+        return menu
     }
 
     // MARK: - Candidate panel

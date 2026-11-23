@@ -40,6 +40,7 @@ swiftc \
     -o "${CONTENTS}/MacOS/${APP_NAME}" \
     "${SCRIPT_DIR}/main.swift" \
     "${SCRIPT_DIR}/HimeInputController.swift" \
+    "${SCRIPT_DIR}/Preferences.swift" \
     -framework Cocoa \
     -framework InputMethodKit \
     "${RUST_LIB}"

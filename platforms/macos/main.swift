@@ -1,8 +1,9 @@
 // Hime input method — program entry point (SPEC_MACOS §1, §3.2).
 //
-// Initializes the Rust engine with the bundled dictionary, creates the
-// IMKServer and the shared candidate panel, then spins the run loop.
-// The process stays alive as a background IMK server (LSBackgroundOnly).
+// Initializes the Rust engine with the bundled dictionary, applies the
+// persisted preferences, creates the IMKServer and the shared candidate
+// panel, then spins the run loop. The process stays alive as an IMK server
+// (LSUIElement: no Dock icon, but it can show the preferences window).
 
 import Cocoa
 import InputMethodKit
@@ -22,6 +23,16 @@ guard hime_init(dictPath) else {
     exit(1)
 }
 
+// Hand the engine the persisted preferences before any session starts
+// (Preferences.swift); the candidate font size stays shell-side.
+_ = PreferencesModel.shared
+
+// Reopening the app (open -a Hime) shows the preferences window. The
+// delegate lives for the whole process, as NSApplication does not retain it.
+let app = NSApplication.shared
+let appDelegate = AppDelegate()
+app.delegate = appDelegate
+
 let server = IMKServer(name: connectionName, bundleIdentifier: bundleIdentifier)
 guard server != nil else {
     fputs("Hime: failed to create IMKServer (\(connectionName))\n", stderr)
@@ -36,4 +47,4 @@ sharedCandidates = IMKCandidates(server: server,
 // stale encoding.
 sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
 
-NSApplication.shared.run()
+app.run()
