@@ -1,9 +1,11 @@
 // Hime input method — program entry point (SPEC_MACOS §1, §3.2).
 //
-// Initializes the Rust engine with the bundled dictionary, applies the
-// persisted preferences, creates the IMKServer and the shared candidate
-// panel, then spins the run loop. The process stays alive as an IMK server
-// (LSUIElement: no Dock icon, but it can show the preferences window).
+// Starts the Rust engine on the bundled schemes (Resources/schemes): the
+// selected scheme's table and metadata defaults come up, then the persisted
+// preferences are applied. Only after that the IMKServer and the shared
+// candidate panel are created, and the run loop spins. The process stays
+// alive as an IMK server (LSUIElement: no Dock icon, but it can show the
+// preferences window).
 
 import Cocoa
 import InputMethodKit
@@ -14,18 +16,17 @@ let bundleIdentifier = "com.hime.inputmethod.Hime"
 // Shared candidate panel used by every HimeInputController instance.
 var sharedCandidates: IMKCandidates!
 
-guard let dictPath = Bundle.main.path(forResource: "liuli_table", ofType: "txt") else {
-    fputs("Hime: liuli_table.txt not found in bundle Resources\n", stderr)
+guard let schemesDir = Bundle.main.path(forResource: "schemes", ofType: nil) else {
+    fputs("Hime: schemes/ not found in bundle Resources\n", stderr)
     exit(1)
 }
-guard hime_init(dictPath) else {
-    fputs("Hime: hime_init failed for dictionary \(dictPath)\n", stderr)
+// Discovers the schemes, selects the persisted (or first) one, and hands the
+// engine the persisted preferences (Preferences.swift); the candidate font
+// size stays shell-side.
+guard PreferencesModel.shared.startup(schemesDir: schemesDir) else {
+    fputs("Hime: engine startup failed for the bundled schemes\n", stderr)
     exit(1)
 }
-
-// Hand the engine the persisted preferences before any session starts
-// (Preferences.swift); the candidate font size stays shell-side.
-_ = PreferencesModel.shared
 
 // Reopening the app (open -a Hime) shows the preferences window. The
 // delegate lives for the whole process, as NSApplication does not retain it.

@@ -3,7 +3,7 @@
 #
 # 1. cargo build --release -p hime-ffi          -> target/release/libhime_ffi.a
 # 2. swiftc sources + hime.h bridge header      -> Hime.app/Contents/MacOS/Hime
-# 3. assemble bundle (Info.plist + dictionary + icons + localized names), codesign
+# 3. assemble bundle (Info.plist + schemes + icons + localized names), codesign
 # 4. optional: --install copies to ~/Library/Input Methods/ and (re)launches
 set -euo pipefail
 
@@ -15,8 +15,9 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
 BRIDGE_HEADER="${ROOT_DIR}/crates/hime-ffi/hime.h"
-# The default input scheme: 琉璃v1 (data/xingma_sample.tsv is a test fixture only).
-DICTIONARY="${ROOT_DIR}/data/schemes/liuli_v1/liuli_table.txt"
+# All input schemes ship under Resources/schemes: one folder per scheme
+# (metadata.toml + table). 琉璃v1 is the default folder of that directory.
+SCHEMES_DIR="${ROOT_DIR}/data/schemes"
 
 echo "==> cargo build --release -p hime-ffi"
 cargo build --release -p hime-ffi --manifest-path "${ROOT_DIR}/Cargo.toml"
@@ -46,7 +47,7 @@ swiftc \
     "${RUST_LIB}"
 
 cp "${SCRIPT_DIR}/Info.plist" "${CONTENTS}/Info.plist"
-cp "${DICTIONARY}" "${CONTENTS}/Resources/liuli_table.txt"
+cp -R "${SCHEMES_DIR}" "${CONTENTS}/Resources/schemes"
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
 echo "==> Rendering icons from assets/*.svg"
