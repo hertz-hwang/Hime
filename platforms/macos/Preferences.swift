@@ -390,8 +390,8 @@ private struct BasicView: View {
                                value: $model.autoCommitLength,
                                range: PreferencesModel.autoCommitLengthRange)
                         .disabled(!model.autoCommit)
-                    stepperRow(title: "次码提交",
-                               hint: "第 N 码提交前 N-1 码的候选并留码，0 为关闭",
+                    stepperRow(title: "顶屏码长",
+                               hint: "将该长度之前的编码候选提交并驻留，0 为关闭",
                                value: $model.commitNextCode,
                                range: PreferencesModel.commitNextCodeRange)
                 }
