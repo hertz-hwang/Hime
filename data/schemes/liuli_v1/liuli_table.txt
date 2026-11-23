@@ -1,7 +1,3 @@
-#name=琉璃字词
-#describe=单字三码，词组四码
-#author=荒
-#visible=1
 在	a
 ！	a
 且	a

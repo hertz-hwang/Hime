@@ -1,0 +1,9 @@
+name = "琉璃字词"
+describe = "单字三码，词组四码"
+author = "荒"
+type = 2
+
+max_code = 4
+auto_commit = false
+auto_commit_length = 4
+commit_next_code = 5
