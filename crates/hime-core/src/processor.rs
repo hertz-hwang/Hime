@@ -158,6 +158,7 @@ mod tests {
         assert_eq!(composing(KEY_2, "a", 5), Action::Select(1));
         assert_eq!(composing(KEY_5, "a", 5), Action::Select(4));
         assert_eq!(composing(KEY_2, "ad", 1), Action::Noop, "no candidate behind 2");
+        assert_eq!(composing(KEY_6, "a", 5), Action::Noop, "6 is beyond the page keys");
         assert_eq!(composing(KEY_9, "a", 5), Action::Noop, "9 is beyond the page keys");
         assert_eq!(composing(KEY_1, "a", 0), Action::Noop);
     }
