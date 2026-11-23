@@ -54,10 +54,63 @@ echo "==> Built ${APP_BUNDLE}"
 
 if [[ "${1:-}" == "--install" ]]; then
     INSTALL_DIR="${HOME}/Library/Input Methods"
+    INSTALL_BUNDLE="${INSTALL_DIR}/${APP_NAME}.app"
     mkdir -p "${INSTALL_DIR}"
+    # Stop a running instance first so it releases the IMK connection.
     pkill -x "${APP_NAME}" 2>/dev/null || true
-    rm -rf "${INSTALL_DIR}/${APP_NAME}.app"
+    rm -rf "${INSTALL_BUNDLE}"
     cp -R "${APP_BUNDLE}" "${INSTALL_DIR}/"
-    open "${INSTALL_DIR}/${APP_NAME}.app"
-    echo "==> Installed to ${INSTALL_DIR} and launched"
+    codesign --force --sign - "${INSTALL_BUNDLE}"
+
+    echo "==> Registering and enabling the input source via TIS"
+    xcrun swift - "${INSTALL_BUNDLE}" <<'SWIFT_EOF'
+import Carbon
+import Foundation
+
+let bundlePath = CommandLine.arguments[1]
+let bundleURL = URL(fileURLWithPath: bundlePath) as CFURL
+
+let regStatus = TISRegisterInputSource(bundleURL)
+print("TISRegisterInputSource(\(bundlePath)): \(regStatus == noErr ? "ok" : "failed, OSStatus \(regStatus)")")
+if regStatus != noErr { exit(1) }
+
+// The mode id is what System Settings lists; the app-level id may also
+// appear. Enable whichever of the two TIS actually exposes.
+let targets: Set<String> = [
+    "com.hime.inputmethod.Hime",
+    "com.hime.inputmethod.Hime.Hans",
+]
+
+guard let listRef = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource]
+else {
+    print("TISCreateInputSourceList returned no list")
+    exit(1)
+}
+
+func inputSourceID(_ source: TISInputSource) -> String? {
+    guard let ptr = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+    return Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
+}
+
+var enabled: Set<String> = []
+var failed: Set<String> = []
+for source in listRef {
+    guard let id = inputSourceID(source), targets.contains(id) else { continue }
+    let status = TISEnableInputSource(source)
+    if status == noErr {
+        print("TISEnableInputSource(\(id)): enabled")
+        enabled.insert(id)
+    } else {
+        print("TISEnableInputSource(\(id)): failed, OSStatus \(status)")
+        failed.insert(id)
+    }
+}
+for id in targets.subtracting(enabled).subtracting(failed) {
+    print("input source not registered in TIS list: \(id)")
+}
+if enabled.isEmpty { exit(1) }
+SWIFT_EOF
+
+    killall Hime 2>/dev/null || true
+    echo "==> Installed to ${INSTALL_DIR}"
 fi
