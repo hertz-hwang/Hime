@@ -31,6 +31,12 @@ impl Session {
 
     /// Feed one key (see the `KEY_*` constants and ASCII codes in
     /// `hime_core`) and return the full state the shell must render.
+    ///
+    /// While idle, only letters are consumed; every other key returns
+    /// `handled: false`. Once composing, every key returns `handled: true`:
+    /// unrecognized keys (letters over the cap, digits without a candidate
+    /// behind them, any other key code) are swallowed as no-ops so the
+    /// host's Marked Text keeps running.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
         // Idle: only a letter starts a composition; every other key passes
         // through untouched.
@@ -79,13 +85,15 @@ impl Session {
                         self.clear();
                         self.response(true, Some(commit))
                     }
-                    // Digit with no candidate behind it: pass through, keep
-                    // the composition on screen.
-                    None => self.response(false, None),
+                    // Digit with no candidate behind it: swallow as a no-op;
+                    // releasing it could disturb the host's Marked Text.
+                    None => self.response(true, None),
                 }
             }
-            // Includes letters once the encoding is full: never swallow them.
-            _ => self.response(false, None),
+            // Letters over the MAX_CODE_LEN cap and every other key code are
+            // swallowed the same way: composition state stays untouched so
+            // the host's Marked Text is never interrupted mid-composition.
+            _ => self.response(true, None),
         }
     }
 
@@ -183,7 +191,7 @@ mod tests {
     #[test]
     fn idle_passes_through_non_letters() {
         let mut s = session();
-        for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9] {
+        for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9, b'-' as u32] {
             let r = s.process_key(key);
             assert!(!r.handled, "idle key {key} must pass through");
             assert!(r.commit_text.is_none());
@@ -258,18 +266,19 @@ mod tests {
     }
 
     #[test]
-    fn digit_beyond_candidate_list_passes_through() {
+    fn digit_beyond_candidate_list_is_swallowed() {
         let mut s = session();
         s.process_key(KEY_A);
         s.process_key(b'd' as u32); // "ad" has exactly one candidate: 匿
         let r = s.process_key(KEY_2);
-        assert!(!r.handled);
+        assert!(r.handled, "a digit with no candidate must be swallowed");
         assert!(r.commit_text.is_none());
         assert_eq!(r.preedit, "ad");
-        assert_eq!(r.candidates.len(), 1);
-        // '9' can never map to a candidate (list is capped at 5).
+        assert_eq!(r.candidates, vec![Candidate { text: "匿".into(), comment: "".into() }]);
+        // '9' can never map to a candidate (list is capped at 5): swallowed too.
         let r = s.process_key(KEY_9);
-        assert!(!r.handled);
+        assert!(r.handled);
+        assert_eq!(r.preedit, "ad");
         // The composition survives; space still commits the candidate.
         let r = s.process_key(KEY_SPACE);
         assert_eq!(r.commit_text.as_deref(), Some("匿"));
@@ -296,9 +305,29 @@ mod tests {
         }
         assert_eq!(s.input_buffer, "gggg");
         let r = s.process_key(KEY_G);
-        assert!(!r.handled, "a letter over the cap must pass through");
+        assert!(r.handled, "a letter over the cap must be swallowed");
+        assert!(r.commit_text.is_none());
         assert_eq!(r.preedit, "gggg");
         assert_eq!(s.input_buffer.len(), MAX_CODE_LEN);
+        // The full encoding still behaves normally.
+        let r = s.process_key(KEY_ENTER);
+        assert_eq!(r.commit_text.as_deref(), Some("gggg"));
+    }
+
+    #[test]
+    fn undefined_keys_are_swallowed_while_composing() {
+        let mut s = session();
+        s.process_key(KEY_A);
+        for key in [b'-' as u32, b'0' as u32, 0, 0x1000] {
+            let r = s.process_key(key);
+            assert!(r.handled, "key {key} must be swallowed while composing");
+            assert!(r.commit_text.is_none());
+            assert_eq!(r.preedit, "a");
+            assert!(!r.candidates.is_empty());
+        }
+        // The composition is untouched and still functional.
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("工"));
     }
 
     #[test]
