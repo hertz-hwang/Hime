@@ -31,19 +31,26 @@ impl QuotePair {
 
 /// The single-shot mappings; quotes pair and live in [`QuotePair`].
 const DIRECT: &[(u8, &str)] = &[
+    (b'~', "~"),
+    (b'`', "`"),
     (b',', "，"),
     (b'.', "。"),
     (b';', "；"),
     (b':', "："),
     (b'?', "？"),
     (b'!', "！"),
+    (b'$', "￥"),
+    (b'^', "……"),
     (b'(', "（"),
     (b')', "）"),
     (b'[', "【"),
     (b']', "】"),
+    (b'{', "「"),
+    (b'}', "」"),
     (b'<', "《"),
     (b'>', "》"),
-    (b'/', "、"),
+    (b'/', "/"),
+    (b'\\', "、"),
     (b'-', "——"),
     (b'~', "……"),
     (b'`', "·"),
@@ -57,7 +64,10 @@ pub fn map(ascii: u8, quotes: &mut QuotePair) -> Option<&'static str> {
     match ascii {
         b'\'' => Some(quotes.next_single()),
         b'"' => Some(quotes.next_double()),
-        _ => DIRECT.iter().find(|(key, _)| *key == ascii).map(|(_, text)| *text),
+        _ => DIRECT
+            .iter()
+            .find(|(key, _)| *key == ascii)
+            .map(|(_, text)| *text),
     }
 }
 
