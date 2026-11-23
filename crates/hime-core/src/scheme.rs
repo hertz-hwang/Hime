@@ -45,6 +45,9 @@ pub struct SchemeMetadata {
     /// N-th-letter overflow commit (see [`Config::commit_next_code`]);
     /// `0` turns it off.
     pub commit_next_code: usize,
+    /// Punctuation output (see [`Config::ascii_punct`]): `0` English
+    /// punctuation, `1` Chinese punctuation.
+    pub ascii_punct: u8,
 }
 
 impl Default for SchemeMetadata {
@@ -58,6 +61,7 @@ impl Default for SchemeMetadata {
             auto_commit: false,
             auto_commit_length: MAX_CODE_LEN,
             commit_next_code: 0,
+            ascii_punct: 0,
         }
     }
 }
@@ -76,6 +80,7 @@ impl SchemeMetadata {
             auto_commit: self.auto_commit,
             auto_commit_length: self.auto_commit_length,
             commit_next_code: self.commit_next_code,
+            ascii_punct: self.ascii_punct,
         }
         .sanitized()
     }
@@ -224,6 +229,7 @@ mod tests {
         assert!(!info.metadata.auto_commit);
         assert_eq!(info.metadata.auto_commit_length, 4);
         assert_eq!(info.metadata.commit_next_code, 5);
+        assert_eq!(info.metadata.ascii_punct, 1, "琉璃v1 types Chinese punctuation");
         assert!(info.table.ends_with("liuli_table.txt"), "{}", info.table);
         assert!(Path::new(&info.table).is_file());
     }
@@ -250,6 +256,7 @@ mod tests {
         assert_eq!(info.metadata.max_code, MAX_CODE_LEN);
         assert!(!info.metadata.auto_commit);
         assert_eq!(info.metadata.commit_next_code, 0);
+        assert_eq!(info.metadata.ascii_punct, 0, "a missing key keeps English punctuation");
         assert_eq!(info.table, dir.join("a_table.txt").display().to_string());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -308,6 +315,7 @@ mod tests {
             auto_commit: true,
             auto_commit_length: 3,
             commit_next_code: 7,
+            ascii_punct: 1,
             ..SchemeMetadata::default()
         };
         let base = Config { page_size: 8, ..Config::default() };
@@ -318,6 +326,7 @@ mod tests {
         assert!(config.auto_commit);
         assert_eq!(config.auto_commit_length, 3);
         assert_eq!(config.commit_next_code, 7);
+        assert_eq!(config.ascii_punct, 1);
 
         // Out-of-range metadata is clamped, not rejected.
         let wild = metadata.defaults_for(Config { page_size: 0, ..Config::default() });

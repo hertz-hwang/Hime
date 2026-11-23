@@ -7,3 +7,4 @@ max_code = 4
 auto_commit = false
 auto_commit_length = 4
 commit_next_code = 5
+ascii_punct = 1

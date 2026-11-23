@@ -95,6 +95,9 @@ pub struct Config {
     /// The N-th letter commits the candidate of the first N-1 letters and
     /// starts a fresh encoding with itself; `0` turns the rule off.
     pub commit_next_code: usize,
+    /// Punctuation output, the `metadata.toml` `ascii_punct` key: `0` English
+    /// (ASCII) punctuation, `1` Chinese punctuation. A number, never a bool.
+    pub ascii_punct: u8,
 }
 
 impl Default for Config {
@@ -106,6 +109,7 @@ impl Default for Config {
             auto_commit: false,
             auto_commit_length: MAX_CODE_LEN,
             commit_next_code: 0,
+            ascii_punct: 0,
         }
     }
 }
@@ -123,6 +127,8 @@ impl Config {
         // means "off"; both end up off.
         self.commit_next_code =
             if self.commit_next_code < 2 { 0 } else { self.commit_next_code.min(MAX_CODE_LEN_LIMIT) };
+        // The punctuation flag is binary: other numbers clamp to the top.
+        self.ascii_punct = self.ascii_punct.min(1);
         self
     }
 }
@@ -140,6 +146,7 @@ mod tests {
         assert!(!config.auto_commit);
         assert_eq!(config.auto_commit_length, MAX_CODE_LEN);
         assert_eq!(config.commit_next_code, 0, "overflow commit is off by default");
+        assert_eq!(config.ascii_punct, 0, "English punctuation is the default");
     }
 
     #[test]
@@ -178,6 +185,19 @@ mod tests {
 
         let config = Config { commit_next_code: 5, ..Config::default() }.sanitized();
         assert_eq!(config.commit_next_code, 5, "the 5th code stays usable");
+    }
+
+    /// `ascii_punct` crosses JSON as the metadata.toml number (0 英文标点 /
+    /// 1 中文标点), never as a bool; other numbers clamp to the top.
+    #[test]
+    fn ascii_punct_crosses_json_as_its_number() {
+        let config: Config = serde_json::from_str(r#"{"ascii_punct":1}"#).unwrap();
+        assert_eq!(config.ascii_punct, 1);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""ascii_punct":1"#), "{json}");
+
+        let clamped = Config { ascii_punct: 7, ..Config::default() }.sanitized();
+        assert_eq!(clamped.ascii_punct, 1, "unknown numbers clamp to 中文标点");
     }
 
     #[test]
