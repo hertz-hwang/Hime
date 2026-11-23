@@ -38,6 +38,10 @@
 	<string>com.hime.inputmethod.Hime</string>
 	<key>TISIntendedLanguage</key>
 	<string>zh-Hans</string>
+	<!-- 「使用「中/英」键切换「ABC」输入法」只对声明该键的输入法生效，顶层与模式级都要声明；
+	     字符集声明（顶层与模式级 CharacterRepertoireKey）严禁出现 Latn，否则系统按拉丁类输入源
+	     处理并封锁切换通道（鼠须管 1.0.1／青简 #540 同款坑）。改动这些声明后必须注销重新登录：
+	     守护进程在登录时重建输入源映射表，运行中重注册不生效。 -->
 	<key>TICapsLockLanguageSwitchCapable</key>
 	<true/>
 	<key>tsInputMethodCharacterRepertoireKey</key>
@@ -64,6 +68,12 @@
 				<string>com.hime.inputmethod.Hime.Hans</string>
 				<key>TISIntendedLanguage</key>
 				<string>zh-Hans</string>
+				<key>TICapsLockLanguageSwitchCapable</key>
+				<true/>
+				<key>tsInputModeCharacterRepertoireKey</key>
+				<array>
+					<string>Hans</string>
+				</array>
 				<key>tsInputModeAlternateMenuIconFileKey</key>
 				<string>HimeMenuIcon.pdf</string>
 				<key>tsInputModeDefaultStateKey</key>
