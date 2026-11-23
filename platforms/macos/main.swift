@@ -48,4 +48,9 @@ sharedCandidates = IMKCandidates(server: server,
 // stale encoding.
 sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
 
+// Startup banner: identifies the running build and proves the os_log path
+// works — the Caps Lock field diagnostics (HimeInputController) depend on it.
+let buildVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+NSLog("Hime %@: engine up, IMK server %@", buildVersion, connectionName)
+
 app.run()
