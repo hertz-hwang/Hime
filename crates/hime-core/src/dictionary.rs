@@ -8,11 +8,12 @@
 //! exactly `a` come first (with an empty `comment`), followed by entries whose
 //! code merely starts with `a` (e.g. `aa`, `ad`), whose `comment` carries the
 //! remaining required coding as `~a`, `~d`. Within each group, higher weight
-//! wins first; a repeated text is dropped, and results are truncated to the
-//! requested limit.
+//! wins first; results are truncated to the requested limit. A text listed
+//! under several codes is reported under each of them — deciding what one
+//! candidate page shows belongs to [`Filter`](crate::filter::Filter).
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -115,11 +116,8 @@ impl Dictionary {
     /// longer-code candidates whose code starts with `input`; at most
     /// `limit` candidates are returned.
     ///
-    /// One text is offered at most once: the same word can sit under several
-    /// codes (`a`, `aaa`, `aaaa` all map to `工`), and a candidate window
-    /// cannot label duplicates distinctly. The first occurrence — the exact
-    /// code or the highest weight — wins, and the freed slot is filled by the
-    /// next match.
+    /// This is the raw table report: every entry whose code matches is
+    /// returned, including a word already listed under another code.
     pub fn lookup(&self, input: &str, limit: usize) -> Vec<Candidate> {
         if input.is_empty() || limit == 0 {
             return Vec::new();
@@ -147,22 +145,15 @@ impl Dictionary {
         prefix.sort_by_key(|e| Reverse(e.weight));
 
         let mut out: Vec<Candidate> = Vec::with_capacity(limit);
-        let mut seen: HashSet<&str> = HashSet::with_capacity(limit);
         for e in exact {
             if out.len() >= limit {
                 return out;
-            }
-            if !seen.insert(e.text.as_str()) {
-                continue;
             }
             out.push(Candidate { text: e.text.clone(), comment: String::new() });
         }
         for e in prefix {
             if out.len() >= limit {
                 return out;
-            }
-            if !seen.insert(e.text.as_str()) {
-                continue;
             }
             // `input` is ASCII lowercase, so this byte offset is a char boundary.
             let remaining = &e.code[input.len()..];
@@ -226,8 +217,8 @@ mod tests {
                 cand("工", ""),      // exact, weight 100
                 cand("戈", ""),      // exact, weight 90
                 cand("式", "~a"),    // aa,   weight 100
-                cand("匿", "~d"),    // ad,   weight 100 (工 under aaa/aaaa is a repeat)
-                cand("㠭", "~aaa"),  // aaaa, weight 80
+                cand("工", "~aa"),   // aaa,  weight 100
+                cand("工", "~aaa"),  // aaaa, weight 100 (file order ahead of ad-匿)
             ]
         );
     }
@@ -236,29 +227,20 @@ mod tests {
     fn lookup_aa() {
         assert_eq!(
             sample().lookup("aa", 5),
-            vec![cand("式", ""), cand("工", "~a"), cand("㠭", "~aa")]
+            vec![cand("式", ""), cand("工", "~a"), cand("工", "~aa"), cand("㠭", "~aa")]
         );
     }
 
-    /// A text listed under several codes must occupy exactly one slot, so the
-    /// shell's candidate numbering stays one-to-one with what it can select.
+    /// A word listed under several codes is reported once per code: the table
+    /// states what the lexicon contains, and deciding one page belongs to the
+    /// filter stage.
     #[test]
-    fn repeated_text_is_offered_once_and_fills_from_later_matches() {
+    fn lookup_reports_a_word_once_per_matching_code() {
         let d = Dictionary::parse_str("a\t一\t10\nab\t一\t9\nabc\t一\t8\n").unwrap();
-        assert_eq!(d.lookup("a", 5), vec![cand("一", "")]);
-
-        // The exact-match copy wins, so the surviving comment is the exact one.
-        let d = Dictionary::parse_str("a\t一\t1\nab\t一\t9\nac\t二\t5\n").unwrap();
-        assert_eq!(d.lookup("a", 5), vec![cand("一", ""), cand("二", "~c")]);
-    }
-
-    #[test]
-    fn lookup_never_returns_duplicate_texts() {
-        for input in ["a", "aa", "aaa", "aaaa"] {
-            let got = sample().lookup(input, 5);
-            let unique: HashSet<&str> = got.iter().map(|c| c.text.as_str()).collect();
-            assert_eq!(unique.len(), got.len(), "duplicate candidate for {input:?}: {got:?}");
-        }
+        assert_eq!(
+            d.lookup("a", 5),
+            vec![cand("一", ""), cand("一", "~b"), cand("一", "~bc")]
+        );
     }
 
     #[test]

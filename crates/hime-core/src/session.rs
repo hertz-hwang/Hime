@@ -1,32 +1,39 @@
 //! Session state machine (SPEC_MVP §3).
+//!
+//! `Session` is the only owner of typing state. It keeps the encoding and the
+//! rendered candidate list, asks [`Processor`] what a key means and applies
+//! the answer, and asks [`Pipeline`] for candidates whenever the encoding
+//! changes. Nothing here knows where candidates come from, so adding a pinyin
+//! source or a converter touches the pipeline and not this file.
 
 use std::mem;
 use std::sync::Arc;
 
 use crate::dictionary::Dictionary;
+use crate::pipeline::Pipeline;
+use crate::processor::{Action, Processor};
 use crate::types::{Candidate, EngineResponse};
-use crate::{
-    MAX_CANDIDATES, MAX_CODE_LEN, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE,
-};
-
-// Printable-key ASCII codes; digits `1`..=`5` select candidates 0..=4.
-const ASCII_A: u32 = 97;
-const ASCII_Z: u32 = 122;
-const ASCII_1: u32 = 49;
-const ASCII_5: u32 = 53;
 
 /// One typing session. All typing state lives here; shells just render the
 /// [`EngineResponse`] they get back.
 #[derive(Debug)]
 pub struct Session {
-    dict: Arc<Dictionary>,
+    pipeline: Pipeline,
     input_buffer: String,
     candidates: Vec<Candidate>,
 }
 
 impl Session {
+    /// Session over a lexicon, using the MVP pipeline (table lookup, then
+    /// de-duplicate, then cut the page).
     pub fn new(dict: Arc<Dictionary>) -> Self {
-        Self { dict, input_buffer: String::new(), candidates: Vec::new() }
+        Self::with_pipeline(Pipeline::table(dict))
+    }
+
+    /// Session over a custom pipeline, for a shell or test that wants to pick
+    /// the candidate sources and post-processing itself.
+    pub fn with_pipeline(pipeline: Pipeline) -> Self {
+        Self { pipeline, input_buffer: String::new(), candidates: Vec::new() }
     }
 
     /// Feed one key (see the `KEY_*` constants and ASCII codes in
@@ -38,67 +45,42 @@ impl Session {
     /// behind them, any other key code) are swallowed as no-ops so the
     /// host's Marked Text keeps running.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
-        // Idle: only a letter starts a composition; every other key passes
-        // through untouched.
-        if self.input_buffer.is_empty() {
-            if is_letter(key) {
-                self.push_letter(key);
-                return self.response(true, None);
+        match Processor::decide(key, &self.input_buffer, self.candidates.len()) {
+            Action::Pass => self.response(false, None),
+            Action::Noop => self.response(true, None),
+            Action::AppendCode(byte) => {
+                self.push_letter(byte);
+                self.response(true, None)
             }
-            return self.response(false, None);
-        }
-
-        match key {
-            KEY_BACKSPACE => {
+            Action::DeleteCode => {
                 self.input_buffer.pop();
                 self.refresh_candidates();
                 self.response(true, None)
             }
-            KEY_ESCAPE => {
+            Action::Discard => {
                 self.clear();
                 self.response(true, None)
             }
-            KEY_SPACE => {
-                // First candidate wins; with nothing selectable, commit the
-                // raw encoding instead.
-                let commit = match self.candidates.first() {
-                    Some(c) => c.text.clone(),
-                    None => mem::take(&mut self.input_buffer),
-                };
-                self.clear();
-                self.response(true, Some(commit))
-            }
-            KEY_ENTER => {
+            Action::CommitRaw => {
                 let commit = mem::take(&mut self.input_buffer);
                 self.clear();
                 self.response(true, Some(commit))
             }
-            k if is_letter(k) && self.input_buffer.len() < MAX_CODE_LEN => {
-                self.push_letter(k);
-                self.response(true, None)
-            }
-            ASCII_1..=ASCII_5 => {
-                let index = (key - ASCII_1) as usize;
-                match self.candidates.get(index) {
-                    Some(c) => {
-                        let commit = c.text.clone();
-                        self.clear();
-                        self.response(true, Some(commit))
-                    }
-                    // Digit with no candidate behind it: swallow as a no-op;
-                    // releasing it could disturb the host's Marked Text.
-                    None => self.response(true, None),
+            Action::Select(index) => match self.candidates.get(index) {
+                Some(candidate) => {
+                    let commit = candidate.text.clone();
+                    self.clear();
+                    self.response(true, Some(commit))
                 }
-            }
-            // Letters over the MAX_CODE_LEN cap and every other key code are
-            // swallowed the same way: composition state stays untouched so
-            // the host's Marked Text is never interrupted mid-composition.
-            _ => self.response(true, None),
+                // The list no longer has that entry; keep composing rather
+                // than commit the wrong text.
+                None => self.response(true, None),
+            },
         }
     }
 
-    fn push_letter(&mut self, key: u32) {
-        self.input_buffer.push(char::from(key as u8));
+    fn push_letter(&mut self, byte: u8) {
+        self.input_buffer.push(char::from(byte));
         self.refresh_candidates();
     }
 
@@ -106,7 +88,7 @@ impl Session {
         self.candidates = if self.input_buffer.is_empty() {
             Vec::new()
         } else {
-            self.dict.lookup(&self.input_buffer, MAX_CANDIDATES)
+            self.pipeline.retrieve(&self.input_buffer)
         };
     }
 
@@ -126,13 +108,10 @@ impl Session {
     }
 }
 
-fn is_letter(key: u32) -> bool {
-    (ASCII_A..=ASCII_Z).contains(&key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE, MAX_CODE_LEN};
 
     const SAMPLE: &str = "a\t工\t100\n\
                           a\t戈\t90\n\
@@ -140,6 +119,16 @@ mod tests {
                           ad\t匿\t100\n\
                           g\t王\t100\n\
                           gg\t五\t100\n";
+
+    /// Same words reachable from longer encodings, which is what produced the
+    /// candidate window that showed keys 2, 3 and 5 with 1 and 4 blank.
+    const REPEATED_TEXT: &str = "a\t工\t100\n\
+                                 a\t戈\t90\n\
+                                 aa\t式\t100\n\
+                                 aaa\t工\t100\n\
+                                 aaaa\t工\t100\n\
+                                 aaaa\t㠭\t80\n\
+                                 ad\t匿\t100\n";
 
     const KEY_A: u32 = 97;
     const KEY_G: u32 = 103;
@@ -213,6 +202,23 @@ mod tests {
                 Candidate { text: "式".into(), comment: "~a".into() },
                 Candidate { text: "匿".into(), comment: "~d".into() },
             ]
+        );
+    }
+
+    /// The candidate list the shell numbers 1..=N must contain each text once,
+    /// so a key label always names one word.
+    #[test]
+    fn candidate_list_offers_each_text_once_and_fills_the_page() {
+        let mut s = Session::new(Arc::new(
+            Dictionary::parse_str(REPEATED_TEXT).expect("sample parses"),
+        ));
+        let r = s.process_key(KEY_A);
+        let texts: Vec<&str> = r.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["工", "戈", "式", "匿", "㠭"]);
+        assert_eq!(
+            texts.iter().collect::<std::collections::HashSet<_>>().len(),
+            texts.len(),
+            "duplicate text in {texts:?}"
         );
     }
 
@@ -347,5 +353,25 @@ mod tests {
 
         let back: EngineResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
+    }
+
+    /// A custom chain reaches the user without any change to the state
+    /// machine, which is the point of the pipeline split.
+    #[test]
+    fn a_custom_pipeline_drives_the_same_state_machine() {
+        struct OnlyStar;
+        impl crate::translator::Translator for OnlyStar {
+            fn translate(&self, input: &str, _limit: usize) -> Vec<Candidate> {
+                if input == "x" {
+                    vec![Candidate { text: "星".into(), comment: String::new() }]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let pipeline = Pipeline::new(vec![Box::new(OnlyStar)], vec![]);
+        let mut s = Session::with_pipeline(pipeline);
+        assert_eq!(s.process_key(b'x' as u32).candidates[0].text, "星");
+        assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("星"));
     }
 }

@@ -1,16 +1,38 @@
 //! Hime input engine core ("Fat Core, Thin Shell", AGENTS.md §1).
 //!
-//! All typing state and dictionary lookup logic live in this crate. Platform
+//! All typing state and candidate retrieval logic live in this crate. Platform
 //! shells forward key codes to [`Session::process_key`] and render the
 //! returned [`EngineResponse`] verbatim; they never keep typing state of
 //! their own.
+//!
+//! Retrieval is a pipeline with three roles, so a pinyin source can be added
+//! beside the 形码 table without touching the state machine:
+//!
+//! - [`Processor`] reads a key plus the current composition and decides what
+//!   the key means ([`Action`]): append to the encoding, delete, select,
+//!   abandon, do nothing, or pass the key to the host.
+//! - [`Translator`] turns an encoding into candidates. [`TableTranslator`]
+//!   covers the TSV lexicon; a `PinyinTranslator` is the planned second source.
+//! - [`Filter`] post-processes the merged candidates: [`DedupFilter`] today,
+//!   ranking, script conversion or emoji injection later.
+//!
+//! [`Pipeline`] wires the configured translators and filters together and is
+//! the only thing `Session` consults about candidates.
 
 pub mod dictionary;
+pub mod filter;
+pub mod pipeline;
+pub mod processor;
 pub mod session;
+pub mod translator;
 pub mod types;
 
 pub use dictionary::Dictionary;
+pub use filter::{DedupFilter, Filter, LimitFilter};
+pub use pipeline::Pipeline;
+pub use processor::{Action, Processor};
 pub use session::Session;
+pub use translator::{TableTranslator, Translator};
 pub use types::{Candidate, EngineResponse};
 
 // Virtual key codes (SPEC_MVP §2.1). Printable keys use their ASCII code:
@@ -23,5 +45,13 @@ pub const KEY_SPACE: u32 = 32;
 /// Maximum length of a Xingma encoding.
 pub const MAX_CODE_LEN: usize = 4;
 
-/// Number of candidates returned to the shell in each response.
+/// Candidates one page holds, and the number the shell may put behind a key.
 pub const MAX_CANDIDATES: usize = 5;
+
+/// Candidates each translator is asked for, before filters run.
+///
+/// Deliberately larger than [`MAX_CANDIDATES`]: filters drop entries (see
+/// [`DedupFilter`]) and add others, so retrieving exactly one page would let
+/// the dropped entries shrink the page instead of being replaced by the next
+/// matches.
+pub const FETCH_CANDIDATES: usize = 32;
