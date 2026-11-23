@@ -67,8 +67,8 @@
 
 仿业火（Fire）输入法的设置面板：左侧栏按组分列（编码与输入 → 基本；应用 → 关于），右侧 grouped form，每行标题在左、控件右对齐，说明文字以灰色小字跟在标题后面。实现用 SwiftUI（`NavigationSplitView` + `Form`/`LabeledContent`），经 `NSHostingController` 装进 `NSWindow`。
 
-- **入口**：`HimeInputController.menu()` 返回的菜单项显示在输入法菜单的应用名分组下（就是业火那个「Fire」分组的位置），标题「Hime 首选项…」，target 指向 `PreferencesWindowController.shared`。备用入口：`applicationShouldHandleReopen`——`open -a Hime` 或双击 Hime.app 直接打开面板（IME 没有 Dock 图标，这是无菜单时的进法）。
+- **入口**：`HimeInputController.menu()` 返回的菜单项显示在输入法菜单的应用名分组下（就是业火那个「Fire」分组的位置），标题「Hime 首选项…」。分发机制：TextInputMenuAgent 对菜单项做特殊处理——action 必须声明为 `showPreferences:`，选中时系统调用**活跃 controller 实例**上的同名方法，`NSMenuItem.target` 被忽略；因此 `HimeInputController` 重写 `showPreferences(_:)`（默认实现找 preferences.nib，本工程没有）转发给 `PreferencesWindowController.shared`。备用入口：`applicationShouldHandleReopen`——`open -a Hime` 或双击 Hime.app 直接打开面板（IME 没有 Dock 图标，这是无菜单时的进法）。注意：`menu()` 只在存在活跃输入会话（有客户端连上 IMK server）时才会被调用并出现在菜单里。
 - **状态边界**：设置面板持有的是偏好与窗口 UI 状态，不是打字状态；引擎侧数值全部经 `hime_set_config`（SPEC_MVP §2.3）交给 Rust，Shell 只把用户请求存进 `UserDefaults` 并在 `main.swift` 启动时下发一次，「Fat Core, Thin Shell」不受影响。
 - **生效项**：候选词数量、最大码长 → 引擎（现有会话即时生效）；候选字号 → 纯 Shell 渲染参数，每次渲染候选窗前把 `NSFont` 合入 `IMKCandidates` 的样式属性（该字典同时携带启动时设置的按键转发标志，必须合并后整体 `setAttributes`，不能覆盖）。
 - **命令行编译约束**：macOS 上没有 Xcode、只有 Command Line Tools，SwiftUI 的宏插件 `SwiftUIMacros` 不在工具链里，`@State`/`@Observable` 等属性宏无法展开。首选项视图因此只用非宏的 `ObservableObject` + `@Published`：侧栏选中态放在 `PanelSelection` 对象里经 `@EnvironmentObject` 注入，不写 `@State`。给这个 target 新增 SwiftUI 代码前先确认没用宏。
-- **窗口聚焦**：`LSUIElement` 进程平时无前台，`showPreferences` 必须先 `NSApp.activate` 再 `makeKeyAndOrderFront`，否则窗口出现在用户应用背后且拿不到键盘焦点。
+- **窗口聚焦**：`LSUIElement` 进程平时无前台。`showPreferences` 先 `makeKeyAndOrderFront`，再在下一个 runloop 周期 `NSApp.activate(ignoringOtherApps:)`（macOS 14+ 的无参 `activate()` 在本进程实测无效）。输入法菜单路径的激活请求可能被系统焦点窃取防护拦下：窗口会正常浮到前台，但键盘焦点留在原前台应用，用户点一下窗口即恢复；`open -a Hime` 的 reopen 路径能正常拿到前台。
