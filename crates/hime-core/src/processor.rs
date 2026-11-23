@@ -15,8 +15,9 @@
 //! swallowed, so neither reaches the host nor commits any text. Idle, they stay
 //! ordinary keys the application types.
 
-use crate::config::Config;
+use crate::config::{CodeType, Config};
 use crate::punct;
+use crate::sentence::config::MAX_RAW_LENGTH;
 use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE};
 
 /// What the engine should do about one key.
@@ -90,6 +91,17 @@ impl Processor {
         }
 
         if let Some(byte) = letter {
+            // 形码整句: the key stream is one whole sentence, so it is capped
+            // only by the decoder's own limit and never overflows — a further
+            // letter extends the sentence, and selecting or Space commits it.
+            // The word-code cap and the overflow rule do not apply here.
+            if config.code_type == CodeType::XingmaSentence {
+                return if code.len() < MAX_RAW_LENGTH {
+                    Action::AppendCode(byte)
+                } else {
+                    Action::Noop
+                };
+            }
             // The overflow rule wins over the cap: at exactly N-1 letters the
             // N-th letter commits and restarts the encoding, even where the
             // cap would otherwise swallow it (琉璃: max_code 4, N 5).
@@ -435,5 +447,69 @@ mod tests {
             Processor::decide(KEY_D, "abc", 1, below_cap),
             Action::OverflowCommit(b'd')
         );
+    }
+
+    /// 形码整句 ignores the word-code cap and the overflow rule: a further
+    /// letter extends the sentence rather than committing at the 5th key or
+    /// stopping at `max_code_len`.
+    #[test]
+    fn sentence_mode_ignores_the_word_cap_and_never_overflows() {
+        let word = Config { max_code_len: 4, commit_next_code: 5, ..Config::default() };
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 1, word),
+            Action::OverflowCommit(b'd'),
+            "the same config overflows in word mode"
+        );
+
+        let sentence = Config {
+            code_type: CodeType::XingmaSentence,
+            max_code_len: 4,
+            commit_next_code: 5,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(KEY_D, "abcd", 1, sentence),
+            Action::AppendCode(b'd'),
+            "no overflow at the 5th letter in 形码整句"
+        );
+        let long = "a".repeat(64);
+        assert_eq!(
+            Processor::decide(KEY_D, &long, 1, sentence),
+            Action::AppendCode(b'd'),
+            "a long code keeps extending"
+        );
+    }
+
+    /// The sentence code is capped at the decoder's own limit; letters past it
+    /// are swallowed, matching how a word code treats letters over its cap.
+    #[test]
+    fn sentence_mode_caps_the_code_at_the_decoder_limit() {
+        let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
+        let at_limit = "a".repeat(MAX_RAW_LENGTH - 1);
+        assert_eq!(
+            Processor::decide(KEY_A, &at_limit, 1, sentence),
+            Action::AppendCode(b'a'),
+            "the letter that reaches the limit is accepted"
+        );
+        let full = "a".repeat(MAX_RAW_LENGTH);
+        assert_eq!(
+            Processor::decide(KEY_A, &full, 1, sentence),
+            Action::Noop,
+            "letters past the limit are swallowed"
+        );
+    }
+
+    /// Sentence mode changes only how letters accumulate: Space, digits, the
+    /// editing keys and Enter keep their meanings, so the chosen sentence
+    /// commits through the same actions the table path uses.
+    #[test]
+    fn sentence_mode_keeps_selection_and_editing_keys() {
+        let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
+        assert_eq!(Processor::decide(KEY_SPACE, "jin", 3, sentence), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_SPACE, "q", 0, sentence), Action::CommitRaw);
+        assert_eq!(Processor::decide(KEY_2, "jin", 3, sentence), Action::Select(1));
+        assert_eq!(Processor::decide(KEY_BACKSPACE, "jin", 3, sentence), Action::DeleteCode);
+        assert_eq!(Processor::decide(KEY_ESCAPE, "jin", 3, sentence), Action::Discard);
+        assert_eq!(Processor::decide(KEY_ENTER, "jin", 3, sentence), Action::CommitRaw);
     }
 }

@@ -9,7 +9,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{CodeType, Config};
 use crate::dictionary::Dictionary;
 use crate::pipeline::Pipeline;
 use crate::processor::{Action, Processor};
@@ -77,6 +77,29 @@ impl Session {
         Self {
             dict: None,
             config: Config::default(),
+            pipeline,
+            input_buffer: String::new(),
+            window: Vec::new(),
+            page: 0,
+            candidates: Vec::new(),
+            quotes: QuotePair::default(),
+        }
+    }
+
+    /// Session for 形码整句: encodings decode to whole sentences through
+    /// `engine` instead of being looked up as words. This switches the key
+    /// model to sentence mode — a code runs to the decoder's length limit and
+    /// never overflow-commits — by forcing
+    /// [`Config::code_type`] to [`CodeType::XingmaSentence`]; every other
+    /// knob (page size, punctuation) comes from `config`. Paging, digit
+    /// select and Space then list and commit the sentences exactly like table
+    /// candidates.
+    pub fn sentence(engine: Arc<crate::sentence::SentenceEngine>, config: Config) -> Self {
+        let config = Config { code_type: CodeType::XingmaSentence, ..config }.sanitized();
+        let pipeline = Pipeline::sentence(engine);
+        Self {
+            dict: None,
+            config,
             pipeline,
             input_buffer: String::new(),
             window: Vec::new(),
