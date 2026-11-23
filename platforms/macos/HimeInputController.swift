@@ -64,7 +64,13 @@ final class HimeInputController: IMKInputController {
         guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first?.value
         else { return nil }
         if scalar >= 65, scalar <= 90 { return scalar + 32 } // A-Z -> a-z
-        if (97...122).contains(scalar) || (49...57).contains(scalar) { return scalar }
+        if (97...122).contains(scalar) { return scalar }
+        // Other printable keys forward the *final* character, so shifted forms
+        // (?, !, :, " …) reach the engine as their own ASCII code; digits are
+        // covered by the same branch.
+        if let final = event.characters?.unicodeScalars.first?.value, (33...126).contains(final) {
+            return final
+        }
         return nil
     }
 
