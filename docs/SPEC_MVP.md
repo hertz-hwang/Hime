@@ -18,6 +18,7 @@
   - `KEY_ENTER = 13`
   - `KEY_ESCAPE = 27`
   - `KEY_SPACE = 32`
+- 翻页键：`KEY_PAGE_UP = 45`（`-`，上翻页）、`KEY_PAGE_DOWN = 61`（`=`，下翻页）。它们就是自身的 ASCII 码（外壳原样转发可打印键），仅在「有候选」时生效（见 §3）。
 
 ### 2.2 引擎输出响应 (`EngineResponse` - 需支持 `serde::Serialize`)
 ```rust
@@ -57,11 +58,12 @@ pub struct Config {
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
-- `Session::set_config` 会用新页长重建表管线并重取候选，编码输入中途改配置也能从下一次响应起生效。
+- `Session::set_config` 只按新页长重切当前页（页码夹进新范围），不再重建检索链或重取候选——页长只影响切页，编码输入中途改配置也从下一次响应起生效。
 - `ascii_punct` 由 §3 的按键模型消费：`0` 英文标点，可打印符号全部原样放行给宿主；`1` 中文标点，标点映射表（§3.1）内的键被引擎拦截并输出该键的映射文字，表外符号仍然放行。
 
 ## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
-按键语义集中在 `Processor::decide(key, code, candidate_count, config)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
+按键语义集中在 `Processor::decide(key, code, candidate_count, config)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。翻页（page）由 `Processor` 发 `PageUp`/`PageDown`、由 `Session` 维护页码，不动编码缓冲（详见 §3「翻页」条）。
+`candidate_count` 传入的是**当前页**渲染的候选数，因此数字键始终只选中当前页上的词，`-`/`=` 的「有候选」判据也只看当前页是否为空。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
 1. **当 `input_buffer` 为空时（空闲状态）**：
@@ -76,7 +78,8 @@ pub struct Config {
    - 输入 `KEY_BACKSPACE`：删除 `input_buffer` 最后一个字符。若删空，清空 `preedit` 和 `candidates`；若未删空，重新检索词库。返回 `handled: true`。
    - 输入 `KEY_ESCAPE`：清空 `input_buffer`、清空候选，返回 `handled: true`。
    - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
-   - 输入 `1`-`N`（`N` = `page_size`，默认 5）：若对应索引（0 起）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。
+   - 输入 `1`-`N`（`N` = `page_size`，默认 5）：若对应索引（0 起）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。数字索引按**当前页**从 0 计，翻页后仍只选当前页上的词。
+   - **翻页**：输入 `KEY_PAGE_UP`（`-`）或 `KEY_PAGE_DOWN`（`=`），当且仅当**当前页有候选**时触发——`=` 下翻页、`-` 上翻页，`input_buffer`、`preedit` 不变，只换 `candidates` 为邻页，返回 `handled: true`。页码由 `Session` 持有，翻页越界（首页再上翻、末页再下翻）停在原地，仍返回 `handled: true`。编码任何变化（追加字母、退格、顶码、方案或配置变更）都把页码复位到第一页。**无候选时** `PageUp`/`PageDown` 不触发，`-`/`=` 落回各自本行：英文标点模式放行给宿主（`handled: false`）、中文标点模式按 §3.1 提交映射（`-` 顶出第 1 候选并接 `——`）。
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
    - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：第 1 候选（无候选则把已编码字母原样）拼接该键的映射文字进 `commit_text`，清空状态，返回 `handled: true`。
    - 两个模式共同：表外的可打印符号键放行，返回 `handled: false`，组字状态原样保留——宿主把符号直接插入正文，内嵌预编辑继续站立，后续按键照常回到引擎续编。这是「编码态每个键都被拦截」契约唯一的例外。
@@ -103,27 +106,28 @@ pub struct Config {
 - **表外的可打印符号**共 9 个，两种模式下都交还宿主：`#`、`%`、`&`、`*`、`+`、`=`、`@`、`_`、`|`。
 - 每个映射都是固定字符串（`-` 出 `——`、`^` 出 `……`，各占两个码位），无需检索。`map` 取表内首个匹配，因此同一键在表里重复出现时后一条永远不可达——单元测试断言 `DIRECT` 无重复键，也断言认领集合恰等于本表。
 - **引号配对**：`'` 与 `"` 首次输出开引号，此后按开→闭→开交替，两种引号各自独立计数。配对状态由 `Session` 持有，提交与清空编码不重置它（中途放弃编码不会让下一枚引号退回开引号），会话销毁才复位：段首 `"` 出 `“`，提交候选后再按 `"` 出 `”`。
+- **翻页键优先于本表**：`-`（`KEY_PAGE_UP`）与 `=`（`KEY_PAGE_DOWN`）在当前页有候选时先做翻页（§3），本表的映射让位于翻页——`-` 在中文标点模式下有候选时翻页、不再输出 `——`。只有无候选时 `-`/`=` 才回到本表语义（`-` 提交 `——`；`=` 属表外符号，两模式都放行）。
 
 ## 4. 检索管线 (`Pipeline`：Translator → Filter)
-「编码进、候选页出」这一步必须是可扩展的三段管线，全拼/双拼才能作为新数据源接入而不改动状态机。
+「编码进、候选窗口出」这一步必须是可扩展的管线，全拼/双拼才能作为新数据源接入而不改动状态机。管线交回的窗口宽于一页，切页与翻页由 `Session` 负责（§4.3）。
 
 ### 4.1 角色分工
 | 角色 | 职责 | MVP 实现 | 后续扩展 |
 | --- | --- | --- | --- |
-| `Processor` | 读按键 + 当前编码 + 当前候选数，决定追加编码、删码、选词、放弃、No-op 还是放行给系统 | `Processor::decide` → `Action`（见 §3） | 翻页键 → 新增 `Action` 变体 |
+| `Processor` | 读按键 + 当前编码 + 当前候选数（当前页），决定追加编码、删码、选词、翻页、放弃、No-op 还是放行给系统 | `Processor::decide` → `Action`（含 `PageUp`/`PageDown`，见 §3） | 自定义翻页键 |
 | `Translator` | 把编码转换成候选词，按检索优先级上报，不做取舍 | `TableTranslator`（形码查表，包装 `Dictionary`） | `PinyinTranslator`（全拼/双拼，走音节图搜索） |
-| `Filter` | 对**所有 translator 合并后**的候选做删除、重排、注入 | `DedupFilter`、`LimitFilter` | 权重混排、简繁转换、Emoji 注入 |
-| `Pipeline` | 按注册顺序调用 translators，再依次跑 filters | `Pipeline::table(dict)` = Table → Dedup → Limit | `Pipeline::new(Vec<Box<dyn Translator>>, Vec<Box<dyn Filter>>)`，经 `Session::with_pipeline` 注入 |
+| `Filter` | 对**所有 translator 合并后**的候选做删除、重排、注入 | `DedupFilter`（`LimitFilter` 留给自定义链） | 权重混排、简繁转换、Emoji 注入 |
+| `Pipeline` | 按注册顺序调用 translators，再依次跑 filters，交回整窗口（不切页） | `Pipeline::table(dict)` = Table → Dedup | `Pipeline::new(Vec<Box<dyn Translator>>, Vec<Box<dyn Filter>>)`，经 `Session::with_pipeline` 注入 |
 
 `Translator` 与 `Filter` 都要求 `Send + Sync`：FFI 层可能由任意线程投递按键（见 §5），会话会被搬到别的线程上。
 
 ### 4.2 去重属于 Filter 层
-同一个词可以挂在多个编码下（`a`、`aaa`、`aaaa` 都是「工」），将来全拼源还会再报一次。`Dictionary::lookup` 是纯粹的表查询，同一文字按编码逐条上报；`DedupFilter` 才决定一页展示什么：保留首次出现的那条（精确匹配或权重最高，`comment` 随之保留），后面的重复项丢弃。原因有两个：去重是跨数据源的策略（只有 Filter 看得见合并结果），而候选窗以候选文字作标识，重复文字会塌成一格、编号却仍按数组位置计数（曾出现只剩 `2 戈 / 3 式 / 5 工`、1 和 4 空号的错乱窗口）。
+同一个词可以挂在多个编码下（`a`、`aaa`、`aaaa` 都是「工」），将来全拼源还会再报一次。`Dictionary::lookup` 是纯粹的表查询，同一文字按编码逐条上报；`DedupFilter` 才决定窗口里放什么：保留首次出现的那条（精确匹配或权重最高，`comment` 随之保留），后面的重复项丢弃。原因有两个：去重是跨数据源的策略（只有 Filter 看得见合并结果），而候选窗以候选文字作标识，重复文字会塌成一格、编号却仍按数组位置计数（曾出现只剩 `2 戈 / 3 式 / 5 工`、1 和 4 空号的错乱窗口）。
 
-### 4.3 每页数量与检索窗口
+### 4.3 每页数量、检索窗口与翻页
 - 一页的候选数（也是候选窗编号数字键能选中的数量、`EngineResponse.candidates` 的长度上限）由 `Config.page_size` 决定（§2.3）；默认值 `MAX_CANDIDATES = 5`。
-- `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量。
-- 顺序是「先取满窗口 → 跑完所有 Filter → 最后截断到 5」，因此被丢弃的重复项会让后面的匹配补位，而不是让这一页变短。`LimitFilter` 必须是链上最后一个 Filter。
+- `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量，让窗口宽于一页、能翻页。
+- 顺序是「先取满窗口 → 跑完所有 Filter → 交回 `Session`」，被丢弃的重复项让后面的匹配补位、而不是让窗口变短。切页在 `Session` 里做：它保存整个窗口与页码，把第 `page` 页（`window[page*page_size .. ][0..page_size]`）放进 `EngineResponse.candidates`，`PageUp`/`PageDown` 移动页码并夹到首尾页；编码变化即复位到第 0 页。页码是打字状态，归 `Session`（Fat Core），外壳只渲染当前页。
 
 ## 5. 词库检索 (`Dictionary`)
 - 支持两种码表格式，按首个数据行的列数自动判别（2 列 → 方案码表，3 列 → 带权重 TSV）；`#` 开头的行是注释（真实方案码表以 `#name=`/`#describe=`/`#author=` 元数据块开头），空行忽略：
