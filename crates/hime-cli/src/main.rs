@@ -9,8 +9,11 @@
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
+//!   punctuation   any other printable ASCII (and space) is sent as-is,
+//!                 so the `ascii_punct` mode can be exercised end to end
 //!   :space :bs :esc :enter          control keys
 //!   :1 .. :9      digit keys (candidate selection is :1..:5)
+//!   :punct        toggle ascii_punct (0 = English, 1 = Chinese punctuation)
 //!   :help         show this help
 //!   :quit         exit
 
@@ -19,9 +22,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use hime_core::{Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
+use hime_core::{Config, Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
-const HELP: &str = "type letters a-z to compose (one keystroke per char); commands: :space :bs :esc :enter :1-:9 :help :quit";
+const HELP: &str = "type letters and punctuation to send one keystroke per char; commands: :space :bs :esc :enter :1-:9 :punct :help :quit";
 
 /// Dictionary path: CLI argument, else the default scheme table
 /// `data/schemes/liuli_v1/liuli_table.txt` under the current directory, else
@@ -78,16 +81,16 @@ fn main() -> ExitCode {
         if input.is_empty() {
             continue;
         }
-        if input.starts_with(':') {
-            if !handle_command(&mut session, input) {
+        if let Some(name) = command_name(input) {
+            if !handle_command(&mut session, name) {
                 break;
             }
         } else {
             for ch in input.chars() {
-                if ch.is_ascii_lowercase() {
+                if ch.is_ascii_graphic() || ch == ' ' {
                     send_key(&mut session, ch as u32, &ch.to_string());
                 } else {
-                    eprintln!("hime-cli: unknown character {ch:?} (letters only; commands start with ':')");
+                    eprintln!("hime-cli: unknown character {ch:?} (ASCII only; commands start with ':')");
                 }
             }
         }
@@ -95,10 +98,33 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Named command line starting with ':'. Returns false when the loop should
-/// stop (`:quit`).
-fn handle_command(session: &mut Session, cmd: &str) -> bool {
-    let name = &cmd[1..];
+/// A line is a command when it starts with ':' and names a known command.
+/// Every other line is keystrokes, so ':' itself (mapped punctuation) can be
+/// typed as often as desired without colliding with the command prefix.
+fn command_name(input: &str) -> Option<&str> {
+    let name = input.strip_prefix(':')?;
+    let known = matches!(
+        name,
+        "space"
+            | "bs"
+            | "backspace"
+            | "esc"
+            | "escape"
+            | "enter"
+            | "cr"
+            | "quit"
+            | "exit"
+            | "q"
+            | "help"
+            | "h"
+            | "punct"
+    ) || (name.chars().count() == 1 && name.chars().next().is_some_and(|ch| ch.is_ascii_digit()));
+    known.then_some(name)
+}
+
+/// Named command (without the ':'). Returns false when the loop should stop
+/// (`:quit`).
+fn handle_command(session: &mut Session, name: &str) -> bool {
     let code = match name {
         "space" => KEY_SPACE,
         "bs" | "backspace" => KEY_BACKSPACE,
@@ -109,21 +135,20 @@ fn handle_command(session: &mut Session, cmd: &str) -> bool {
             eprintln!("hime-cli: {HELP}");
             return true;
         }
-        other if other.chars().count() == 1 => {
-            let ch = other.chars().next().unwrap();
-            if ch.is_ascii_digit() {
-                ch as u32
-            } else {
-                eprintln!("hime-cli: unknown command {cmd:?} (try :help)");
-                return true;
-            }
-        }
-        _ => {
-            eprintln!("hime-cli: unknown command {cmd:?} (try :help)");
+        "punct" => {
+            let current = session.config();
+            let next = if current.ascii_punct == 1 { 0 } else { 1 };
+            session.set_config(Config { ascii_punct: next, ..current });
+            let mode = if next == 1 { "Chinese" } else { "English" };
+            eprintln!("hime-cli: ascii_punct = {next} ({mode} punctuation)");
             return true;
         }
+        other => {
+            let ch = other.chars().next().unwrap();
+            ch as u32
+        }
     };
-    send_key(session, code, cmd);
+    send_key(session, code, &format!(":{name}"));
     true
 }
 
