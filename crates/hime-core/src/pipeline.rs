@@ -49,6 +49,14 @@ impl Pipeline {
         Self::new(vec![Box::new(TableTranslator::new(dict))], vec![Box::new(DedupFilter)])
     }
 
+    /// The 形码整句 chain: one whole-sentence source and no filters. The decoder
+    /// already returns one candidate per distinct text in final rank, so there
+    /// is nothing to de-duplicate or re-order; the sentences simply replace the
+    /// table words in the same pipeline slot.
+    pub fn sentence(engine: Arc<crate::sentence::SentenceEngine>) -> Self {
+        Self::new(vec![Box::new(crate::sentence::SentenceTranslator::new(engine))], vec![])
+    }
+
     /// The full candidate window for `code`, best first: every match the
     /// translators report after the filters run, wider than one page.
     pub fn retrieve(&self, code: &str) -> Vec<Candidate> {

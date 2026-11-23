@@ -19,9 +19,11 @@
 //! learning or user-word data, exactly as in Fire.
 
 pub mod decoder;
+pub mod engine;
 pub mod lexicon;
 
 pub use decoder::{SentenceCandidate, SentenceDecoder};
+pub use engine::{SentenceEngine, SentenceModelError, SentenceTranslator};
 pub use lexicon::{SentenceEdge, SentenceLexicon};
 
 /// Beam-search and scoring constants, carried over from Fire's `SentenceConfig`
