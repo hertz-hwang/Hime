@@ -1,11 +1,18 @@
 //! Terminal interactive tester for the Hime engine.
 //!
-//! Loads the scheme table, reads simulated keystroke commands from stdin,
-//! and prints the `EngineResponse` JSON for every key — the same payload the
-//! macOS shell will receive over FFI.
+//! Loads a scheme, reads simulated keystroke commands from stdin, and prints
+//! the `EngineResponse` JSON for every key — the same payload the macOS shell
+//! will receive over FFI.
 //!
 //! Usage:
 //!   cargo run -p hime-cli -- [table.txt]
+//!   cargo run -p hime-cli -- --sentence [sentence_table.txt]
+//!
+//! Without `--sentence` the table is a 形码 word table and each encoding looks
+//! up words. With `--sentence` the encoding decodes to whole sentences (形码整句)
+//! using the n-gram model; it needs the `.hng` model located the same way as
+//! everywhere else (the `HIME_SENTENCE_MODEL` environment variable, else the
+//! bundled `data/sentence-ngram.hng`).
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -22,19 +29,19 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use hime_core::ngram::find_model_path;
+use hime_core::sentence::SentenceEngine;
 use hime_core::{Config, Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
 const HELP: &str = "type letters and punctuation to send one keystroke per char; commands: :space :bs :esc :enter :1-:9 :punct :help :quit";
 
-/// Dictionary path: CLI argument, else the default scheme table
-/// `data/schemes/liuli_v1/liuli_table.txt` under the current directory, else
-/// the copy next to this source tree.
-fn dict_path() -> PathBuf {
-    if let Some(arg) = std::env::args().nth(1) {
-        return PathBuf::from(arg);
+/// Word-table path: CLI argument, else the default 形码 scheme table, else the
+/// copy next to this source tree.
+fn word_table(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
     }
-    const DEFAULT_TABLE: &str = "data/schemes/liuli_v1/liuli_table.txt";
-    let relative = PathBuf::from(DEFAULT_TABLE);
+    let relative = PathBuf::from("data/schemes/liuli_v1/liuli_table.txt");
     if relative.is_file() {
         return relative;
     }
@@ -44,23 +51,82 @@ fn dict_path() -> PathBuf {
     ))
 }
 
-fn main() -> ExitCode {
-    let path = dict_path();
-    let dict = match Dictionary::load(&path) {
-        Ok(dict) => Arc::new(dict),
-        Err(e) => {
-            eprintln!("hime-cli: failed to load dictionary {}: {e}", path.display());
-            return ExitCode::FAILURE;
+/// Sentence-table path: CLI argument, else the default 形码整句 scheme table,
+/// else the copy next to this source tree.
+fn sentence_table(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    let relative = PathBuf::from("data/schemes/liuli_v1_sentence/liuli_table.txt");
+    if relative.is_file() {
+        return relative;
+    }
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/schemes/liuli_v1_sentence/liuli_table.txt"
+    ))
+}
+
+/// Split `argv` into the `--sentence` flag and the first positional table path.
+fn parse_args() -> (bool, Option<PathBuf>) {
+    let mut sentence = false;
+    let mut table: Option<PathBuf> = None;
+    for arg in std::env::args().skip(1) {
+        if arg == "--sentence" || arg == "-s" {
+            sentence = true;
+        } else if table.is_none() && !arg.starts_with('-') {
+            table = Some(PathBuf::from(arg));
         }
+    }
+    (sentence, table)
+}
+
+fn main() -> ExitCode {
+    let (sentence, table_arg) = parse_args();
+
+    let mut session = if sentence {
+        let Some(model) = find_model_path() else {
+            eprintln!(
+                "hime-cli: --sentence needs a .hng model (set HIME_SENTENCE_MODEL or add data/sentence-ngram.hng)"
+            );
+            return ExitCode::FAILURE;
+        };
+        let table = sentence_table(table_arg);
+        let engine = match SentenceEngine::load(&model, &table) {
+            Ok(engine) => Arc::new(engine),
+            Err(e) => {
+                eprintln!(
+                    "hime-cli: failed to load sentence engine ({} + {}): {e}",
+                    model.display(),
+                    table.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!(
+            "hime-cli: 形码整句 mode — model {}, table {}",
+            model.display(),
+            table.display()
+        );
+        Session::sentence(engine, Config::default())
+    } else {
+        let path = word_table(table_arg);
+        let dict = match Dictionary::load(&path) {
+            Ok(dict) => Arc::new(dict),
+            Err(e) => {
+                eprintln!("hime-cli: failed to load dictionary {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!(
+            "hime-cli: loaded {} entries from {}",
+            dict.entry_count(),
+            path.display()
+        );
+        Session::new(dict)
     };
-    eprintln!(
-        "hime-cli: loaded {} entries from {}",
-        dict.entry_count(),
-        path.display()
-    );
     eprintln!("hime-cli: {HELP}");
 
-    let mut session = Session::new(dict);
     let interactive = io::stdin().is_terminal();
     let mut line = String::new();
     loop {
