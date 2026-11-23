@@ -134,13 +134,20 @@ final class HimeInputController: IMKInputController {
     /// Commands shown in the text input menu, in the section headed by the
     /// app's name — the layout 业火 exposes as its "Fire" group.
     override func menu() -> NSMenu! {
+        // IMK special-cases items whose action is `showPreferences:` and
+        // invokes it on the controller; targets set on the item are ignored.
         let item = NSMenuItem(title: "Hime 首选项…",
-                              action: #selector(PreferencesWindowController.showPreferences(_:)),
+                              action: #selector(showPreferences(_:)),
                               keyEquivalent: "")
-        item.target = PreferencesWindowController.shared
         let menu = NSMenu(title: "Hime")
         menu.addItem(item)
         return menu
+    }
+
+    /// Overrides the default nib-loading implementation, which has nothing
+    /// to load in this app.
+    override func showPreferences(_ sender: Any?) {
+        PreferencesWindowController.shared.showPreferences(sender)
     }
 
     // MARK: - Candidate panel

@@ -106,12 +106,12 @@ private extension Int {
             window.delegate = self
             self.window = window
         }
-        if #available(macOS 14.0, *) {
-            NSApp.activate()
-        } else {
+        window?.makeKeyAndOrderFront(sender)
+        // Deferred past the text input menu's dismissal; the forcing form
+        // still activates the app (plain activate() was a no-op here).
+        DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
         }
-        window?.makeKeyAndOrderFront(sender)
     }
 }
 
