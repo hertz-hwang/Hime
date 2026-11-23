@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod processor;
 pub mod punct;
 pub mod scheme;
+pub mod sentence;
 pub mod session;
 pub mod translator;
 pub mod types;
