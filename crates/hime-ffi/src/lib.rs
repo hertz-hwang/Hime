@@ -1,4 +1,4 @@
-//! C-ABI boundary for the Hime engine (SPEC_MVP §5).
+//! C-ABI boundary for the Hime engine (SPEC_MVP §6).
 //!
 //! Only five flat C functions cross this boundary; every structured value is
 //! serialized to a JSON string first. The global engine owns the dictionary

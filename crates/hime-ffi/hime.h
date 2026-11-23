@@ -2,7 +2,7 @@
  *
  * Rust implementation: crates/hime-ffi (staticlib, libhime_ffi.a).
  * All structured data crosses this boundary as JSON strings; see
- * docs/SPEC_MVP.md §5.
+ * docs/SPEC_MVP.md §6.
  *
  * Threading: every function is safe to call from any thread; Rust guards
  * the engine with a mutex.

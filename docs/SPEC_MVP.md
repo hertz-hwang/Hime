@@ -36,7 +36,8 @@ pub struct EngineResponse {
 ```
 
 ## 3. 形码 MVP 状态机逻辑 (`Session::process_key`)
-假设当前会话维护一个 `input_buffer: String`：
+按键语义集中在 `Processor::decide(key, code, candidate_count)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `CommitRaw` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。本节描述的是这套决策表的可观察行为，翻页（page）将来在 `Action` 里新增变体、由 `Session` 维护页码，不改动其余部分。
+下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
 1. **当 `input_buffer` 为空时（空闲状态）**：
    - 输入 `a`-`z`：追加到 `input_buffer`，查词库更新 `preedit` 和 `candidates`，返回 `handled: true`。
@@ -51,12 +52,32 @@ pub struct EngineResponse {
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
    - 其他任何按键（含超出 4 码限制的 `a`-`z`、对应索引无候选词的 `1`-`9`、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
 
-## 4. 词库检索 (`Dictionary`)
-- 解析 TSV 文件（`编码\t词组\t权重`）。
-- 支持**前缀匹配**：例如输入 `a`，不仅匹配编码精确为 `a` 的词（`comment` 为空），还应匹配 `aa`, `ad` 等以 `a` 开头的词（此时 `comment` 设为剩余编码如 `~a`, `~d`），按精确匹配优先、权重从高到低排序，截取前 5 个。
-- **候选文字去重**：同一个词可以挂在多个编码下（如 `a`、`aaa`、`aaaa` 都是「工」），一次检索里同一段 `text` 只返回一次，保留优先级最高的那条（精确匹配或权重最高，`comment` 也随之保留），空出的名额由后面的匹配补齐。候选窗以文字标识候选，重复文字会塌成一格并让编号错位，因此去重必须在核心层完成。
+## 4. 检索管线 (`Pipeline`：Translator → Filter)
+「编码进、候选页出」这一步必须是可扩展的三段管线，全拼/双拼才能作为新数据源接入而不改动状态机。
 
-## 5. C-ABI 接口定义 (`hime-ffi`)
+### 4.1 角色分工
+| 角色 | 职责 | MVP 实现 | 后续扩展 |
+| --- | --- | --- | --- |
+| `Processor` | 读按键 + 当前编码 + 当前候选数，决定追加编码、删码、选词、放弃、No-op 还是放行给系统 | `Processor::decide` → `Action`（见 §3） | 翻页键 → 新增 `Action` 变体 |
+| `Translator` | 把编码转换成候选词，按检索优先级上报，不做取舍 | `TableTranslator`（形码查表，包装 `Dictionary`） | `PinyinTranslator`（全拼/双拼，走音节图搜索） |
+| `Filter` | 对**所有 translator 合并后**的候选做删除、重排、注入 | `DedupFilter`、`LimitFilter` | 权重混排、简繁转换、Emoji 注入 |
+| `Pipeline` | 按注册顺序调用 translators，再依次跑 filters | `Pipeline::table(dict)` = Table → Dedup → Limit | `Pipeline::new(Vec<Box<dyn Translator>>, Vec<Box<dyn Filter>>)`，经 `Session::with_pipeline` 注入 |
+
+`Translator` 与 `Filter` 都要求 `Send + Sync`：FFI 层可能由任意线程投递按键（见 §5），会话会被搬到别的线程上。
+
+### 4.2 去重属于 Filter 层
+同一个词可以挂在多个编码下（`a`、`aaa`、`aaaa` 都是「工」），将来全拼源还会再报一次。`Dictionary::lookup` 是纯粹的表查询，同一文字按编码逐条上报；`DedupFilter` 才决定一页展示什么：保留首次出现的那条（精确匹配或权重最高，`comment` 随之保留），后面的重复项丢弃。原因有两个：去重是跨数据源的策略（只有 Filter 看得见合并结果），而候选窗以候选文字作标识，重复文字会塌成一格、编号却仍按数组位置计数（曾出现只剩 `2 戈 / 3 式 / 5 工`、1 和 4 空号的错乱窗口）。
+
+### 4.3 每页数量与检索窗口
+- `MAX_CANDIDATES = 5`：一页的候选数，也是候选窗编号 `1`-`5` 能选中的数量，即 `EngineResponse.candidates` 的长度上限。
+- `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量。
+- 顺序是「先取满窗口 → 跑完所有 Filter → 最后截断到 5」，因此被丢弃的重复项会让后面的匹配补位，而不是让这一页变短。`LimitFilter` 必须是链上最后一个 Filter。
+
+## 5. 词库检索 (`Dictionary`)
+- 解析 TSV 文件（`编码\t词组\t权重`）。
+- 支持**前缀匹配**：例如输入 `a`，不仅匹配编码精确为 `a` 的词（`comment` 为空），还应匹配 `aa`, `ad` 等以 `a` 开头的词（此时 `comment` 设为剩余编码如 `~a`, `~d`），按精确匹配优先、权重从高到低排序，再按检索预算（`FETCH_CANDIDATES`）截断。
+
+## 6. C-ABI 接口定义 (`hime-ffi`)
 头文件 `hime.h` 需暴露以下 5 个函数：
 ```c
 #include <stdint.h>

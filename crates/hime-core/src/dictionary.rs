@@ -1,4 +1,4 @@
-//! Dictionary loading and candidate retrieval (SPEC_MVP §4).
+//! Dictionary loading and table lookup (SPEC_MVP §5).
 //!
 //! The lexicon is a TSV file of `code<TAB>text<TAB>weight` rows, one entry
 //! per line; blank lines are ignored. Codes are restricted to lowercase ASCII
