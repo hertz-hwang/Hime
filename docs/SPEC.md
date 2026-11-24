@@ -175,7 +175,7 @@ pub struct Config {
   绝不创建模型文件，无位置可解析时返回 `NotFound`）。
 
 ## 6. C-ABI 接口定义 (`hime-ffi`)
-头文件 `hime.h` 需暴露以下 9 个函数：
+头文件 `hime.h` 需暴露以下 13 个函数：
 ```c
 #include <stdint.h>
 #include <stdbool.h>
@@ -210,8 +210,33 @@ char* hime_scan_schemes(const char* dir);
 // 非法路径或加载失败返回 false，引擎保持不变
 bool hime_select_scheme(const char* scheme_dir);
 
+// 返回用户方案目录 <数据目录>/schemes（§5.2）的 NUL 结尾路径字符串（需调用方
+// 释放），无数据目录可解析时返回 NULL。纯路径查询，hime_init 前可用
+char* hime_schemes_dir(void);
+
+// 按需创建用户数据目录与 schemes 子目录（绝不创建模型文件，§5.2），返回是否
+// 就绪；外壳启动与「重新载入」时调用
+bool hime_ensure_data_dir(void);
+
+// 指定整句引擎唯一使用的 .hng 模型文件（面板「模型」页），进程级覆盖，优先级
+// 高于 §7.1 的定位顺序且不回退；传 NULL 或空串清除覆盖、回到自动查找。运行中
+// 的引擎保留已映射的模型，新路径在下一次 hime_select_scheme 时生效。非法 UTF-8
+// 或 path 不是已存在文件时返回 false，已存覆盖不变
+bool hime_set_model_path(const char* path);
+
+// 为面板「模型」页描述整句 n-gram 模型，返回 JSON（需调用方释放）：
+// {"online":bool,"override_path":…,"default_path":…,"path":…,"error":…,
+//  "modified_secs":…,"info":{…}|null}。online 表示当前引擎正用模型解码（已选
+// 中形码整句方案）；override_path/default_path 对应 hime_set_model_path 与
+// <数据目录>/sentence-ngram.hng；path/error/modified_secs/info 描述引擎已加载
+// 的文件（离线时为定位顺序当前会命中的文件），info 为 §7.1 头字段
+// （format、header_version、order、vocab、hot_limit、bi_rows、tri_rows、
+// code_bits、code_range_oct、file_bytes、build_id、meta），无文件可载时为
+// null 并给 error。hime_init 前可用（online 为 false）
+char* hime_model_status(void);
+
 // 释放 Rust 分配的 C 字符串（hime_process_key / hime_get_config /
-// hime_scan_schemes 均用它）
+// hime_scan_schemes / hime_schemes_dir / hime_model_status 均用它）
 void hime_free_string(char* ptr);
 ```
 
@@ -236,8 +261,12 @@ AGENTS.md §1）。`code_type` 随方案固定（§2.3、§5.1，面板只读）
 - 模型文件 `data/sentence-ngram.hng` 约 191 MB，体积大、按路径加载、不入库，部署
   时放在用户数据目录 `~/.config/hime/sentence-ngram.hng`（见 §5.2）。定位顺序封装
   在 `ngram::find_model_path()`，引擎 / CLI / 测试共用，命中第一个可读文件：
-  `HIME_SENTENCE_MODEL` 环境变量 → 用户数据目录 `~/.config/hime/sentence-ngram.hng`
-  → 仓库 `data/sentence-ngram.hng` → 相对路径。
+  面板指定路径 `ngram::set_model_override(Some(path))`（进程级，权威、不再回退，
+  经 `hime_set_model_path` 设置，见 §6）→ `HIME_SENTENCE_MODEL` 环境变量 →
+  用户数据目录 `~/.config/hime/sentence-ngram.hng` → 仓库 `data/sentence-ngram.hng`
+  → 相对路径。`ngram::probe_model()` 按同一顺序做只读探测并解析头字段（`ModelInfo`），
+  供 §6 的 `hime_model_status` 展示；展示的模型路径做词典式归一（折叠 `.` 与 `..`
+  段，符号链接原样保留）。
 
 ### 7.2 词图（`sentence::lexicon`）
 
@@ -292,8 +321,10 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   模型时打印指引并以失败退出。
 - macOS 打包：`.hng` 当前不随 bundle 复制；模型放在用户数据目录
   `~/.config/hime/sentence-ngram.hng` 即会被 `find_model_path` 命中（外壳也可
-  `HIME_SENTENCE_MODEL` 指向随应用分发的模型）。外壳首次运行可调用
-  `ensure_config_layout` 建好目录，属外壳后续接线项。
+  `HIME_SENTENCE_MODEL` 指向随应用分发的模型，或在面板「模型」页经
+  `hime_set_model_path` 指定，见 SPEC_MACOS §5）。外壳启动与「重新载入」时调用
+  `hime_ensure_data_dir` 建好数据目录，方案列表合并扫描 bundle 与
+  `hime_schemes_dir` 两处，模型页状态来自 `hime_model_status`。
 
 ### 7.6 整句自动上屏（`sentence::auto_commit`，`Config.auto_commit`）
 
