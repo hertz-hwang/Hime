@@ -22,6 +22,9 @@
 //!   :space :bs :esc :enter          control keys
 //!   :1 .. :9      digit keys (candidate selection is :1..:5)
 //!   :punct        toggle ascii_punct (0 = English, 1 = Chinese punctuation)
+//!   :afteralnum   toggle english_punct_after_alnum (first punctuation after
+//!                 letters/digits stays English)
+//!   :selquote     toggle semicolon_quote_select (';' / ' select 2nd / 3rd)
 //!   :help         show this help
 //!   :quit         exit
 
@@ -34,7 +37,7 @@ use hime_core::ngram::find_model_path;
 use hime_core::sentence::SentenceEngine;
 use hime_core::{Config, Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
 
-const HELP: &str = "type letters and punctuation to send one keystroke per char; commands: :space :bs :esc :enter :1-:9 :punct :help :quit";
+const HELP: &str = "type letters and punctuation to send one keystroke per char; commands: :space :bs :esc :enter :1-:9 :punct :afteralnum :selquote :help :quit";
 
 /// Word-table path: CLI argument, else the default 形码 scheme table, else the
 /// copy next to this source tree.
@@ -185,6 +188,8 @@ fn command_name(input: &str) -> Option<&str> {
             | "help"
             | "h"
             | "punct"
+            | "afteralnum"
+            | "selquote"
     ) || (name.chars().count() == 1 && name.chars().next().is_some_and(|ch| ch.is_ascii_digit()));
     known.then_some(name)
 }
@@ -208,6 +213,26 @@ fn handle_command(session: &mut Session, name: &str) -> bool {
             session.set_config(Config { ascii_punct: next, ..current });
             let mode = if next == 1 { "Chinese" } else { "English" };
             eprintln!("hime-cli: ascii_punct = {next} ({mode} punctuation)");
+            return true;
+        }
+        "afteralnum" => {
+            let current = session.config();
+            let next = !current.english_punct_after_alnum;
+            session.set_config(Config {
+                english_punct_after_alnum: next,
+                ..current
+            });
+            eprintln!("hime-cli: english_punct_after_alnum = {next}");
+            return true;
+        }
+        "selquote" => {
+            let current = session.config();
+            let next = !current.semicolon_quote_select;
+            session.set_config(Config {
+                semicolon_quote_select: next,
+                ..current
+            });
+            eprintln!("hime-cli: semicolon_quote_select = {next}");
             return true;
         }
         other => {
