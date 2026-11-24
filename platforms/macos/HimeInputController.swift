@@ -199,10 +199,15 @@ final class HimeInputController: IMKInputController {
         }
         if event.modifierFlags.contains(.shift), isLetterKey(event) {
             // Shift + letter = capital letter: like every macOS CJK input
-            // method, the capital goes straight to the host and never into a
-            // lowercase encoding; a standing composition and its Marked Text
-            // stay untouched.
-            return false
+            // method it never joins a lowercase encoding. The engine only
+            // accepts lowercase, so the final capital is forwarded and
+            // answered Pass (SPEC §3): the host still inserts it untouched
+            // and a standing composition stays put — the round trip exists
+            // so 英文/数字后英文标点 can see capitals (SPEC §3.1).
+            guard let final = event.characters?.unicodeScalars.first?.value,
+                  (65...90).contains(final)
+            else { return false }
+            return sendKey(final, to: sender as? IMKTextInput)
         }
 
         guard let keyCode = mappedKeyCode(for: event) else { return false }
