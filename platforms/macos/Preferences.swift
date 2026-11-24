@@ -513,19 +513,17 @@ private struct PreferencesRootView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                HStack {
-                    Button {
-                        model.reload()
-                    } label: {
-                        Label("重新载入", systemImage: "arrow.clockwise")
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.bordered)
-                    .help("重新扫描应用与用户数据目录的方案，并重载当前方案的码表与模型")
-                    Spacer(minLength: 0)
+                Button {
+                    model.reload()
+                } label: {
+                    Label("重新载入", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
                 }
+                .controlSize(.regular)
+                .buttonStyle(.bordered)
+                .help("重新扫描应用与用户数据目录的方案，并重载当前方案的码表与模型")
                 .padding(.horizontal, 10)
-                .padding(.top, 10)
+                .padding(.vertical, 10)
                 List(selection: $selection.section) {
                     Section("编码与输入") {
                         sidebarRow(.basic, symbol: "gearshape", color: .blue)
@@ -626,6 +624,10 @@ private struct BasicView: View {
                               isOn: model.asciiPunctSwitch)
                 }
                 Section("候选窗") {
+                    stepperRow(title: "候选数量",
+                               hint: "每页候选数，数字键 1-N 选词",
+                               value: $model.pageSize,
+                               range: PreferencesModel.pageSizeRange)
                     LabeledContent("候选排列") {
                         Picker("候选排列", selection: $model.verticalCandidates) {
                             Text("横排").tag(false)
