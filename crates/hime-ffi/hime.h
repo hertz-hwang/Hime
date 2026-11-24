@@ -49,15 +49,23 @@ void hime_destroy_session(uint64_t session_id);
  * on unknown session / uninitialized engine. modifiers is reserved and
  * ignored. handled is false when the engine leaves the key to the
  * host, which happens for idle ordinary keys and, in punctuation mode, for
- * punctuation the mapping does not claim. The caller must release the string
- * with hime_free_string. */
+ * punctuation the mapping does not claim (also the first mapped punctuation
+ * right after English letters/digits when english_punct_after_alnum is on).
+ * When semicolon_quote_select is on and a candidate is shown, ';' and '''
+ * select the 2nd/3rd candidate instead of emitting punctuation. The caller
+ * must release the string with hime_free_string. */
 char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifiers);
 
 /* Read the current engine config as JSON:
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
- *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0}.
+ *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0,
+ *  "english_punct_after_alnum":false,"semicolon_quote_select":false}.
  * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
- * Reports the defaults before hime_init. The caller must release the string
+ * english_punct_after_alnum releases the first punctuation right after
+ * English letters/digits to the host (e.g. the ':' in 12:30).
+ * semicolon_quote_select makes ';' pick the 2nd candidate and ''' the 3rd
+ * while a candidate stands. Reports the defaults before hime_init. The
+ * caller must release the string
  * with hime_free_string. */
 char* hime_get_config(void);
 

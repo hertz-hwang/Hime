@@ -171,7 +171,10 @@ pub extern "C" fn hime_destroy_session(session_id: u64) {
 /// Printable keys pass their ASCII code, punctuation included: in the
 /// `ascii_punct = 1` mode the engine commits full-width punctuation for
 /// mapped keys, and answers `handled: false` for the rest so the host
-/// inserts them itself.
+/// inserts them itself. With `english_punct_after_alnum` the first mapped
+/// punctuation right after English letters or digits is released too, and
+/// with `semicolon_quote_select` a standing candidate turns `;` and `'`
+/// into 2nd/3rd-selection keys (SPEC §3).
 ///
 /// Returns null if the engine is uninitialized, the session id is unknown,
 /// or serialization fails.
@@ -208,7 +211,8 @@ pub extern "C" fn hime_process_key(
 /// Read the current engine configuration as a NUL-terminated JSON string
 /// owned by the caller (release it with [`hime_free_string`]). The shape is
 /// `{"page_size":<n>,"max_code_len":<n>,"code_type":<n>,"auto_commit":<bool>,
-/// "auto_commit_length":<n>,"commit_next_code":<n>,"ascii_punct":<n>}`
+/// "auto_commit_length":<n>,"commit_next_code":<n>,"ascii_punct":<n>,
+/// "english_punct_after_alnum":<bool>,"semicolon_quote_select":<bool>}`
 /// (see [`hime_set_config`] and [`hime_core::Config`]).
 ///
 /// Before `hime_init` the default configuration is reported. Returns null

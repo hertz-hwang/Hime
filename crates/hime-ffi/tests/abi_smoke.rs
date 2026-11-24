@@ -154,6 +154,19 @@ fn full_flow_through_c_abi() {
     assert!(set_config(r#"{"ascii_punct":0}"#));
     assert_eq!(get_config()["ascii_punct"], 0);
 
+    // The two punctuation preference switches are plain bools, off by
+    // default, and round-trip through JSON like every other config key.
+    assert_eq!(get_config()["english_punct_after_alnum"], false);
+    assert_eq!(get_config()["semicolon_quote_select"], false);
+    let both_on = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":true,"semicolon_quote_select":true}"#;
+    assert!(set_config(both_on));
+    assert_eq!(get_config()["english_punct_after_alnum"], true);
+    assert_eq!(get_config()["semicolon_quote_select"], true);
+    let both_off = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":false,"semicolon_quote_select":false}"#;
+    assert!(set_config(both_off));
+    assert_eq!(get_config()["english_punct_after_alnum"], false);
+    assert_eq!(get_config()["semicolon_quote_select"], false);
+
     // --- schemes: discovery (hime_scan_schemes) and selection ---
 
     let schemes = scan_schemes(&schemes_root());
