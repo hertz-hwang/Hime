@@ -32,6 +32,8 @@ private struct EngineConfig: Codable, Equatable {
     var autoCommitLength: Int
     var commitNextCode: Int
     var asciiPunct: Int
+    var englishPunctAfterAlnum: Bool
+    var semicolonQuoteSelect: Bool
 
     enum CodingKeys: String, CodingKey {
         case pageSize = "page_size"
@@ -41,6 +43,8 @@ private struct EngineConfig: Codable, Equatable {
         case autoCommitLength = "auto_commit_length"
         case commitNextCode = "commit_next_code"
         case asciiPunct = "ascii_punct"
+        case englishPunctAfterAlnum = "english_punct_after_alnum"
+        case semicolonQuoteSelect = "semicolon_quote_select"
     }
 }
 
@@ -160,6 +164,12 @@ final class PreferencesModel: ObservableObject {
     @Published var commitNextCode: Int { didSet { settingChanged() } }
     /// Punctuation output (`ascii_punct`): 0 英文标点 / 1 中文标点.
     @Published var asciiPunct: Int { didSet { settingChanged() } }
+    /// Keep the first punctuation after letters/digits in English
+    /// (`english_punct_after_alnum`), the 12:30 case.
+    @Published var englishPunctAfterAlnum: Bool { didSet { settingChanged() } }
+    /// `;` / `'` select the 2nd / 3rd candidate while one stands
+    /// (`semicolon_quote_select`).
+    @Published var semicolonQuoteSelect: Bool { didSet { settingChanged() } }
     /// Point size of the IMKCandidates text; applied at render time.
     @Published var candidateFontSize: Double { didSet { persist() } }
     /// Candidate window orientation: `false` lays candidates out in a single
@@ -186,6 +196,8 @@ final class PreferencesModel: ObservableObject {
     private static let autoCommitLengthKey = "engineAutoCommitLength"
     private static let commitNextCodeKey = "engineCommitNextCode"
     private static let asciiPunctKey = "engineAsciiPunct"
+    private static let englishPunctAfterAlnumKey = "engineEnglishPunctAfterAlnum"
+    private static let semicolonQuoteSelectKey = "engineSemicolonQuoteSelect"
     private static let schemeDirKey = "schemeDir"
     private static let fontSizeKey = "candidateFontSize"
     private static let verticalCandidatesKey = "candidatePanelVertical"
@@ -213,6 +225,8 @@ final class PreferencesModel: ObservableObject {
         autoCommitLength = 4
         commitNextCode = 0
         asciiPunct = 0
+        englishPunctAfterAlnum = false
+        semicolonQuoteSelect = false
         candidateFontSize = defaults.object(forKey: Self.fontSizeKey) as? Double ?? 16
         verticalCandidates = defaults.object(forKey: Self.verticalCandidatesKey) as? Bool ?? false
     }
@@ -353,6 +367,8 @@ final class PreferencesModel: ObservableObject {
         autoCommitLength = value(Self.autoCommitLengthKey, config.autoCommitLength)
         commitNextCode = value(Self.commitNextCodeKey, config.commitNextCode)
         asciiPunct = value(Self.asciiPunctKey, config.asciiPunct)
+        englishPunctAfterAlnum = value(Self.englishPunctAfterAlnumKey, config.englishPunctAfterAlnum)
+        semicolonQuoteSelect = value(Self.semicolonQuoteSelectKey, config.semicolonQuoteSelect)
     }
 
     /// Engine call: hand the current values to hime_set_config.
@@ -370,7 +386,9 @@ final class PreferencesModel: ObservableObject {
                                   autoCommit: autoCommit,
                                   autoCommitLength: autoCommitLength,
                                   commitNextCode: commitNextCode,
-                                  asciiPunct: asciiPunct)
+                                  asciiPunct: asciiPunct,
+                                  englishPunctAfterAlnum: englishPunctAfterAlnum,
+                                  semicolonQuoteSelect: semicolonQuoteSelect)
         guard let data = try? JSONEncoder().encode(config),
               let json = String(data: data, encoding: .utf8),
               let cString = json.cString(using: .utf8)
@@ -387,6 +405,8 @@ final class PreferencesModel: ObservableObject {
         defaults.set(autoCommitLength, forKey: Self.autoCommitLengthKey)
         defaults.set(commitNextCode, forKey: Self.commitNextCodeKey)
         defaults.set(asciiPunct, forKey: Self.asciiPunctKey)
+        defaults.set(englishPunctAfterAlnum, forKey: Self.englishPunctAfterAlnumKey)
+        defaults.set(semicolonQuoteSelect, forKey: Self.semicolonQuoteSelectKey)
         defaults.set(schemeDir, forKey: Self.schemeDirKey)
         defaults.set(candidateFontSize, forKey: Self.fontSizeKey)
         defaults.set(verticalCandidates, forKey: Self.verticalCandidatesKey)
@@ -622,6 +642,12 @@ private struct BasicView: View {
                     switchRow(title: "中文标点",
                               hint: "开启输出中文标点，关闭输出英文标点",
                               isOn: model.asciiPunctSwitch)
+                    switchRow(title: "英文/数字后使用英文标点",
+                              hint: "输入英文或数字后的首个标点保持英文，如 12:30",
+                              isOn: $model.englishPunctAfterAlnum)
+                    switchRow(title: "使用分号/引号二三选",
+                              hint: "有候选时分号选第二、引号选第三；候选不足时顺延",
+                              isOn: $model.semicolonQuoteSelect)
                 }
                 Section("候选窗") {
                     stepperRow(title: "候选数量",
