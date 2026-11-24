@@ -56,6 +56,13 @@ pub struct Session {
     /// Quote pairing for 中文标点; deliberately survives [`Session::clear`]
     /// so a quote opened before a commit still closes after it.
     quotes: QuotePair,
+    /// Whether the text the engine last sent or released to the host ends in
+    /// an ASCII letter or digit — the state the `english_punct_after_alnum`
+    /// rule reads on the next idle punctuation key (SPEC §3.1). The engine
+    /// only knows what crosses it, so the flag tracks exactly the keystrokes
+    /// and commits it forwarded. Like [`Self::quotes`] it survives
+    /// [`Session::clear`]: a committed `12` still arms the next punctuation.
+    after_alnum: bool,
     /// 形码整句 probabilistic/empty-code auto-commit state; `None` for every
     /// non-sentence session, which keeps the sentence path fully gated.
     sentence: Option<SentenceComposer>,
@@ -82,6 +89,7 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            after_alnum: false,
             sentence: None,
         }
     }
@@ -98,6 +106,7 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            after_alnum: false,
             sentence: None,
         }
     }
@@ -122,6 +131,7 @@ impl Session {
             page: 0,
             candidates: Vec::new(),
             quotes: QuotePair::default(),
+            after_alnum: false,
             sentence: Some(SentenceComposer {
                 engine,
                 auto_commit: SentenceAutoCommit::default(),
@@ -169,8 +179,14 @@ impl Session {
     /// page and are always consumed, so the digits keep selecting inside
     /// whichever page is currently rendered.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
-        let decision = Processor::decide(key, &self.input_buffer, self.candidates.len(), self.config);
-        match decision {
+        let decision = Processor::decide(
+            key,
+            &self.input_buffer,
+            self.candidates.len(),
+            self.config,
+            self.after_alnum,
+        );
+        let response = match decision {
             Action::Pass => self.response(false, None),
             Action::Noop => self.response(true, None),
             Action::AppendCode(byte) => self.push_letter(byte, None),
@@ -245,7 +261,32 @@ impl Session {
                 self.suspend_sentence_auto_commit();
                 self.response(true, None)
             }
-        }
+        };
+        self.track_after_alnum(key, &response);
+        response
+    }
+
+    /// Records whether the text now sitting at the host's caret ends in an
+    /// English letter or digit, the state [`Config::english_punct_after_alnum`]
+    /// reads (SPEC §3.1). Only events that put a character at the caret move
+    /// it: a commit updates from the committed text's last character, and a
+    /// key the engine released (`handled: false`) updates from that key.
+    /// Composition-only events (append, delete, page, no-op) leave the host
+    /// caret untouched, so the flag stands — a released digit keeps it armed,
+    /// the punctuation that consumes it (or any Chinese commit) clears it.
+    fn track_after_alnum(&mut self, key: u32, response: &EngineResponse) {
+        self.after_alnum = match &response.commit_text {
+            Some(text) => text.chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric()),
+            None if !response.handled => match u8::try_from(key) {
+                Ok(byte) if byte.is_ascii_alphanumeric() => true,
+                Ok(byte) if byte == b' ' || punct::is_symbol(byte) => false,
+                // Control keys (Backspace, Enter, arrows, …) hide what the
+                // caret now holds: the flag keeps its value, and a stale one
+                // can only ever release one ASCII key before disarming.
+                _ => return,
+            },
+            None => return,
+        };
     }
 
     /// Append one letter, re-retrieve, then apply the auto-commit rule: with
@@ -978,5 +1019,183 @@ mod tests {
         assert_eq!(s.process_key(b'"' as u32).commit_text.as_deref(), Some("\u{201D}"));
         // Unmapped symbols still pass through in Chinese mode.
         assert!(!s.process_key(b'%' as u32).handled);
+    }
+
+    /// The `12:30` case: with `english_punct_after_alnum` on, the first
+    /// punctuation right after digits is released to the host as ASCII, and
+    /// the whole time string types straight through. The punctuation after
+    /// it is 中文标点 again, and a Chinese commit ends any English-punct
+    /// window.
+    #[test]
+    fn digits_let_the_next_punctuation_pass_as_english() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            dict,
+            Config { ascii_punct: 1, english_punct_after_alnum: true, ..Config::default() },
+        );
+        for key in [b'1' as u32, b'2' as u32] {
+            assert!(!s.process_key(key).handled, "digit {key} passes through");
+        }
+        assert!(
+            !s.process_key(b':' as u32).handled,
+            "the first punctuation after digits stays English"
+        );
+        assert_eq!(
+            s.process_key(b':' as u32).commit_text.as_deref(),
+            Some("\u{FF1A}"),
+            "the second one is 中文标点 again"
+        );
+        for key in [b'1' as u32, b'2' as u32, b':' as u32, b'3' as u32, b'0' as u32] {
+            assert!(!s.process_key(key).handled, "12:30 types straight through (key {key})");
+        }
+        // A Chinese commit closes the English-punct window.
+        s.process_key(KEY_A);
+        assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("\u{5DE5}"));
+        assert_eq!(s.process_key(b',' as u32).commit_text.as_deref(), Some("\u{FF0C}"));
+    }
+
+    /// With the switch off (the default) digits still pass but the colon
+    /// right after them commits 中文标点: behavior is unchanged.
+    #[test]
+    fn switch_off_keeps_digits_followed_by_chinese_punctuation() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        for key in [b'1' as u32, b'2' as u32] {
+            assert!(!s.process_key(key).handled);
+        }
+        assert_eq!(s.process_key(b':' as u32).commit_text.as_deref(), Some("\u{FF1A}"));
+    }
+
+    /// What arms and disarms the rule at the session level: committing raw
+    /// letters arms it, a capital released to the host arms it, and a space
+    /// disarms it. An abandoned composition never touches the caret, so the
+    /// digits typed before it still arm the punctuation that follows.
+    #[test]
+    fn letter_commits_and_releases_drive_the_rule() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let config =
+            Config { ascii_punct: 1, english_punct_after_alnum: true, ..Config::default() };
+
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        s.process_key(b'q' as u32); // "q" has no candidate
+        assert_eq!(s.process_key(KEY_ENTER).commit_text.as_deref(), Some("q"));
+        assert!(!s.process_key(b',' as u32).handled, "after a raw-letter commit , stays English");
+
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        assert!(!s.process_key(b'H' as u32).handled, "the capital reaches the host");
+        assert!(!s.process_key(b',' as u32).handled, "and arms the rule");
+        s.process_key(b'K' as u32);
+        assert!(!s.process_key(b' ' as u32).handled, "a space reaches the host");
+        assert_eq!(
+            s.process_key(b',' as u32).commit_text.as_deref(),
+            Some("\u{FF0C}"),
+            "the space disarmed the rule"
+        );
+
+        let mut s = Session::with_config(dict, config);
+        assert!(!s.process_key(b'1' as u32).handled);
+        s.process_key(KEY_G); // a composition opens…
+        let r = s.process_key(KEY_ESCAPE); // …and is abandoned without committing
+        assert!(r.handled);
+        assert!(!s.process_key(b',' as u32).handled, "the digit still arms the rule");
+    }
+
+    /// 分号/引号二三选: `;` and `'` commit the 2nd and 3rd candidate of the
+    /// rendered page.
+    #[test]
+    fn semicolon_and_quote_commit_alternates() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let config = Config { semicolon_quote_select: true, ..Config::default() };
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        s.process_key(KEY_A); // 工 戈 式 匿
+        assert_eq!(s.process_key(b';' as u32).commit_text.as_deref(), Some("戈"));
+        let mut s = Session::with_config(dict, config);
+        s.process_key(KEY_A);
+        assert_eq!(s.process_key(b'\'' as u32).commit_text.as_deref(), Some("式"));
+    }
+
+    /// A page shorter than the pick clamps to its last candidate: a unique
+    /// candidate commits on `;` and `'` with no punctuation attached (even
+    /// in 中文标点 mode), and a two-candidate page commits its 2nd on
+    /// either key.
+    #[test]
+    fn selection_keys_clamp_to_short_pages() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            Arc::clone(&dict),
+            Config { semicolon_quote_select: true, ascii_punct: 1, ..Config::default() },
+        );
+        s.process_key(KEY_A);
+        s.process_key(b'd' as u32); // "ad" = 匿, unique
+        assert_eq!(
+            s.process_key(b';' as u32).commit_text.as_deref(),
+            Some("匿"),
+            "the unique candidate commits without ；"
+        );
+        let mut s = Session::with_config(
+            Arc::clone(&dict),
+            Config { semicolon_quote_select: true, ascii_punct: 1, ..Config::default() },
+        );
+        s.process_key(KEY_A);
+        s.process_key(b'd' as u32);
+        assert_eq!(s.process_key(b'\'' as u32).commit_text.as_deref(), Some("匿"));
+
+        let mut s = Session::with_config(
+            dict,
+            Config { semicolon_quote_select: true, page_size: 2, ..Config::default() },
+        );
+        s.process_key(KEY_A); // page 1: 工 戈
+        assert_eq!(
+            s.process_key(b'\'' as u32).commit_text.as_deref(),
+            Some("戈"),
+            "the quote clamps to the 2nd candidate of the 2-key page"
+        );
+    }
+
+    /// The selection keys need a candidate: with none, `;` and `'` commit
+    /// the raw encoding plus their punctuation as before, and with the
+    /// switch off they never select.
+    #[test]
+    fn selection_keys_need_a_candidate() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            Arc::clone(&dict),
+            Config { semicolon_quote_select: true, ascii_punct: 1, ..Config::default() },
+        );
+        s.process_key(b'q' as u32); // "q" has no candidate
+        assert_eq!(
+            s.process_key(b';' as u32).commit_text.as_deref(),
+            Some("q\u{FF1B}"),
+            "without candidates ; is punctuation"
+        );
+        let mut t = Session::new(dict);
+        t.process_key(KEY_A);
+        assert!(
+            !t.process_key(b';' as u32).handled,
+            "off (English mode): ; still reaches the host mid-composition"
+        );
+    }
+
+    /// `;` and `'` address the page the shell renders, exactly like the
+    /// digits: after paging they commit within the new page.
+    #[test]
+    fn selection_keys_follow_the_page() {
+        let dict = Arc::new(Dictionary::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/schemes/liuli_v1/liuli_table.txt"
+        ))
+        .expect("default scheme table must load"));
+        let mut s = Session::with_config(
+            dict,
+            Config { semicolon_quote_select: true, ..Config::default() },
+        );
+        s.process_key(b'd' as u32);
+        let second = s.process_key(KEY_PAGE_DOWN);
+        assert_eq!(second.candidates.len(), MAX_CANDIDATES, "the second page is full");
+        assert_eq!(
+            s.process_key(b';' as u32).commit_text.as_deref(),
+            Some(second.candidates[1].text.as_str()),
+            "; picks the 2nd candidate of the current page"
+        );
     }
 }

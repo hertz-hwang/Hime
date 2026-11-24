@@ -62,7 +62,12 @@ pub enum Action {
 /// Printable-key ASCII codes; digits `1`..=`5` select candidates 0..=4.
 const ASCII_A: u32 = 97;
 const ASCII_Z: u32 = 122;
+const ASCII_A_UPPER: u32 = 65;
+const ASCII_Z_UPPER: u32 = 90;
 const ASCII_1: u32 = 49;
+/// 分号/引号二三选 selection keys (`Config::semicolon_quote_select`).
+const ASCII_SEMICOLON: u32 = 59; // `;`
+const ASCII_QUOTE: u32 = 39; // `'`
 
 /// Maps keys to [`Action`]s. Stateless, so one instance serves every session.
 pub struct Processor;
@@ -74,16 +79,32 @@ impl Processor {
     /// `candidate_count` is the length of the list the shell is rendering, so
     /// a selection is validated against exactly what the user can see.
     /// `config` supplies this session's code-length cap, page size and
-    /// punctuation mode.
-    pub fn decide(key: u32, code: &str, candidate_count: usize, config: Config) -> Action {
+    /// punctuation mode. `after_alnum` reports whether the text the engine
+    /// last sent or released to the host ended in an English letter or digit
+    /// (the state the `english_punct_after_alnum` rule reads; [`Session`]
+    /// owns it).
+    pub fn decide(
+        key: u32,
+        code: &str,
+        candidate_count: usize,
+        config: Config,
+        after_alnum: bool,
+    ) -> Action {
         let letter = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8);
 
         // Idle: a letter starts a composition, 中文标点 mode commits its
         // mapped punctuation, everything else belongs to the application.
+        // With `english_punct_after_alnum` on, the first punctuation right
+        // after English letters or digits is released instead: a time like
+        // `12:30` must reach the host in ASCII.
         if code.is_empty() {
             return match letter {
                 Some(byte) => Action::AppendCode(byte),
-                None if chinese_punct(config) && is_punct_key(key) => {
+                None
+                    if chinese_punct(config)
+                        && is_punct_key(key)
+                        && !(config.english_punct_after_alnum && after_alnum) =>
+                {
                     Action::CommitPunct(key as u8)
                 }
                 None => Action::Pass,
@@ -134,6 +155,19 @@ impl Processor {
             KEY_PAGE_UP => Action::Noop,
             KEY_PAGE_DOWN if candidate_count > 0 => Action::PageDown,
             KEY_PAGE_DOWN => Action::Noop,
+            // 分号/引号二三选 (`Config::semicolon_quote_select`): once any
+            // candidate is on screen, `;` picks the 2nd candidate and `'`
+            // the 3rd. A page shorter than the pick clamps to its last
+            // entry, so with one candidate both commit the 1st, and with
+            // two candidates both commit the 2nd. This runs before the
+            // punctuation arms, so `;` and `'` stop emitting 中文标点 while
+            // a candidate stands.
+            key @ (ASCII_SEMICOLON | ASCII_QUOTE)
+                if config.semicolon_quote_select && candidate_count > 0 =>
+            {
+                let wanted = if key == ASCII_QUOTE { 2 } else { 1 };
+                Action::Select(wanted.min(candidate_count - 1))
+            }
             // A digit whose candidate is missing, or one beyond the keys the
             // page can offer, is swallowed rather than released.
             key if is_selection_key(key, config) => {
@@ -152,6 +186,11 @@ impl Processor {
             // Printable punctuation the mode does not map stays with the
             // application: releasing it leaves the Marked Text standing.
             key if is_symbol_key(key) => Action::Pass,
+            // A capital letter (the shell folds plain letters to lowercase,
+            // so 65..=90 is a deliberate Shift + letter) never joins a
+            // lowercase encoding: released like a symbol, the host inserts
+            // the capital and the Marked Text keeps running.
+            ASCII_A_UPPER..=ASCII_Z_UPPER => Action::Pass,
             // Any other key code is swallowed: composition state
             // stays untouched so the host's Marked Text is never interrupted
             // mid-composition.
@@ -196,11 +235,11 @@ mod tests {
     const KEY_9: u32 = 57;
 
     fn idle(key: u32) -> Action {
-        Processor::decide(key, "", 0, Config::default())
+        Processor::decide(key, "", 0, Config::default(), false)
     }
 
     fn composing(key: u32, code: &str, candidates: usize) -> Action {
-        Processor::decide(key, code, candidates, Config::default())
+        Processor::decide(key, code, candidates, Config::default(), false)
     }
 
     #[test]
@@ -320,14 +359,14 @@ mod tests {
             ascii_punct: 1,
             ..Config::default()
         };
-        assert_eq!(Processor::decide(KEY_PAGE_UP, "a", 1, cn), Action::PageUp);
+        assert_eq!(Processor::decide(KEY_PAGE_UP, "a", 1, cn, false), Action::PageUp);
         assert_eq!(
-            Processor::decide(KEY_PAGE_UP, "q", 0, cn),
+            Processor::decide(KEY_PAGE_UP, "q", 0, cn, false),
             Action::Noop,
             "no candidate: - emits nothing"
         );
         assert_eq!(
-            Processor::decide(KEY_PAGE_DOWN, "q", 0, cn),
+            Processor::decide(KEY_PAGE_DOWN, "q", 0, cn, false),
             Action::Noop,
             "no candidate: = emits nothing"
         );
@@ -342,34 +381,34 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(b',' as u32, "", 0, cn),
+            Processor::decide(b',' as u32, "", 0, cn, false),
             Action::CommitPunct(b',')
         );
         assert_eq!(
-            Processor::decide(b',' as u32, "a", 1, cn),
+            Processor::decide(b',' as u32, "a", 1, cn, false),
             Action::CommitCandidatePunct(b','),
             "mid-composition punctuation joins the candidate commit"
         );
         assert_eq!(
-            Processor::decide(b'%' as u32, "", 0, cn),
+            Processor::decide(b'%' as u32, "", 0, cn, false),
             Action::Pass,
             "unmapped keys stay passed through"
         );
         assert_eq!(
-            Processor::decide(b'%' as u32, "a", 1, cn),
+            Processor::decide(b'%' as u32, "a", 1, cn, false),
             Action::Pass,
             "unmapped keys are released even mid-composition"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "", 0, cn),
+            Processor::decide(KEY_A, "", 0, cn, false),
             Action::AppendCode(b'a')
         );
-        assert_eq!(Processor::decide(KEY_1, "a", 1, cn), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_1, "a", 1, cn, false), Action::Select(0));
         assert_eq!(
-            Processor::decide(KEY_BACKSPACE, "a", 1, cn),
+            Processor::decide(KEY_BACKSPACE, "a", 1, cn, false),
             Action::DeleteCode
         );
-        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn, false), Action::Select(0));
     }
 
     /// The preferences window moves both limits, and the decision table
@@ -381,14 +420,14 @@ mod tests {
             max_code_len: 2,
             ..Config::default()
         };
-        assert_eq!(Processor::decide(KEY_6, "a", 6, custom), Action::Select(5));
+        assert_eq!(Processor::decide(KEY_6, "a", 6, custom, false), Action::Select(5));
         assert_eq!(
-            Processor::decide(KEY_7, "a", 6, custom),
+            Processor::decide(KEY_7, "a", 6, custom, false),
             Action::Noop,
             "7 is beyond a 6-key page"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "ab", 1, custom),
+            Processor::decide(KEY_A, "ab", 1, custom, false),
             Action::Noop,
             "a letter over the configured code cap is swallowed"
         );
@@ -404,17 +443,17 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 3, overflow),
+            Processor::decide(KEY_D, "abcd", 3, overflow, false),
             Action::OverflowCommit(b'd'),
             "the 5th letter commits at N=5"
         );
         assert_eq!(
-            Processor::decide(KEY_D, "abc", 3, overflow),
+            Processor::decide(KEY_D, "abc", 3, overflow, false),
             Action::AppendCode(b'd'),
             "the 4th letter still extends the encoding"
         );
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 0, overflow),
+            Processor::decide(KEY_D, "abcd", 0, overflow, false),
             Action::OverflowCommit(b'd'),
             "without a candidate the raw letters are what overflow commits"
         );
@@ -425,7 +464,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, off),
+            Processor::decide(KEY_D, "abcd", 1, off, false),
             Action::Noop,
             "0 turns the rule off"
         );
@@ -437,7 +476,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, unreachable),
+            Processor::decide(KEY_D, "abcd", 1, unreachable, false),
             Action::Noop
         );
 
@@ -448,7 +487,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abc", 1, below_cap),
+            Processor::decide(KEY_D, "abc", 1, below_cap, false),
             Action::OverflowCommit(b'd')
         );
     }
@@ -460,7 +499,7 @@ mod tests {
     fn sentence_mode_ignores_the_word_cap_and_never_overflows() {
         let word = Config { max_code_len: 4, commit_next_code: 5, ..Config::default() };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, word),
+            Processor::decide(KEY_D, "abcd", 1, word, false),
             Action::OverflowCommit(b'd'),
             "the same config overflows in word mode"
         );
@@ -472,13 +511,13 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, sentence),
+            Processor::decide(KEY_D, "abcd", 1, sentence, false),
             Action::AppendCode(b'd'),
             "no overflow at the 5th letter in 形码整句"
         );
         let long = "a".repeat(64);
         assert_eq!(
-            Processor::decide(KEY_D, &long, 1, sentence),
+            Processor::decide(KEY_D, &long, 1, sentence, false),
             Action::AppendCode(b'd'),
             "a long code keeps extending"
         );
@@ -492,13 +531,13 @@ mod tests {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
         let at_limit = "a".repeat(MAX_RAW_LENGTH - 1);
         assert_eq!(
-            Processor::decide(KEY_A, &at_limit, 1, sentence),
+            Processor::decide(KEY_A, &at_limit, 1, sentence, false),
             Action::AppendCode(b'a'),
             "the letter that reaches the limit is accepted"
         );
         let full = "a".repeat(MAX_RAW_LENGTH);
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, sentence),
+            Processor::decide(KEY_A, &full, 1, sentence, false),
             Action::Noop,
             "letters past the limit are swallowed"
         );
@@ -516,19 +555,19 @@ mod tests {
         };
         let at_limit = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH - 1);
         assert_eq!(
-            Processor::decide(KEY_A, &at_limit, 1, sentence),
+            Processor::decide(KEY_A, &at_limit, 1, sentence, false),
             Action::AppendCode(b'a'),
             "the letter reaching the auto-commit cap is accepted"
         );
         let full = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH);
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, sentence),
+            Processor::decide(KEY_A, &full, 1, sentence, false),
             Action::Noop,
             "letters past the auto-commit cap are swallowed"
         );
         // Well below the manual cap: a code the manual cap would still allow.
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, Config { auto_commit: false, ..sentence }),
+            Processor::decide(KEY_A, &full, 1, Config { auto_commit: false, ..sentence }, false),
             Action::AppendCode(b'a'),
             "auto-commit off keeps extending past the 64-key cap"
         );
@@ -540,11 +579,101 @@ mod tests {
     #[test]
     fn sentence_mode_keeps_selection_and_editing_keys() {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
-        assert_eq!(Processor::decide(KEY_SPACE, "jin", 3, sentence), Action::Select(0));
-        assert_eq!(Processor::decide(KEY_SPACE, "q", 0, sentence), Action::CommitRaw);
-        assert_eq!(Processor::decide(KEY_2, "jin", 3, sentence), Action::Select(1));
-        assert_eq!(Processor::decide(KEY_BACKSPACE, "jin", 3, sentence), Action::DeleteCode);
-        assert_eq!(Processor::decide(KEY_ESCAPE, "jin", 3, sentence), Action::Discard);
-        assert_eq!(Processor::decide(KEY_ENTER, "jin", 3, sentence), Action::CommitRaw);
+        assert_eq!(Processor::decide(KEY_SPACE, "jin", 3, sentence, false), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_SPACE, "q", 0, sentence, false), Action::CommitRaw);
+        assert_eq!(Processor::decide(KEY_2, "jin", 3, sentence, false), Action::Select(1));
+        assert_eq!(Processor::decide(KEY_BACKSPACE, "jin", 3, sentence, false), Action::DeleteCode);
+        assert_eq!(Processor::decide(KEY_ESCAPE, "jin", 3, sentence, false), Action::Discard);
+        assert_eq!(Processor::decide(KEY_ENTER, "jin", 3, sentence, false), Action::CommitRaw);
+    }
+
+    /// `english_punct_after_alnum` on: the first mapped punctuation right
+    /// after English letters or digits is released to the host as ASCII;
+    /// with the flag down, mid-composition or with the switch off the rule
+    /// stays out of the way.
+    #[test]
+    fn english_punct_after_alnum_releases_the_first_mapped_punctuation() {
+        let cn = Config {
+            ascii_punct: 1,
+            english_punct_after_alnum: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(b',' as u32, "", 0, cn, true),
+            Action::Pass,
+            "after alphanumerics , reaches the host as ,"
+        );
+        assert_eq!(Processor::decide(b',' as u32, "", 0, cn, false), Action::CommitPunct(b','));
+        assert_eq!(
+            Processor::decide(b',' as u32, "a", 1, cn, true),
+            Action::CommitCandidatePunct(b','),
+            "mid-composition punctuation joins the candidate regardless"
+        );
+        let off = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(
+            Processor::decide(b',' as u32, "", 0, off, true),
+            Action::CommitPunct(b','),
+            "the rule is inert while the switch is off"
+        );
+    }
+
+    /// Capital letters (the shell forwards Shift + letter unchanged) never
+    /// join a lowercase encoding: idle or composing they are released to the
+    /// host like unmapped symbols, and the composition keeps running.
+    #[test]
+    fn capitals_pass_to_the_host() {
+        assert_eq!(idle(b'H' as u32), Action::Pass);
+        assert_eq!(composing(b'H' as u32, "a", 3), Action::Pass, "a capital never extends the code");
+        let cn = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(Processor::decide(b'H' as u32, "a", 1, cn, false), Action::Pass);
+    }
+
+    /// 分号/引号二三选: `;` selects the 2nd candidate, `'` the 3rd, and a
+    /// shorter page clamps both to its last entry — with one candidate all
+    /// three selection keys commit the 1st, with two candidates both `;`
+    /// and `'` commit the 2nd.
+    #[test]
+    fn semicolon_quote_select_second_and_third_candidates() {
+        let sel = Config { semicolon_quote_select: true, ..Config::default() };
+        let key_semicolon = b';' as u32;
+        let key_quote = b'\'' as u32;
+        assert_eq!(Processor::decide(key_semicolon, "a", 1, sel, false), Action::Select(0));
+        assert_eq!(Processor::decide(key_quote, "a", 1, sel, false), Action::Select(0));
+        assert_eq!(Processor::decide(key_semicolon, "a", 2, sel, false), Action::Select(1));
+        assert_eq!(Processor::decide(key_quote, "a", 2, sel, false), Action::Select(1));
+        assert_eq!(Processor::decide(key_semicolon, "a", 3, sel, false), Action::Select(1));
+        assert_eq!(Processor::decide(key_quote, "a", 3, sel, false), Action::Select(2));
+        assert_eq!(Processor::decide(key_quote, "a", 5, sel, false), Action::Select(2));
+    }
+
+    /// The selection keys hold only while a candidate is on screen. With
+    /// nothing to select, `;` and `'` keep their punctuation meanings —
+    /// 中文标点 commits them, English mode releases them — and while idle
+    /// they are plain punctuation. With the switch off they never select.
+    #[test]
+    fn semicolon_quote_fall_back_to_punctuation() {
+        let sel_cn = Config {
+            semicolon_quote_select: true,
+            ascii_punct: 1,
+            ..Config::default()
+        };
+        let sel_en = Config { semicolon_quote_select: true, ..Config::default() };
+        assert_eq!(
+            Processor::decide(b';' as u32, "q", 0, sel_cn, false),
+            Action::CommitCandidatePunct(b';'),
+            "no candidate: ; is punctuation again"
+        );
+        assert_eq!(
+            Processor::decide(b'\'' as u32, "q", 0, sel_cn, false),
+            Action::CommitCandidatePunct(b'\'')
+        );
+        assert_eq!(Processor::decide(b';' as u32, "q", 0, sel_en, false), Action::Pass);
+        assert_eq!(Processor::decide(b';' as u32, "", 0, sel_cn, false), Action::CommitPunct(b';'));
+        let off_cn = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(
+            Processor::decide(b';' as u32, "a", 3, off_cn, false),
+            Action::CommitCandidatePunct(b';'),
+            "off: ; joins the candidate commit as before"
+        );
     }
 }
