@@ -95,6 +95,12 @@ final class PreferencesModel: ObservableObject {
     @Published var asciiPunct: Int { didSet { settingChanged() } }
     /// Point size of the IMKCandidates text; applied at render time.
     @Published var candidateFontSize: Double { didSet { persist() } }
+    /// Candidate window orientation: `false` lays candidates out in a single
+    /// horizontal row, `true` stacks them in a vertical column. Like the font
+    /// size this is a pure shell rendering detail — it never crosses into the
+    /// engine; `HimeInputController` maps it to the `IMKCandidates` panel type
+    /// whenever candidates are shown (SPEC_MACOS §3.2/§5).
+    @Published var verticalCandidates: Bool { didSet { persist() } }
 
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
@@ -111,6 +117,7 @@ final class PreferencesModel: ObservableObject {
     private static let asciiPunctKey = "engineAsciiPunct"
     private static let schemeDirKey = "schemeDir"
     private static let fontSizeKey = "candidateFontSize"
+    private static let verticalCandidatesKey = "candidatePanelVertical"
 
     /// Set while engine values are written back into the model, so their
     /// didSet handlers do not echo the engine's numbers back via
@@ -131,6 +138,7 @@ final class PreferencesModel: ObservableObject {
         commitNextCode = 0
         asciiPunct = 0
         candidateFontSize = defaults.object(forKey: Self.fontSizeKey) as? Double ?? 16
+        verticalCandidates = defaults.object(forKey: Self.verticalCandidatesKey) as? Bool ?? false
     }
 
     /// Discover the bundled schemes, select the persisted one (or the first)
@@ -248,6 +256,7 @@ final class PreferencesModel: ObservableObject {
         defaults.set(asciiPunct, forKey: Self.asciiPunctKey)
         defaults.set(schemeDir, forKey: Self.schemeDirKey)
         defaults.set(candidateFontSize, forKey: Self.fontSizeKey)
+        defaults.set(verticalCandidates, forKey: Self.verticalCandidatesKey)
     }
 
     /// hime_scan_schemes as structured data ([] when the directory holds no
@@ -424,6 +433,15 @@ private struct BasicView: View {
                               isOn: model.asciiPunctSwitch)
                 }
                 Section("候选窗") {
+                    LabeledContent("候选排列") {
+                        Picker("候选排列", selection: $model.verticalCandidates) {
+                            Text("横排").tag(false)
+                            Text("竖排").tag(true)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
                     LabeledContent("候选字号") {
                         HStack(spacing: 8) {
                             Slider(value: $model.candidateFontSize,

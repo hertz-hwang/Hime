@@ -27,6 +27,15 @@ private struct EngineResponse: Decodable {
     }
 }
 
+/// Maps the preferred candidate orientation to the `IMKCandidates` panel type
+/// (SPEC_MACOS §3.2): vertical stacks the candidates in one scrolling column
+/// with the selection keys down the left edge; horizontal lays them out in a
+/// single stepping row, which is the default and the shipped behavior.
+func himeCandidatePanelType(vertical: Bool) -> IMKCandidatePanelType {
+    vertical ? kIMKSingleColumnScrollingCandidatePanel
+             : kIMKSingleRowSteppingCandidatePanel
+}
+
 @objc(HimeInputController)
 final class HimeInputController: IMKInputController {
     /// ASCII codes the engine maps onto candidate indexes 0-4 (SPEC §3:
@@ -166,6 +175,14 @@ final class HimeInputController: IMKInputController {
         if response.candidates.isEmpty {
             sharedCandidates.hide()
         } else {
+            // The panel type is fixed at creation, so a change of the
+            // orientation preference is re-cut here before the panel refreshes
+            // (SPEC_MACOS §3.2); only an actual change touches setPanelType.
+            let wantedPanelType =
+                himeCandidatePanelType(vertical: PreferencesModel.shared.verticalCandidates)
+            if sharedCandidates.panelType() != wantedPanelType {
+                sharedCandidates.setPanelType(wantedPanelType)
+            }
             // The preferences window owns the candidate font size; merging it
             // into the style attributes (which also carry the key-routing flag
             // set at startup) on every render lets a change show up as soon
