@@ -98,6 +98,15 @@ pub struct Config {
     /// Punctuation output, the `metadata.toml` `ascii_punct` key: `0` English
     /// (ASCII) punctuation, `1` Chinese punctuation. A number, never a bool.
     pub ascii_punct: u8,
+    /// Release the first punctuation key after English letters or digits to
+    /// the host as ASCII instead of mapping it to 中文标点 (the `12:30`
+    /// case). Schemes do not define it; it survives a scheme switch.
+    pub english_punct_after_alnum: bool,
+    /// While a candidate is on screen, `;` selects the 2nd candidate and
+    /// `'` the 3rd, clamped to the last candidate of the rendered page; the
+    /// 2nd/3rd-select rule. Schemes do not define it; it survives a scheme
+    /// switch.
+    pub semicolon_quote_select: bool,
 }
 
 impl Default for Config {
@@ -110,6 +119,8 @@ impl Default for Config {
             auto_commit_length: MAX_CODE_LEN,
             commit_next_code: 0,
             ascii_punct: 0,
+            english_punct_after_alnum: false,
+            semicolon_quote_select: false,
         }
     }
 }
@@ -147,6 +158,27 @@ mod tests {
         assert_eq!(config.auto_commit_length, MAX_CODE_LEN);
         assert_eq!(config.commit_next_code, 0, "overflow commit is off by default");
         assert_eq!(config.ascii_punct, 0, "English punctuation is the default");
+        assert!(!config.english_punct_after_alnum, "the rule is opt-in");
+        assert!(!config.semicolon_quote_select, "; and ' stay punctuation by default");
+    }
+
+    /// Both punctuation switches cross JSON as plain bools; a JSON that
+    /// names neither keeps both off.
+    #[test]
+    fn punctuation_switches_cross_json_as_bools() {
+        let config: Config =
+            serde_json::from_str(r#"{"english_punct_after_alnum":true,"semicolon_quote_select":true}"#)
+                .unwrap();
+        assert!(config.english_punct_after_alnum);
+        assert!(config.semicolon_quote_select);
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""english_punct_after_alnum":true"#), "{json}");
+        assert!(json.contains(r#""semicolon_quote_select":true"#), "{json}");
+
+        let off: Config = serde_json::from_str("{}").unwrap();
+        assert!(!off.english_punct_after_alnum);
+        assert!(!off.semicolon_quote_select);
     }
 
     #[test]

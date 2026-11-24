@@ -68,9 +68,9 @@ impl Default for SchemeMetadata {
 
 impl SchemeMetadata {
     /// The engine configuration this scheme prescribes: every behavior key
-    /// comes from the metadata, only `page_size` (which schemes do not
-    /// define) is carried over from `base`. Out-of-range metadata is
-    /// clamped like any other config.
+    /// comes from the metadata, only the keys schemes do not define —
+    /// `page_size` and the two pure preference switches — are carried over
+    /// from `base`. Out-of-range metadata is clamped like any other config.
     #[must_use]
     pub fn defaults_for(&self, base: Config) -> Config {
         Config {
@@ -81,6 +81,8 @@ impl SchemeMetadata {
             auto_commit_length: self.auto_commit_length,
             commit_next_code: self.commit_next_code,
             ascii_punct: self.ascii_punct,
+            english_punct_after_alnum: base.english_punct_after_alnum,
+            semicolon_quote_select: base.semicolon_quote_select,
         }
         .sanitized()
     }
@@ -318,9 +320,18 @@ mod tests {
             ascii_punct: 1,
             ..SchemeMetadata::default()
         };
-        let base = Config { page_size: 8, ..Config::default() };
+        let base = Config {
+            page_size: 8,
+            english_punct_after_alnum: true,
+            semicolon_quote_select: true,
+            ..Config::default()
+        };
         let config = metadata.defaults_for(base);
         assert_eq!(config.page_size, 8, "page size survives a scheme switch");
+        assert!(
+            config.english_punct_after_alnum && config.semicolon_quote_select,
+            "preference switches survive a scheme switch"
+        );
         assert_eq!(config.max_code_len, 6);
         assert_eq!(config.code_type, CodeType::Shuangpin);
         assert!(config.auto_commit);
