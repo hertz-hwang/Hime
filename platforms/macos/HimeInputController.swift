@@ -36,11 +36,51 @@ func himeCandidatePanelType(vertical: Bool) -> IMKCandidatePanelType {
              : kIMKSingleRowSteppingCandidatePanel
 }
 
+/// Resizes the vertical candidate panel to the height of the candidates it
+/// actually holds (SPEC_MACOS §3.2): `IMKCandidates` lays its single-column
+/// panel out at a fixed nine-row height, so a short page leaves the panel
+/// mostly empty. The panel window is not reachable through public API, but
+/// it lives in this process (`IMKUIPanel` in `NSApp.windows`) and its
+/// collection document sizes itself to the item count, so the shell finds
+/// the window hosting that view and sets its height to the document's,
+/// keeping the top edge where `show` placed it. Call this after `show`,
+/// which re-lays the panel out and resets the size every time. A panel-type
+/// switch leaves the old window behind hidden, so only visible windows
+/// qualify. The horizontal panel sizes itself to its row, so nothing is
+/// done for it; a missing panel or document (not laid out yet) leaves the
+/// panel untouched.
+func himeFitVerticalCandidatePanel(_ candidates: IMKCandidates) {
+    guard candidates.panelType() == kIMKSingleColumnScrollingCandidatePanel else { return }
+    for window in NSApp.windows where window.isVisible {
+        guard let content = window.contentView,
+              let document = himeFindView(suffixed: "IMKUICandidateCollectionDocumentView", in: content)
+        else { continue }
+        let height = document.bounds.height
+        guard height > 0, abs(content.bounds.height - height) > 0.5 else { return }
+        // setContentSize keeps the window's top edge, which is where `show`
+        // anchored the panel below the text.
+        window.setContentSize(NSSize(width: content.bounds.width, height: height))
+        return
+    }
+}
+
+/// Depth-first search for a private AppKit view by class-name suffix (the
+/// candidate views have no public class to match on).
+private func himeFindView(suffixed suffix: String, in view: NSView) -> NSView? {
+    for sub in view.subviews {
+        if String(describing: type(of: sub)).hasSuffix(suffix) { return sub }
+        if let deep = himeFindView(suffixed: suffix, in: sub) { return deep }
+    }
+    return nil
+}
+
 @objc(HimeInputController)
 final class HimeInputController: IMKInputController {
-    /// ASCII codes the engine maps onto candidate indexes 0-4 (SPEC §3:
-    /// digits `1`-`5` select candidates 0-4). The engine caps the list at 5.
-    private let digitKeyCode: [UInt32] = [49, 50, 51, 52, 53]
+    /// ASCII codes the engine maps onto candidate indexes 0-8 (SPEC §3:
+    /// digits `1`-`N` select candidates on the current page, `N` being the
+    /// configured page size, at most 9). A finished mouse selection is
+    /// replayed to the engine as the matching digit.
+    private let digitKeyCode: [UInt32] = Array(49...57) // "1" ... "9"
 
     /// macOS Caps Lock — the 中/英 key of Chinese keyboards (SPEC_MACOS §3.4).
     private let capsLockKeyCode: UInt16 = 57
@@ -193,6 +233,10 @@ final class HimeInputController: IMKInputController {
             sharedCandidates.setAttributes(attributes)
             sharedCandidates.update()
             sharedCandidates.show(kIMKLocateCandidatesBelowHint)
+            // The panel window exists only after the first show and `show`
+            // re-lays it out at the fixed nine-row height, so the height fit
+            // has to follow it (SPEC_MACOS §3.2).
+            himeFitVerticalCandidatePanel(sharedCandidates)
         }
     }
 
