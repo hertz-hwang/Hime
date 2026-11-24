@@ -2,7 +2,11 @@
 //
 // Layout mirrors the 业火 (Fire) preferences window: a sidebar listing the
 // sections, a grouped form with the control right-aligned on each row and a
-// grey caption inline after the row title.
+// grey caption inline after the row title. Above the sidebar a 重新载入
+// button re-scans the bundled and user scheme folders (SPEC §5.2) and
+// reloads the current scheme's table and model; 高级 → 模型 shows the
+// n-gram model status (`hime_model_status`) and specifies its path
+// (`hime_set_model_path`).
 //
 // The engine owns every typing-behavior value (AGENTS.md §1): the scheme
 // list, the scheme metadata and the engine Config all cross through
@@ -17,6 +21,7 @@
 import Cocoa
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Mirror of hime-core's `Config` JSON (SPEC §2.3).
 private struct EngineConfig: Codable, Equatable {
@@ -52,6 +57,68 @@ struct SchemeInfo: Codable, Identifiable, Equatable {
     let author: String
 
     var id: String { dir }
+}
+
+/// Mirror of the `hime_model_status` JSON (SPEC §6): the n-gram model state
+/// for the 模型 page. Internal because the internal model exposes it.
+struct ModelStatus: Codable, Equatable {
+    /// The loaded engine decodes with the model (a 形码整句 scheme is up) —
+    /// the panel shows this as onAir / offLine.
+    let online: Bool
+    /// The panel-specified model path (`hime_set_model_path`), when set.
+    let overridePath: String?
+    /// `<data-dir>/sentence-ngram.hng`, when the data folder resolves.
+    let defaultPath: String?
+    /// The file the engine loaded, or the one discovery resolves today.
+    let path: String?
+    /// Why no model is usable; absent when the file loaded.
+    let error: String?
+    /// Model file modification time in Unix seconds.
+    let modifiedSecs: Int64?
+    /// HFNGMF header diagnostics; absent when no file loaded.
+    let info: NgramModelInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case online
+        case overridePath = "override_path"
+        case defaultPath = "default_path"
+        case path
+        case error
+        case modifiedSecs = "modified_secs"
+        case info
+    }
+}
+
+/// The `info` object of `hime_model_status`: the HFNGMF v1 header fields of
+/// a loaded model (SPEC §7.1).
+struct NgramModelInfo: Codable, Equatable {
+    let format: String
+    let headerVersion: Int
+    let order: Int
+    let vocab: Int
+    let hotLimit: Int
+    let biRows: Int
+    let triRows: Int
+    let codeBits: Int
+    let codeRangeOct: Int
+    let fileBytes: Int64
+    let buildId: String
+    let meta: String
+
+    enum CodingKeys: String, CodingKey {
+        case format
+        case headerVersion = "header_version"
+        case order
+        case vocab
+        case hotLimit = "hot_limit"
+        case biRows = "bi_rows"
+        case triRows = "tri_rows"
+        case codeBits = "code_bits"
+        case codeRangeOct = "code_range_oct"
+        case fileBytes = "file_bytes"
+        case buildId = "build_id"
+        case meta
+    }
 }
 
 /// The persisted preferences. Reading them is the shell's job only; the
@@ -102,6 +169,10 @@ final class PreferencesModel: ObservableObject {
     /// whenever candidates are shown (SPEC_MACOS §3.2/§5).
     @Published var verticalCandidates: Bool { didSet { persist() } }
 
+    /// `hime_model_status` mirror for the 模型 page (SPEC §7.5); refreshed
+    /// at startup, on scheme switches, on reload and when the page appears.
+    @Published private(set) var modelStatus: ModelStatus?
+
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
     static let maxCodeLenRange = 1...16
@@ -118,6 +189,11 @@ final class PreferencesModel: ObservableObject {
     private static let schemeDirKey = "schemeDir"
     private static let fontSizeKey = "candidateFontSize"
     private static let verticalCandidatesKey = "candidatePanelVertical"
+    private static let ngramModelPathKey = "ngramModelPath"
+
+    /// The bundled `Resources/schemes` folder handed to `startup`; the user
+    /// data folder's `schemes` is scanned beside it (SPEC §5.2).
+    private var bundledSchemesDir: String = ""
 
     /// Set while engine values are written back into the model, so their
     /// didSet handlers do not echo the engine's numbers back via
@@ -141,20 +217,27 @@ final class PreferencesModel: ObservableObject {
         verticalCandidates = defaults.object(forKey: Self.verticalCandidatesKey) as? Bool ?? false
     }
 
-    /// Discover the bundled schemes, select the persisted one (or the first)
-    /// and align the model with the engine: the scheme's metadata defaults
-    /// plus whatever the user last asked for. Returns false when no scheme
-    /// loads, which leaves the process unusable (main.swift exits).
+    /// Creates the user data folders, replays the persisted model override,
+    /// discovers the bundled and user schemes, selects the persisted one (or
+    /// the first that loads — a scheme whose table or model broke still lets
+    /// the process come up on another one) and aligns the model with the
+    /// engine: the scheme's metadata defaults plus whatever the user last
+    /// asked for. Returns false when no scheme loads, which leaves the
+    /// process unusable (main.swift exits).
     @discardableResult
     func startup(schemesDir: String) -> Bool {
-        let discovered = discoveredSchemes(in: schemesDir)
-        guard let chosen = discovered.first(where: { $0.dir == defaults.string(forKey: Self.schemeDirKey) })
-            ?? discovered.first else {
-            NSLog("Hime: no loadable scheme under %@", schemesDir)
-            return false
+        bundledSchemesDir = schemesDir
+        hime_ensure_data_dir()
+        applyStoredModelOverride()
+        let discovered = discoverSchemes()
+        let savedDir = defaults.string(forKey: Self.schemeDirKey)
+        var ordered: [SchemeInfo] = []
+        if let saved = discovered.first(where: { $0.dir == savedDir }) {
+            ordered.append(saved)
         }
-        guard hime_select_scheme(chosen.path) else {
-            NSLog("Hime: hime_select_scheme(%@) failed", chosen.path)
+        ordered.append(contentsOf: discovered.filter { $0.dir != savedDir })
+        guard let chosen = ordered.first(where: { hime_select_scheme($0.path) }) else {
+            NSLog("Hime: no scheme under %@ or the user folder could be selected", schemesDir)
             return false
         }
         isApplyingEngineConfig = true
@@ -164,7 +247,56 @@ final class PreferencesModel: ObservableObject {
         isApplyingEngineConfig = false
         persist()
         syncEngine() // replay the stored request onto the scheme defaults
+        refreshModelStatus()
         return true
+    }
+
+    /// Re-scan the bundled and user scheme folders and load the current
+    /// scheme's table and model again — after dropping scheme folders or a
+    /// `.hng` model into the user data folder, 重新载入 picks them up. The
+    /// user's settings survive (a scheme switch discards them); a scheme
+    /// that fails to load leaves the engine untouched.
+    func reload() {
+        hime_ensure_data_dir()
+        let discovered = discoverSchemes()
+        if !discovered.isEmpty {
+            schemes = discovered
+        }
+        let target = discovered.first { $0.dir == schemeDir } ?? discovered.first
+        if let target, hime_select_scheme(target.path) {
+            isApplyingEngineConfig = true
+            schemeDir = target.dir
+            applyEngineConfig(storedOverrides: true)
+            isApplyingEngineConfig = false
+            persist()
+            syncEngine()
+        } else if let target {
+            NSLog("Hime: reload could not load scheme %@", target.path)
+        }
+        refreshModelStatus()
+    }
+
+    /// Point the engine at one explicit `.hng` file, or restore automatic
+    /// discovery with nil. The value is persisted and applied through
+    /// `reload()`, which is also what a changed path needs to take effect.
+    func setModelPath(_ path: String?) {
+        let accepted: Bool
+        if let path, let cString = path.cString(using: .utf8) {
+            accepted = hime_set_model_path(cString)
+        } else {
+            accepted = hime_set_model_path(nil)
+        }
+        guard accepted else {
+            NSLog("Hime: hime_set_model_path(%@) rejected", path ?? "<clear>")
+            refreshModelStatus()
+            return
+        }
+        if let path {
+            defaults.set(path, forKey: Self.ngramModelPathKey)
+        } else {
+            defaults.removeObject(forKey: Self.ngramModelPathKey)
+        }
+        reload()
     }
 
     /// Binding for the 方案码表 picker: picking a scheme goes through the
@@ -194,6 +326,7 @@ final class PreferencesModel: ObservableObject {
         applyEngineConfig(storedOverrides: false)
         isApplyingEngineConfig = false
         persist()
+        refreshModelStatus() // the new source may load (or drop) the model
     }
 
     /// The metadata of the selected scheme, for the read-only info rows.
@@ -268,6 +401,45 @@ final class PreferencesModel: ObservableObject {
         return (try? JSONDecoder().decode([SchemeInfo].self, from: data)) ?? []
     }
 
+    /// Bundled schemes plus the user data folder's `schemes` (SPEC §5.2),
+    /// merged by folder name — a user folder overrides the bundled one —
+    /// sorted by name like `hime_scan_schemes` sorts.
+    private func discoverSchemes() -> [SchemeInfo] {
+        var byName: [String: SchemeInfo] = [:]
+        for info in discoveredSchemes(in: bundledSchemesDir) {
+            byName[info.dir] = info
+        }
+        if let ptr = hime_schemes_dir() {
+            defer { hime_free_string(ptr) }
+            let dir = String(cString: ptr)
+            if !dir.isEmpty {
+                for info in discoveredSchemes(in: dir) {
+                    byName[info.dir] = info
+                }
+            }
+        }
+        return byName.values.sorted { $0.dir < $1.dir }
+    }
+
+    /// Replay the persisted 模型路径 onto the engine before any scheme loads
+    /// (a path whose file vanished is reported by the 模型 page and simply
+    /// left unapplied).
+    private func applyStoredModelOverride() {
+        guard let path = defaults.string(forKey: Self.ngramModelPathKey), !path.isEmpty else { return }
+        guard let cString = path.cString(using: .utf8) else { return }
+        if !hime_set_model_path(cString) {
+            NSLog("Hime: stored model path %@ is not a readable file", path)
+        }
+    }
+
+    /// hime_model_status as structured data.
+    fileprivate func refreshModelStatus() {
+        guard let ptr = hime_model_status() else { return }
+        defer { hime_free_string(ptr) }
+        guard let data = String(cString: ptr).data(using: .utf8) else { return }
+        modelStatus = try? JSONDecoder().decode(ModelStatus.self, from: data)
+    }
+
     /// hime_get_config as structured data.
     private func engineConfig() -> EngineConfig? {
         guard let ptr = hime_get_config() else { return nil }
@@ -322,6 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private enum PanelSection: String, CaseIterable, Identifiable {
     case basic = "基本"
+    case model = "模型"
     case about = "关于"
 
     var id: String { rawValue }
@@ -334,22 +507,42 @@ private final class PanelSelection: ObservableObject {
 }
 
 private struct PreferencesRootView: View {
+    @EnvironmentObject private var model: PreferencesModel
     @EnvironmentObject private var selection: PanelSelection
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection.section) {
-                Section("编码与输入") {
-                    sidebarRow(.basic, symbol: "gearshape", color: .blue)
+            VStack(spacing: 0) {
+                HStack {
+                    Button {
+                        model.reload()
+                    } label: {
+                        Label("重新载入", systemImage: "arrow.clockwise")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .help("重新扫描应用与用户数据目录的方案，并重载当前方案的码表与模型")
+                    Spacer(minLength: 0)
                 }
-                Section("应用") {
-                    sidebarRow(.about, symbol: "info.circle", color: .purple)
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                List(selection: $selection.section) {
+                    Section("编码与输入") {
+                        sidebarRow(.basic, symbol: "gearshape", color: .blue)
+                    }
+                    Section("高级") {
+                        sidebarRow(.model, symbol: "cpu", color: .orange)
+                    }
+                    Section("应用") {
+                        sidebarRow(.about, symbol: "info.circle", color: .purple)
+                    }
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
         } detail: {
             switch selection.section {
             case .about: AboutView()
+            case .model: ModelView()
             default: BasicView()
             }
         }
@@ -523,6 +716,126 @@ private struct BasicView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
+    }
+}
+
+/// 高级 → 模型: the n-gram model page (SPEC §7.5). The 状态 group mirrors
+/// `hime_model_status` — the online flag plus every HFNGMF header field the
+/// loaded (or resolvable) model carries; the 模型路径 group specifies the
+/// `.hng` file via `hime_set_model_path` + `reload()` and shows where
+/// automatic discovery looks.
+private struct ModelView: View {
+    @EnvironmentObject private var model: PreferencesModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SectionHeading(title: "模型")
+            Form {
+                Section("状态") {
+                    LabeledContent("在线状态") {
+                        if let status = model.modelStatus {
+                            Text(status.online ? "onAir" : "offLine")
+                                .fontWeight(.medium)
+                                .foregroundStyle(status.online ? Color.green : Color.secondary)
+                        } else {
+                            Text("—")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let status = model.modelStatus {
+                        if let error = status.error {
+                            infoRow(title: "诊断", value: error)
+                        }
+                        if let info = status.info {
+                            infoRow(title: "模型路径", value: status.path ?? "—")
+                            infoRow(title: "格式", value: "\(info.format) (header v\(info.headerVersion))")
+                            infoRow(title: "模型阶数", value: "\(info.order) 阶")
+                            infoRow(title: "词表规模", value: Self.grouped(info.vocab))
+                            infoRow(title: "热区规模", value: Self.grouped(info.hotLimit))
+                            infoRow(title: "二元上下文", value: Self.grouped(info.biRows) + " 行")
+                            infoRow(title: "三元上下文", value: Self.grouped(info.triRows) + " 行")
+                            infoRow(title: "后继编码位宽",
+                                    value: info.codeBits == 8
+                                        ? "8-bit 量化（动态范围 \(info.codeRangeOct) 个倍频程）"
+                                        : "\(info.codeBits)-bit")
+                            infoRow(title: "文件大小", value: Self.fileSize(info.fileBytes))
+                            infoRow(title: "修改时间", value: Self.timestamp(status.modifiedSecs))
+                            infoRow(title: "构建标识", value: info.buildId)
+                            infoRow(title: "构建信息", value: info.meta)
+                        }
+                        if let override = status.overridePath, override != status.path {
+                            Text("指定路径尚未生效：点击侧栏「重新载入」后应用")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Section("模型路径") {
+                    infoRow(title: "指定路径", value: model.modelStatus?.overridePath ?? "自动查找")
+                    infoRow(title: "默认位置", value: model.modelStatus?.defaultPath ?? "—")
+                    LabeledContent("模型文件") {
+                        HStack(spacing: 8) {
+                            Button("选择…") { chooseModelPath() }
+                            Button("恢复默认") { model.setModelPath(nil) }
+                                .disabled(model.modelStatus?.overridePath == nil)
+                        }
+                    }
+                    Text("未指定时在默认位置查找 sentence-ngram.hng；指定路径拥有最高优先级，修改后经「重新载入」生效。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .onAppear { model.refreshModelStatus() }
+    }
+
+    /// NSOpenPanel for the `.hng` file; the selection is applied through
+    /// `setModelPath`, which persists it and reloads the scheme.
+    private func chooseModelPath() {
+        let panel = NSOpenPanel()
+        panel.title = "选择 HFNGMF 模型"
+        panel.message = "选择 .hng 整句语言模型文件"
+        panel.prompt = "指定"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.data]
+        if let defaultPath = model.modelStatus?.defaultPath {
+            panel.directoryURL = URL(fileURLWithPath: defaultPath).deletingLastPathComponent()
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.setModelPath(url.path)
+    }
+
+    /// Read-only value row; values are paths, numbers or build JSON, so the
+    /// text stays selectable and middle-truncated.
+    private func infoRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
+        }
+    }
+
+    private static func grouped(_ value: Int) -> String {
+        value.formatted()
+    }
+
+    private static func fileSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func timestamp(_ secs: Int64?) -> String {
+        guard let secs, secs > 0 else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(secs)))
     }
 }
 

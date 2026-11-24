@@ -1,11 +1,12 @@
 // Hime input method — program entry point (SPEC_MACOS §1, §3.2).
 //
-// Starts the Rust engine on the bundled schemes (Resources/schemes): the
-// selected scheme's table and metadata defaults come up, then the persisted
-// preferences are applied. Only after that the IMKServer and the shared
-// candidate panel are created, and the run loop spins. The process stays
-// alive as an IMK server (LSUIElement: no Dock icon, but it can show the
-// preferences window).
+// Starts the Rust engine on the bundled schemes (Resources/schemes) beside
+// the user data folder (SPEC §5.2): the data folders are created, the
+// persisted model override is replayed, then the selected scheme's table and
+// metadata defaults come up and the persisted preferences are applied. Only
+// after that the IMKServer and the shared candidate panel are created, and
+// the run loop spins. The process stays alive as an IMK server (LSUIElement:
+// no Dock icon, but it can show the preferences window).
 
 import Cocoa
 import InputMethodKit
