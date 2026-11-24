@@ -24,9 +24,11 @@
 
 use std::fmt;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use memmap2::Mmap;
+use serde::Serialize;
 
 /// HFNGMF v1 magic (ASCII `HFNGMF01`).
 const MAGIC: &[u8; 8] = b"HFNGMF01";
@@ -100,9 +102,15 @@ fn bf16_to_f64(h: u16) -> f64 {
 #[derive(Debug)]
 pub struct NgramModel {
     data: Mmap,
+    /// Header `version` field (the format is gated by [`MAGIC`], so it is 1).
+    header_version: u32,
+    /// Header `order` byte (always 3, validated at load).
+    order: u8,
     vocab: usize,
     hot: usize,
     code_bits: u8,
+    /// log2 probability range in octaves; only meaningful when `code_bits == 8`.
+    range_oct: u8,
     /// 8-bit code → 2^(-q·range/255); only used when `code_bits == 8`.
     pow2: Vec<f64>,
     /// Absolute section start offsets into `data`.
@@ -146,7 +154,8 @@ impl NgramModel {
         let u64_at = |off: usize| -> u64 { u64::from_le_bytes(data[off..off + 8].try_into().unwrap()) };
         let bad = |why: String| Err(LoadError::BadHeader(why));
 
-        if u32_at(8) != 1 {
+        let header_version = u32_at(8);
+        if header_version != 1 {
             return bad("version".into());
         }
         if u32_at(12) as usize != HEADER_SIZE {
@@ -159,7 +168,8 @@ impl NgramModel {
         if u32_at(24) != ALIGN as u32 {
             return bad("align".into());
         }
-        if data[48] != 3 {
+        let order = data[48];
+        if order != 3 {
             return bad("order".into());
         }
         let code_bits = data[49];
@@ -170,6 +180,7 @@ impl NgramModel {
         if code_bits == 8 && !(1..=32).contains(&range_oct) {
             return bad(format!("code_range {range_oct}"));
         }
+        let range_oct = data[51];
         let vocab = u32_at(32) as usize;
         let hot = u32_at(36) as usize;
         if !(3..=INVALID_ID as usize).contains(&vocab) {
@@ -240,9 +251,12 @@ impl NgramModel {
 
         Ok(NgramModel {
             data,
+            header_version,
+            order,
             vocab,
             hot,
             code_bits,
+            range_oct,
             pow2,
             sect,
             hot_end,
@@ -548,23 +562,93 @@ impl NgramModel {
     pub fn hot_end(&self) -> usize {
         self.hot_end
     }
+
+    /// Header and build summary for shell display ([`probe_model`],
+    /// `hime_model_status` in SPEC §6).
+    #[must_use]
+    pub fn info(&self) -> ModelInfo {
+        ModelInfo {
+            format: "HFNGMF v1".to_string(),
+            header_version: self.header_version,
+            order: self.order,
+            vocab: self.vocab,
+            hot_limit: self.hot,
+            bi_rows: self.bi_ctx,
+            tri_rows: self.tri_ctx,
+            code_bits: self.code_bits,
+            code_range_oct: self.range_oct,
+            file_bytes: self.file_bytes,
+            build_id: self.build_id.clone(),
+            meta: self.meta.clone(),
+        }
+    }
+}
+
+/// Serializable snapshot of a loaded model's header and build fields, for
+/// the preferences 模型 page (SPEC §6 `hime_model_status`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelInfo {
+    /// Format name the loader accepted ("HFNGMF v1").
+    pub format: String,
+    /// Header `version` field.
+    pub header_version: u32,
+    /// Model order (n); 3 = trigram.
+    pub order: u8,
+    /// Vocabulary size (ids incl. the reserved ones).
+    pub vocab: usize,
+    /// Hot-region id bound (dense trigram matrix size is this squared).
+    pub hot_limit: usize,
+    /// Bigram context rows.
+    pub bi_rows: usize,
+    /// Trigram context rows.
+    pub tri_rows: usize,
+    /// Successor code width in bits (8 = quantized, 16 = bf16).
+    pub code_bits: u8,
+    /// log2 probability range in octaves (8-bit quantization only).
+    pub code_range_oct: u8,
+    /// File size in bytes (declared and actual, validated equal at load).
+    pub file_bytes: u64,
+    /// The build identifier the header carries.
+    pub build_id: String,
+    /// The build metadata JSON the model carries (spec §9).
+    pub meta: String,
+}
+
+/// Model path explicitly specified by the user (the preferences 模型 page,
+/// through `hime_set_model_path`, SPEC §7.5). Process-global.
+static MODEL_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn model_override() -> Option<PathBuf> {
+    MODEL_OVERRIDE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+}
+
+/// Set (`Some`) or clear (`None`) the user-specified model path. The
+/// override is authoritative: while it is set, [`find_model_path`] offers no
+/// fallback, so a moved or deleted file fails loudly instead of silently
+/// selecting another model.
+pub fn set_model_override(path: Option<PathBuf>) {
+    *MODEL_OVERRIDE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
 }
 
 /// Locate the whole-sentence model file. Shared by the engine, the CLI and the
-/// tests so they agree on where the model lives. Search order, first readable
-/// file wins:
+/// tests so they agree on where the model lives. Search order:
 ///
-/// 1. `HIME_SENTENCE_MODEL` — the explicit override for tests and for a shell
+/// 1. the panel override [`set_model_override`] — authoritative: returned
+///    when readable, otherwise nothing is found (no fallback candidates);
+/// 2. `HIME_SENTENCE_MODEL` — the explicit override for tests and for a shell
 ///    that ships its own model;
-/// 2. the user data folder `~/.config/hime/sentence-ngram.hng` (macOS; see
+/// 3. the user data folder `~/.config/hime/sentence-ngram.hng` (macOS; see
 ///    [`crate::paths`]) — where an installed model is meant to live, since the
 ///    large model is neither committed nor bundled;
-/// 3. the repository `data/sentence-ngram.hng` (a development checkout);
-/// 4. `data/sentence-ngram.hng` relative to the current directory.
+/// 4. the repository `data/sentence-ngram.hng` (a development checkout);
+/// 5. `data/sentence-ngram.hng` relative to the current directory.
 #[must_use]
-pub fn find_model_path() -> Option<std::path::PathBuf> {
+pub fn find_model_path() -> Option<PathBuf> {
+    if let Some(path) = model_override() {
+        return path.is_file().then_some(path);
+    }
     if let Some(path) = std::env::var_os("HIME_SENTENCE_MODEL") {
-        let path = std::path::PathBuf::from(path);
+        let path = PathBuf::from(path);
         if path.is_file() {
             return Some(path);
         }
@@ -574,15 +658,83 @@ pub fn find_model_path() -> Option<std::path::PathBuf> {
             return Some(path);
         }
     }
-    let repo = std::path::PathBuf::from(concat!(
+    let repo = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/sentence-ngram.hng"
     ));
     if repo.is_file() {
         return Some(repo);
     }
-    let relative = std::path::PathBuf::from("data/sentence-ngram.hng");
+    let relative = PathBuf::from("data/sentence-ngram.hng");
     relative.is_file().then_some(relative)
+}
+
+/// Everything the preferences 模型 page shows about the model file
+/// (`hime_model_status`, SPEC §6). Purely observational: it resolves and
+/// validates a file without installing an engine.
+#[derive(Debug, Serialize)]
+pub struct ModelProbe {
+    /// The panel override in effect ([`set_model_override`]), if set.
+    pub override_path: Option<String>,
+    /// `<data>/sentence-ngram.hng`, when the data folder resolves
+    /// ([`crate::paths::model_path`]).
+    pub default_path: Option<String>,
+    /// The file that was validated: the engine's loaded file when given,
+    /// otherwise whatever [`find_model_path`] resolves today.
+    pub path: Option<String>,
+    /// Why no model is usable: the load failure, or "nothing found".
+    pub error: Option<String>,
+    /// File modification time as Unix seconds, when the file is stat-able.
+    pub modified_secs: Option<i64>,
+    /// Header diagnostics; present exactly when the file loaded.
+    pub info: Option<ModelInfo>,
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn modified_secs_of(path: &Path) -> Option<i64> {
+    let when = std::fs::metadata(path).ok().and_then(|m| m.modified().ok())?;
+    match when.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => Some(d.as_secs() as i64),
+        Err(e) => Some(-(e.duration().as_secs() as i64)),
+    }
+}
+
+/// Resolve (or re-validate `loaded_path`) and load the model for display.
+/// A failed load keeps the `path` and reports the reason in `error`; with
+/// no file at all only the search paths are reported.
+#[must_use]
+pub fn probe_model(loaded_path: Option<&Path>) -> ModelProbe {
+    let override_path = model_override();
+    let (path, error, info, modified_secs) = match loaded_path.map(PathBuf::from).or_else(find_model_path) {
+        None => {
+            let why = match override_path.as_deref() {
+                Some(bad) => format!("override model path {} is not a readable file", path_string(bad)),
+                None => "no .hng model file found (searched the override path, \
+                         HIME_SENTENCE_MODEL, the user data folder and the bundled data)"
+                    .to_string(),
+            };
+            (None, Some(why), None, None)
+        }
+        Some(path) => {
+            let modified = modified_secs_of(&path);
+            let shown = path_string(&path);
+            match NgramModel::load(&path) {
+                Ok(model) => (Some(shown), None, Some(model.info()), modified),
+                Err(e) => (Some(shown), Some(e.to_string()), None, modified),
+            }
+        }
+    };
+    ModelProbe {
+        override_path: override_path.as_deref().map(path_string),
+        default_path: crate::paths::model_path().map(|p| path_string(&p)),
+        path,
+        error,
+        modified_secs,
+        info,
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +757,9 @@ mod tests {
     }
 
     fn load_real_model() -> Option<NgramModel> {
+        // Hold the override lock so a concurrent override test cannot make
+        // this resolution point at its scratch file.
+        let _override_guard = OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = find_model_path()?;
         match NgramModel::load(&path) {
             Ok(model) => Some(model),
@@ -711,6 +866,90 @@ mod tests {
         buf[12..16].copy_from_slice(&(HEADER_SIZE as u32).to_le_bytes()); // header_size
         buf[16..24].copy_from_slice(&999_999u64.to_le_bytes()); // file_size (wrong)
         assert!(matches!(load_bytes(&buf).unwrap_err(), LoadError::BadHeader(_)));
+    }
+
+    /// Serializes read-modify-restore of the process-global model override.
+    static OVERRIDE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set the model override for the duration of `body`, then restore it.
+    fn with_override<T>(path: Option<PathBuf>, body: impl FnOnce() -> T) -> T {
+        let guard = OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = model_override();
+        set_model_override(path);
+        let result = body();
+        set_model_override(saved);
+        drop(guard);
+        result
+    }
+
+    fn scratch_file(tag: &str, bytes: &[u8]) -> PathBuf {
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "hime-ngram-override-{}-{}-{}.hng",
+            std::process::id(),
+            tag,
+            id
+        ));
+        std::fs::write(&path, bytes).expect("write scratch model");
+        path
+    }
+
+    #[test]
+    fn model_override_is_authoritative_over_discovery() {
+        let present = scratch_file("present", b"not a model, a path target");
+        let absent = present.with_file_name("absent-override.hng");
+        with_override(Some(present.clone()), || {
+            assert_eq!(
+                find_model_path().as_deref(),
+                Some(present.as_path()),
+                "the override is returned verbatim, whatever else exists"
+            );
+        });
+        with_override(Some(absent), || {
+            assert!(
+                find_model_path().is_none(),
+                "a missing override blocks the fallback candidates instead of silently falling back"
+            );
+        });
+        with_override(None, || {
+            let _ = std::fs::remove_file(&present);
+        });
+    }
+
+    #[test]
+    fn probe_reports_a_foreign_file_as_a_load_error() {
+        let foreign = scratch_file("probe", b"tiny junk file");
+        let probe = with_override(None, || probe_model(Some(&foreign)));
+        assert_eq!(probe.path.as_deref(), Some(foreign.to_string_lossy().as_ref()));
+        assert!(probe.error.as_deref().is_some_and(|e| e.contains("HFNGMF")), "got {:?}", probe.error);
+        assert!(probe.info.is_none(), "a rejected file carries no header info");
+        assert!(probe.modified_secs.is_some(), "a stat-able file reports its mtime");
+        let _ = std::fs::remove_file(&foreign);
+    }
+
+    #[test]
+    fn probe_of_the_shipped_model_reports_the_header_fields() {
+        let _guard = OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(resolved) = find_model_path() else {
+            eprintln!("probe test: skipped (no model to probe)");
+            return;
+        };
+        let probe = probe_model(None);
+        assert!(probe.error.is_none(), "the shipped model must probe clean: {:?}", probe.error);
+        assert_eq!(probe.path.as_deref(), Some(resolved.to_string_lossy().as_ref()));
+        assert!(probe.modified_secs.is_some());
+        let info = probe.info.clone().expect("a clean probe carries header info");
+        assert_eq!(info.format, "HFNGMF v1");
+        assert_eq!(info.header_version, 1);
+        assert_eq!(info.order, 3);
+        assert_eq!(info.vocab, 17401);
+        assert_eq!(info.hot_limit, 1024);
+        assert_eq!(info.code_bits, 8);
+        assert_eq!(info.file_bytes, 200_554_816);
+        assert_eq!(info.build_id, "hng_train");
+        // The probe is what hime-ffi serializes; it must stay JSON-shaped.
+        let json = serde_json::to_string(&probe).expect("probe serializes");
+        assert!(json.contains("\"tri_rows\""));
     }
 }
 
