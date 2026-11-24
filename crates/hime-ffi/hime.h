@@ -6,9 +6,10 @@
  *
  * Threading: every function is safe to call from any thread; Rust guards
  * the engine with a mutex.
- * Memory: hime_process_key, hime_get_config and hime_scan_schemes return
- * heap strings owned by the caller, which must release them with
- * hime_free_string. Do not free them with free().
+ * Memory: hime_process_key, hime_get_config, hime_scan_schemes,
+ * hime_schemes_dir and hime_model_status return heap strings owned by the
+ * caller, which must release them with hime_free_string. Do not free them
+ * with free().
  */
 
 #ifndef HIME_H
@@ -85,14 +86,51 @@ char* hime_scan_schemes(const char* dir);
  * 形码整句 scheme). Initializes the engine if needed.
  *
  * A 形码整句 scheme (metadata "type" 3) decodes whole sentences and also needs
- * the HFNGMF n-gram model, located via HIME_SENTENCE_MODEL, else the user
- * folder ~/.config/hime/sentence-ngram.hng, else the bundled
+ * the HFNGMF n-gram model, located via the hime_set_model_path override if
+ * set, else HIME_SENTENCE_MODEL, else the user folder
+ * ~/.config/hime/sentence-ngram.hng, else the bundled
  * data/sentence-ngram.hng; if the model is absent this fails and the engine is
  * unchanged. Returns false on an invalid path or unloadable scheme/model. */
 bool hime_select_scheme(const char* scheme_dir);
 
-/* Release a string returned by hime_process_key, hime_get_config or
- * hime_scan_schemes. NULL is a no-op. */
+/* Path of the user's scheme folder <data-dir>/schemes (SPEC §5.2) as a
+ * NUL-terminated string, or NULL when no data folder resolves. A plain
+ * path query, valid before hime_init. The caller must release the string
+ * with hime_free_string. */
+char* hime_schemes_dir(void);
+
+/* Create the user data folder and its "schemes" subfolder when absent
+ * (SPEC §5.2); a model file is never created or touched. Returns false
+ * when no location resolves or the filesystem fails. */
+bool hime_ensure_data_dir(void);
+
+/* Point the whole-sentence engine at one explicit .hng model file (the
+ * preferences 模型 page). path names an existing readable file; NULL or an
+ * empty string clears the override and restores automatic discovery. The
+ * override is authoritative while set. It takes effect on the next
+ * hime_select_scheme; the running engine keeps its mapped model. Returns
+ * false on invalid UTF-8 or when path names no existing file; a failed
+ * call leaves the stored override unchanged. */
+bool hime_set_model_path(const char* path);
+
+/* Describe the whole-sentence n-gram model for the preferences 模型 page
+ * as JSON:
+ * {"online":bool,"override_path":…,"default_path":…,"path":…,"error":…,
+ *  "modified_secs":…,"info":{…}|null}.
+ * online is true while the loaded engine decodes with the model (a 形码整句
+ * scheme is selected). override_path/default_path mirror hime_set_model_path
+ * and <data-dir>/sentence-ngram.hng; path/error/modified_secs/info describe
+ * the engine's loaded file, or (while offline) the file discovery resolves
+ * today; info carries the header fields (format, header_version, order,
+ * vocab, hot_limit, bi_rows, tri_rows, code_bits, code_range_oct,
+ * file_bytes, build_id, meta) and is null when no file loaded, with the
+ * reason in error. Valid before hime_init (then online is false). The
+ * caller must release the string with hime_free_string. */
+char* hime_model_status(void);
+
+/* Release a string returned by hime_process_key, hime_get_config,
+ * hime_scan_schemes, hime_schemes_dir or hime_model_status. NULL is a
+ * no-op. */
 void hime_free_string(char* ptr);
 
 #ifdef __cplusplus

@@ -10,13 +10,16 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use hime_core::ngram::find_model_path;
+use hime_core::ngram::{find_model_path, probe_model, set_model_override};
 use hime_core::sentence::SentenceEngine;
-use hime_core::{load_scheme, scan_schemes, CodeType, Config, Dictionary, Session};
+use hime_core::{
+    ensure_config_layout, load_scheme, scan_schemes, schemes_dir, CodeType, Config, Dictionary,
+    Session,
+};
 
 /// Where candidates come from: a word table, or the whole-sentence engine a
 /// 形码整句 (type 3) scheme needs. This decides how every session is built.
@@ -31,11 +34,21 @@ struct Engine {
     config: Config,
     sessions: HashMap<u64, Session>,
     next_session_id: u64,
+    /// The `.hng` path a 形码整句 source loaded from (SPEC §7.5); `None`
+    /// for a word table. Reported by `hime_model_status` so the panel can
+    /// show the file the engine actually uses.
+    model_path: Option<PathBuf>,
 }
 
 impl Engine {
     fn new(source: EngineSource) -> Self {
-        Self { source, config: Config::default(), sessions: HashMap::new(), next_session_id: 1 }
+        Self {
+            source,
+            config: Config::default(),
+            sessions: HashMap::new(),
+            next_session_id: 1,
+            model_path: None,
+        }
     }
 
     /// Build a fresh session for the current source and config. A 形码整句
@@ -309,7 +322,8 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 ///
 /// A 形码整句 scheme (`type = 3` in its metadata) decodes whole sentences and
 /// additionally needs the HFNGMF n-gram model; it is located as everywhere
-/// else (see `find_model_path`: `HIME_SENTENCE_MODEL`, then the user folder
+/// else (see `find_model_path`: the [`hime_set_model_path`] override if set,
+/// then `HIME_SENTENCE_MODEL`, then the user folder
 /// `~/.config/hime/sentence-ngram.hng`, then the bundled
 /// `data/sentence-ngram.hng`). If that model is absent, selecting such a
 /// scheme fails and leaves the engine unchanged.
@@ -342,16 +356,16 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     // A 形码整句 (type 3) scheme decodes with the n-gram model over a sentence
     // table; every other scheme is a word table. Building the engine here lets
     // a bad model fail the call without touching the live engine.
-    let source = match info.metadata.code_type {
+    let (source, loaded_model) = match info.metadata.code_type {
         CodeType::XingmaSentence => {
             let Some(model) = find_model_path() else {
                 eprintln!(
-                    "hime-ffi: scheme {path:?} is 形码整句 but no .hng model was found (set HIME_SENTENCE_MODEL or place ~/.config/hime/sentence-ngram.hng)"
+                    "hime-ffi: scheme {path:?} is 形码整句 but no .hng model was found (set one in the preferences 模型 page, or via HIME_SENTENCE_MODEL, or place ~/.config/hime/sentence-ngram.hng)"
                 );
                 return false;
             };
             match SentenceEngine::load(&model, &info.table) {
-                Ok(engine) => EngineSource::Sentence(Arc::new(engine)),
+                Ok(engine) => (EngineSource::Sentence(Arc::new(engine)), Some(model)),
                 Err(e) => {
                     eprintln!("hime-ffi: failed to load sentence engine for {path:?}: {e}");
                     return false;
@@ -359,7 +373,7 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             }
         }
         _ => match Dictionary::load(&info.table) {
-            Ok(dict) => EngineSource::Table(Arc::new(dict)),
+            Ok(dict) => (EngineSource::Table(Arc::new(dict)), None),
             Err(e) => {
                 eprintln!("hime-ffi: failed to load dictionary {:?}: {e}", info.table);
                 return false;
@@ -370,25 +384,144 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
         None => {
             let mut engine = Engine::new(source);
             engine.config = info.metadata.defaults_for(engine.config);
+            engine.model_path = loaded_model;
             *slot = Some(engine);
             true
         }
         Some(engine) => {
             engine.config = info.metadata.defaults_for(engine.config);
             engine.source = source;
+            engine.model_path = loaded_model;
             engine.rebuild_sessions();
             true
         }
     })
 }
 
-/// Free a string returned by [`hime_process_key`], [`hime_get_config`] or
-/// [`hime_scan_schemes`]. Null is a no-op.
+/// Path of the user's scheme folder `<data-dir>/schemes` (SPEC §5.2), where
+/// user schemes sit beside the bundled `data/schemes/`, as a NUL-terminated
+/// string owned by the caller (release it with [`hime_free_string`]). A
+/// plain path query that works at any time, including before [`hime_init`].
+/// Returns null when no data folder can be resolved.
+#[no_mangle]
+pub extern "C" fn hime_schemes_dir() -> *mut c_char {
+    let Some(dir) = schemes_dir() else { return ptr::null_mut() };
+    match CString::new(dir.as_os_str().to_string_lossy().into_owned()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => {
+            eprintln!("hime-ffi: schemes dir {dir:?} is not representable as a C string");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Create the user data folder and its `schemes` subfolder when absent
+/// (SPEC §5.2); a model file is never created or touched. Call it before
+/// pointing the user at those folders. Returns false when no location can
+/// be resolved or the filesystem fails.
+#[no_mangle]
+pub extern "C" fn hime_ensure_data_dir() -> bool {
+    match ensure_config_layout() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("hime-ffi: hime_ensure_data_dir failed: {e}");
+            false
+        }
+    }
+}
+
+/// Point the whole-sentence engine at one explicit `.hng` model file (the
+/// preferences 模型 page, SPEC §7.5). `path` is a NUL-terminated path to an
+/// existing readable file; null or an empty string clears the override and
+/// restores automatic discovery (see [`hime_core::ngram::find_model_path`]).
+/// The override is authoritative while set. It takes effect on the next
+/// scheme load; the running engine keeps its already-mapped model, so a
+/// shell applies a change by selecting the scheme again.
+///
+/// Returns false on invalid UTF-8 or when `path` names no existing file; a
+/// failed call leaves the stored override unchanged.
+///
+/// # Safety
+/// `path` must be null or point to a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn hime_set_model_path(path: *const c_char) -> bool {
+    let text = if path.is_null() {
+        ""
+    } else {
+        match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("hime-ffi: hime_set_model_path path is not valid UTF-8");
+                return false;
+            }
+        }
+    };
+    if text.is_empty() {
+        set_model_override(None);
+        return true;
+    }
+    let candidate = Path::new(text);
+    if !candidate.is_file() {
+        eprintln!("hime-ffi: hime_set_model_path: no readable file at {text}");
+        return false;
+    }
+    set_model_override(Some(candidate.to_path_buf()));
+    true
+}
+
+/// Describe the whole-sentence n-gram model for the preferences 模型 page
+/// (SPEC §7.5), as a NUL-terminated JSON string owned by the caller (release
+/// it with [`hime_free_string`]). The shape is
+/// `{"online":<bool>,"override_path":…,"default_path":…,"path":…,"error":…,
+/// "modified_secs":…,"info":{…}|null}`:
+///
+/// - `online` is true exactly while the loaded engine decodes with the
+///   model, i.e. a 形码整句 scheme is selected (面板显示 onAir/offLine);
+/// - `override_path` / `default_path` report the [`hime_set_model_path`]
+///   override and `<data-dir>/sentence-ngram.hng` when set/resolvable;
+/// - `path`, `error`, `modified_secs` and `info` describe the file the
+///   engine loaded, or (while offline) the file discovery resolves today;
+///   `info` carries the header fields (`format`, `header_version`, `order`,
+///   `vocab`, `hot_limit`, `bi_rows`, `tri_rows`, `code_bits`,
+///   `code_range_oct`, `file_bytes`, `build_id`, `meta`) and is null when no
+///   file loaded, with the reason in `error`.
+///
+/// Works before [`hime_init`] (then `online` is false). Returns null only
+/// on a serialization failure.
+#[no_mangle]
+pub extern "C" fn hime_model_status() -> *mut c_char {
+    let (online, loaded) = with_engine("hime_model_status", |slot| match slot.as_ref() {
+        Some(engine) => {
+            (matches!(engine.source, EngineSource::Sentence(_)), engine.model_path.clone())
+        }
+        None => (false, None),
+    });
+    let probe = probe_model(loaded.as_deref());
+    let mut value = match serde_json::to_value(&probe) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("hime-ffi: failed to serialize the model status");
+            return ptr::null_mut();
+        }
+    };
+    value["online"] = serde_json::Value::Bool(online);
+    match CString::new(value.to_string()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => {
+            eprintln!("hime-ffi: model status contains an interior NUL");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a string returned by [`hime_process_key`], [`hime_get_config`],
+/// [`hime_scan_schemes`], [`hime_schemes_dir`] or [`hime_model_status`].
+/// Null is a no-op.
 ///
 /// # Safety
 /// `ptr` must be null or a value returned by [`hime_process_key`],
-/// [`hime_get_config`] or [`hime_scan_schemes`] in this process and not yet
-/// freed.
+/// [`hime_get_config`], [`hime_scan_schemes`], [`hime_schemes_dir`] or
+/// [`hime_model_status`] in this process and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn hime_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
