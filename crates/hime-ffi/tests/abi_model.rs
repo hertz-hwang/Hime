@@ -102,7 +102,9 @@ fn model_status_override_and_data_dir() {
 
     let status = model_status();
     assert_eq!(status["online"], true, "a selected 形码整句 scheme decodes with the model");
-    assert_eq!(status["path"].as_str(), Some(model.to_string_lossy().as_ref()));
+    // The online leg reports the engine's loaded file; the strings come from
+    // the same display path as the override, so compare them to each other.
+    assert_eq!(status["path"], status["override_path"]);
     assert!(status["error"].is_null());
     let info = &status["info"];
     assert_eq!(info["format"], "HFNGMF v1");

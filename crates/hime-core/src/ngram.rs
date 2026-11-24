@@ -690,8 +690,35 @@ pub struct ModelProbe {
     pub info: Option<ModelInfo>,
 }
 
+/// Lexical path normalization for display: `.` segments drop and `..`
+/// cancels the preceding named segment. Symlinks stay untouched (unlike
+/// `canonicalize`), so an override through a symlink keeps showing the
+/// path the user chose.
+fn normalized_display(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::path::Component;
+    let mut parts: Vec<OsString> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(last)
+                    if last != ".."
+                        && Path::new(&last).components().next().is_some_and(|c| matches!(c, Component::Normal(_))) =>
+                {
+                    parts.pop();
+                }
+                _ => parts.push(OsString::from("..")),
+            },
+            other => parts.push(other.as_os_str().to_os_string()),
+        }
+    }
+    parts.iter().collect()
+}
+
+/// Display form of a model path (normalized, lossy UTF-8).
 fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    normalized_display(path).to_string_lossy().into_owned()
 }
 
 fn modified_secs_of(path: &Path) -> Option<i64> {
@@ -936,7 +963,10 @@ mod tests {
         };
         let probe = probe_model(None);
         assert!(probe.error.is_none(), "the shipped model must probe clean: {:?}", probe.error);
-        assert_eq!(probe.path.as_deref(), Some(resolved.to_string_lossy().as_ref()));
+        assert_eq!(
+            probe.path.as_deref(),
+            Some(normalized_display(&resolved).to_string_lossy().as_ref())
+        );
         assert!(probe.modified_secs.is_some());
         let info = probe.info.clone().expect("a clean probe carries header info");
         assert_eq!(info.format, "HFNGMF v1");
