@@ -625,7 +625,7 @@ private struct BasicView: View {
                                range: PreferencesModel.maxCodeLenRange)
                         .disabled(model.isSentence)
                     switchRow(title: "自动上屏",
-                              hint: "唯一候选达到码长时直接提交",
+                              hint: "唯一候选达到码长时直接提交，整句中开启会略微降低准确性",
                               isOn: $model.autoCommit)
                     stepperRow(title: "自动上屏码长",
                                hint: "触发自动上屏的最短码长",
