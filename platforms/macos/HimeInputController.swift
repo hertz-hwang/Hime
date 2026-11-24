@@ -43,13 +43,16 @@ func himeCandidatePanelType(vertical: Bool) -> IMKCandidatePanelType {
 /// it lives in this process (`IMKUIPanel` in `NSApp.windows`) and its
 /// collection document sizes itself to the item count, so the shell finds
 /// the window hosting that view and sets its height to the document's,
-/// keeping the top edge where `show` placed it. Call this after `show`,
-/// which re-lays the panel out and resets the size every time. A panel-type
-/// switch leaves the old window behind hidden, so only visible windows
-/// qualify. The horizontal panel sizes itself to its row, so nothing is
-/// done for it; a missing panel or document (not laid out yet) leaves the
-/// panel untouched.
-func himeFitVerticalCandidatePanel(_ candidates: IMKCandidates) {
+/// holding the edge `show` had anchored to the text in place: the top edge
+/// when the panel hangs below the caret, the bottom edge when there was no
+/// room below and the panel stands above it. `caret` (the caret rectangle
+/// in global coordinates) tells the two cases apart; nil keeps the top
+/// edge. Call this after `show`, which re-lays the panel out and resets the
+/// size every time. A panel-type switch leaves the old window behind
+/// hidden, so only visible windows qualify. The horizontal panel sizes
+/// itself to its row, so nothing is done for it; a missing panel or
+/// document (not laid out yet) leaves the panel untouched.
+func himeFitVerticalCandidatePanel(_ candidates: IMKCandidates, caret: NSRect?) {
     guard candidates.panelType() == kIMKSingleColumnScrollingCandidatePanel else { return }
     for window in NSApp.windows where window.isVisible {
         guard let content = window.contentView,
@@ -57,9 +60,20 @@ func himeFitVerticalCandidatePanel(_ candidates: IMKCandidates) {
         else { continue }
         let height = document.bounds.height
         guard height > 0, abs(content.bounds.height - height) > 0.5 else { return }
-        // setContentSize keeps the window's top edge, which is where `show`
-        // anchored the panel below the text.
+        let frame = window.frame
+        // The panel edge nearer the caret is the edge `show` parked at the
+        // text; that one stays, the other one moves.
+        let keepBottomEdge: Bool
+        if let caret {
+            keepBottomEdge = abs(frame.minY - caret.maxY) < abs(caret.minY - frame.maxY)
+        } else {
+            keepBottomEdge = false
+        }
+        // setContentSize keeps the window's top edge.
         window.setContentSize(NSSize(width: content.bounds.width, height: height))
+        if keepBottomEdge {
+            window.setFrameOrigin(frame.origin)
+        }
         return
     }
 }
@@ -235,9 +249,21 @@ final class HimeInputController: IMKInputController {
             sharedCandidates.show(kIMKLocateCandidatesBelowHint)
             // The panel window exists only after the first show and `show`
             // re-lays it out at the fixed nine-row height, so the height fit
-            // has to follow it (SPEC_MACOS §3.2).
-            himeFitVerticalCandidatePanel(sharedCandidates)
+            // has to follow it; the caret rectangle tells the fit which edge
+            // `show` anchored (SPEC_MACOS §3.2).
+            himeFitVerticalCandidatePanel(sharedCandidates, caret: caretRect(from: client))
         }
+    }
+
+    /// The composition's caret line in global screen coordinates, so the
+    /// panel fit can tell a panel hanging below the text from one flipped
+    /// above it (SPEC_MACOS §3.2). Clients answering with an empty rect are
+    /// treated as unknown.
+    private func caretRect(from client: IMKTextInput) -> NSRect? {
+        let marked = client.markedRange()
+        guard marked.location != NSNotFound else { return nil }
+        let rect = client.firstRect(forCharacterRange: marked, actualRange: nil)
+        return rect == .zero ? nil : rect
     }
 
     // MARK: - Input menu
