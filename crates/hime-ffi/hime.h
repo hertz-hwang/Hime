@@ -88,7 +88,9 @@ char* hime_scan_schemes(const char* dir);
 /* Load the scheme folder at scheme_dir (an entry's "path" from
  * hime_scan_schemes): its table becomes the engine dictionary, its
  * metadata.toml values replace the engine config (that is how selecting a
- * scheme reloads its defaults; page_size survives). Live sessions keep their
+ * scheme reloads its defaults; page_size,
+ * english_punct_after_alnum and semicolon_quote_select survive). Live
+ * sessions keep their
  * ids, drop any in-progress composition, and are rebuilt for the new source,
  * so a scheme can be switched while typing (including between a 形码 and a
  * 形码整句 scheme). Initializes the engine if needed.

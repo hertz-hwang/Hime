@@ -318,8 +318,9 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 /// [`hime_scan_schemes`] `path` field): its table becomes the engine
 /// dictionary and its `metadata.toml` values become the engine
 /// configuration, replacing user changes — that is how selecting a scheme
-/// reloads the scheme defaults. `page_size` is not scheme-defined and
-/// survives. Live sessions keep their ids, drop any in-progress composition,
+/// reloads the scheme defaults. `page_size`, `english_punct_after_alnum`
+/// and `semicolon_quote_select` are not scheme-defined and survive. Live
+/// sessions keep their ids, drop any in-progress composition,
 /// and are rebuilt for the new source, so a scheme can be switched while
 /// typing (including between a 形码 and a 形码整句 scheme). The engine is
 /// initialized on demand.
