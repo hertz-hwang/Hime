@@ -24,12 +24,18 @@ struct EngineDiffSpan: Decodable {
 struct EngineCandidate: Decodable {
     /// Text committed when this candidate is selected.
     let text: String
-    /// Remaining-encoding hint (table matches only).
+    /// Short annotation the engine attaches to this entry: the remaining
+    /// coding (`~d`) for a table prefix match, the active scheme's complete
+    /// code for a 反查 result. Empty means nothing to draw.
     let comment: String
-    /// Word-separated code split behind a whole-sentence candidate.
+    /// Word-separated code split behind a whole-sentence or pinyin candidate.
     let code: String
     /// Diff runs relative to the first candidate; empty = one normal run.
     let spans: [EngineDiffSpan]
+
+    /// The annotation drawn after the text. The shell only renders it; what it
+    /// says is entirely the engine's decision (AGENTS.md §1).
+    var panelNote: String { comment }
 }
 
 /// Everything the shell needs to render after one keystroke.

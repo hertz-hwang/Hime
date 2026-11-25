@@ -26,6 +26,11 @@ protocol CandidatePanelDelegate: AnyObject {
 /// Everything the panel renders for one response.
 struct CandidatePanelModel {
     var candidates: [EngineCandidate]
+    /// Per-candidate annotation to draw behind the text, parallel to
+    /// `candidates`. The engine decides what it says: the remaining coding
+    /// (`~d`) for a prefix match, the active scheme's complete code for a 反查
+    /// result. Empty strings draw nothing.
+    var candidateNotes: [String]
     /// Zero-based focused candidate, the one Space commits.
     var focus: Int
     var codeLine: String
@@ -45,6 +50,8 @@ struct CandidatePanelMetrics {
     /// code line is the widest element.
     let innerWidth: CGFloat
     let indexWidth: CGFloat
+    /// Width of the widest candidate annotation; 0 when none has one.
+    let noteWidth: CGFloat
     let rowHeight: CGFloat
     let codeHeight: CGFloat
     let fontSize: CGFloat
@@ -62,7 +69,9 @@ struct CandidatePanelMetrics {
 
         let indexWidth = (1...9).map { himeTextWidth("\($0)", indexFont) }.max() ?? 0
         let textWidth = (model.candidates.map { himeTextWidth($0.text, textFont) }.max() ?? 0) + 2
-        let rowWidth = indexWidth + CandidatePanelConst.indexGap + textWidth
+        let noteWidth = (model.candidateNotes.map { himeTextWidth($0, codeFont) }.max() ?? 0)
+        let noteExtra = noteWidth > 0 ? noteWidth + CandidatePanelConst.indexGap : 0
+        let rowWidth = indexWidth + CandidatePanelConst.indexGap + textWidth + noteExtra
         let codeWidth = model.showCodeLine && !model.codeLine.isEmpty
             ? himeTextWidth(model.codeLine, codeFont) + CandidatePanelConst.caretWidth + 2
             : 0
@@ -86,6 +95,9 @@ struct CandidatePanelMetrics {
                 // The horizontal pill pads each candidate by 4pt on both sides.
                 row += indexWidth + CandidatePanelConst.indexGap
                     + himeTextWidth(candidate.text, textFont) + 2 + CandidatePanelConst.pillInset * 2
+                let note = index < model.candidateNotes.count ? model.candidateNotes[index] : ""
+                let width = himeTextWidth(note, codeFont)
+                if width > 0 { row += CandidatePanelConst.indexGap + width }
             }
             if footerWidth > 0 {
                 if !model.candidates.isEmpty { row += CandidatePanelConst.candidateGap }
@@ -99,6 +111,7 @@ struct CandidatePanelMetrics {
         self.size = NSSize(width: ceil(width + hpad * 2), height: ceil(height))
         self.innerWidth = width
         self.indexWidth = indexWidth
+        self.noteWidth = noteWidth
         self.rowHeight = rowHeight
         self.codeHeight = codeHeight
         self.fontSize = model.fontSize
@@ -240,6 +253,7 @@ struct CandidatePanelView: View {
         let selected = index == model.focus
         let indexColor = selected ? selectedIndexText : secondaryText
         let textColor = selected ? selectedText : primaryText
+        let note = index < model.candidateNotes.count ? model.candidateNotes[index] : ""
         return HStack(alignment: .firstTextBaseline, spacing: CandidatePanelConst.indexGap) {
             Text("\(index + 1)")
                 .font(.system(size: metrics.indexFontSize, weight: .regular))
@@ -250,6 +264,14 @@ struct CandidatePanelView: View {
                 .font(.system(size: metrics.fontSize))
                 .lineLimit(1)
                 .fixedSize()
+            if !note.isEmpty {
+                Text(note)
+                    .font(.system(size: metrics.codeFontSize, weight: .regular,
+                                  design: .monospaced))
+                    .foregroundColor(selected ? selectedIndexText : secondaryText)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
         }
     }
 
@@ -437,6 +459,7 @@ final class HimeCandidatesWindow: NSPanel {
         cancelFadeOutIfNeeded()
 
         let model = CandidatePanelModel(candidates: response.candidates,
+                                        candidateNotes: response.candidates.map(\.panelNote),
                                         focus: response.focus,
                                         codeLine: response.codeLine,
                                         showCodeLine: response.codeInWindow,

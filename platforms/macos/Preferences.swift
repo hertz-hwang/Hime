@@ -194,7 +194,10 @@ final class PreferencesModel: ObservableObject {
 
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
-    static let maxCodeLenRange = 1...16
+    /// `max_code_len` in the engine. A 全拼 scheme declares 32 (one code is
+    /// a whole pinyin run, SPEC §8.2), so the panel must be able to display
+    /// and keep it; 形码 schemes stay near 4.
+    static let maxCodeLenRange = 1...32
     static let autoCommitLengthRange = 1...16
     static let commitNextCodeRange = 0...16
     static let fontSizeRange = 14.0...28.0
