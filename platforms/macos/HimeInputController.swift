@@ -39,11 +39,22 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         }
     }
 
-    /// Losing the client takes the floating panel down. The engine keeps the
-    /// composition, so returning to this client resumes it.
+    /// A source switch (the 中/英 key), another app or another text field
+    /// takes the session away: end any standing composition through the
+    /// engine so a typed encoding is committed where it was typed instead of
+    /// dangling as Marked Text across the switch. Idle sessions answer Pass,
+    /// so this is harmless when there is nothing to commit.
     override func deactivateServer(_ sender: Any!) {
+        endComposition(sender)
         HimeCandidatesWindow.shared.hide(ifDelegate: self)
         super.deactivateServer(sender)
+    }
+
+    /// The system wants the composition session to end (a click outside the
+    /// composed text, an input-source switch): commit the encoding as typed
+    /// and clear the Marked Text (SPEC_MACOS §3.4).
+    override func commitComposition(_ sender: Any!) {
+        endComposition(sender)
     }
 
     // MARK: - Key handling
@@ -96,6 +107,23 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         return response.handled
     }
 
+    /// Ends the composition through the engine exactly as Enter would: the
+    /// raw encoding goes to the host and the Marked Text is cleared. The
+    /// engine owns whether there is anything to end, so an idle session
+    /// answers Pass and this changes nothing (SPEC_MACOS §3.3/§3.4).
+    private func endComposition(_ sender: Any?) {
+        guard let client = (sender as? IMKTextInput) ?? client() else { return }
+        sendKey(UInt32(HIME_KEY_ENTER), to: client)
+    }
+
+    /// Caps Lock (the 中/英 key) arrives as a flags-changed event in the
+    /// language-switch configuration, so the controller must receive those
+    /// as well as key-down events; the default mask is key-down only.
+    override func recognizedEvents(_ sender: Any!) -> Int {
+        let events: NSEvent.EventTypeMask = [.keyDown, .flagsChanged]
+        return Int(events.rawValue)
+    }
+
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         // Field diagnostic: the Caps Lock path is only reachable from real
         // hardware (macOS filters injected Caps Lock events), so the event
@@ -103,22 +131,24 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         if event.keyCode == capsLockKeyCode {
             NSLog("Hime: Caps Lock event type=%d capsLockFlag=%d",
                   event.type.rawValue, event.modifierFlags.contains(.capsLock) ? 1 : 0)
+            // The 中/英 switch is the system's job (ABC source switch, gated
+            // by TICapsLockLanguageSwitchCapable, SPEC_MACOS §2/§3.4) and
+            // acts on a Caps Lock event the IME did not consume. The press
+            // arrives as flags-changed when the system switches sources and
+            // as key-down when it does not; either way, close any standing
+            // composition through the engine exactly as Enter would so the
+            // typed encoding is on screen before the switch, then release
+            // the key untouched.
+            if event.type == .keyDown || event.type == .flagsChanged {
+                endComposition(sender)
+            }
+            return false
         }
         guard event.type == .keyDown,
               !event.modifierFlags.contains(.command),
               !event.modifierFlags.contains(.control)
         else { return false }
 
-        if event.keyCode == capsLockKeyCode {
-            // The 中/英 switch is the system's job (ABC source switch, gated
-            // by TICapsLockLanguageSwitchCapable, SPEC_MACOS §2/§3.4) and
-            // acts on a Caps Lock event the IME did not consume. Close any
-            // standing composition through the engine exactly as Enter would
-            // so no Marked Text dangles across a source change, then release
-            // the key untouched.
-            sendKey(UInt32(HIME_KEY_ENTER), to: sender as? IMKTextInput)
-            return false
-        }
         if event.modifierFlags.contains(.capsLock) {
             // 全大写键入 (the switch's long-press state): Caps Lock is held
             // on inside Hime, so every key belongs to the host, which inserts
