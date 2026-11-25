@@ -16,7 +16,8 @@
 // scheme switch reloads that scheme's metadata defaults into both engine
 // and panel; UserDefaults then stores the newly effective values. The
 // candidate font size is a shell rendering detail and never crosses into
-// the engine.
+// the engine. The candidate layout does cross: the key model needs it to
+// choose which arrow keys move the focused candidate.
 
 import Cocoa
 import Combine
@@ -35,6 +36,7 @@ private struct EngineConfig: Codable, Equatable {
     var englishPunctAfterAlnum: Bool
     var semicolonQuoteSelect: Bool
     var showCodeInWindow: Bool
+    var verticalCandidates: Bool
 
     enum CodingKeys: String, CodingKey {
         case pageSize = "page_size"
@@ -47,6 +49,7 @@ private struct EngineConfig: Codable, Equatable {
         case englishPunctAfterAlnum = "english_punct_after_alnum"
         case semicolonQuoteSelect = "semicolon_quote_select"
         case showCodeInWindow = "show_code_in_window"
+        case verticalCandidates = "vertical_candidates"
     }
 }
 
@@ -178,11 +181,12 @@ final class PreferencesModel: ObservableObject {
     /// Point size of the candidate text; applied when the panel renders.
     @Published var candidateFontSize: Double { didSet { persist() } }
     /// Candidate window orientation: `false` lays candidates out in a single
-    /// horizontal row, `true` stacks them in a vertical column. Like the font
-    /// size this is a pure shell rendering detail — it never crosses into the
-    /// engine; `HimeInputController` hands it to the panel on every response
-    /// (SPEC_MACOS §3.2/§5).
-    @Published var verticalCandidates: Bool { didSet { persist() } }
+    /// horizontal row, `true` stacks them in a vertical column. The engine
+    /// receives it (`vertical_candidates`) because the key model follows the
+    /// layout: horizontal candidates move focus with Left/Right, vertical
+    /// ones with Up/Down. `HimeInputController` still hands it to the panel on
+    /// every response (SPEC_MACOS §3.2/§5).
+    @Published var verticalCandidates: Bool { didSet { settingChanged() } }
 
     /// `hime_model_status` mirror for the 模型 page (SPEC §7.5); refreshed
     /// at startup, on scheme switches, on reload and when the page appears.
@@ -377,6 +381,7 @@ final class PreferencesModel: ObservableObject {
         englishPunctAfterAlnum = value(Self.englishPunctAfterAlnumKey, config.englishPunctAfterAlnum)
         semicolonQuoteSelect = value(Self.semicolonQuoteSelectKey, config.semicolonQuoteSelect)
         showCodeInWindow = value(Self.showCodeInWindowKey, config.showCodeInWindow)
+        verticalCandidates = value(Self.verticalCandidatesKey, config.verticalCandidates)
     }
 
     /// Engine call: hand the current values to hime_set_config.
@@ -397,7 +402,8 @@ final class PreferencesModel: ObservableObject {
                                   asciiPunct: asciiPunct,
                                   englishPunctAfterAlnum: englishPunctAfterAlnum,
                                   semicolonQuoteSelect: semicolonQuoteSelect,
-                                  showCodeInWindow: showCodeInWindow)
+                                  showCodeInWindow: showCodeInWindow,
+                                  verticalCandidates: verticalCandidates)
         guard let data = try? JSONEncoder().encode(config),
               let json = String(data: data, encoding: .utf8),
               let cString = json.cString(using: .utf8)

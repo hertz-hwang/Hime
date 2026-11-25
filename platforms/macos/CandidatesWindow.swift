@@ -26,6 +26,8 @@ protocol CandidatePanelDelegate: AnyObject {
 /// Everything the panel renders for one response.
 struct CandidatePanelModel {
     var candidates: [EngineCandidate]
+    /// Zero-based focused candidate, the one Space commits.
+    var focus: Int
     var codeLine: String
     var showCodeLine: Bool
     var page: Int
@@ -196,7 +198,7 @@ struct CandidatePanelView: View {
                            alignment: .leading)
                     .background(
                         Group {
-                            if index == 0 {
+                            if index == model.focus {
                                 RoundedRectangle(cornerRadius: CandidatePanelConst.cornerRadius / 2,
                                                  style: .continuous)
                                     .fill(selectedBackground)
@@ -217,7 +219,7 @@ struct CandidatePanelView: View {
                     .padding(.vertical, 2)
                     .background(
                         Group {
-                            if index == 0 {
+                            if index == model.focus {
                                 RoundedRectangle(cornerRadius: CandidatePanelConst.cornerRadius / 2,
                                                  style: .continuous)
                                     .fill(selectedBackground)
@@ -235,7 +237,7 @@ struct CandidatePanelView: View {
     }
 
     private func candidateRow(_ candidate: EngineCandidate, index: Int) -> some View {
-        let selected = index == 0
+        let selected = index == model.focus
         let indexColor = selected ? selectedIndexText : secondaryText
         let textColor = selected ? selectedText : primaryText
         return HStack(alignment: .firstTextBaseline, spacing: CandidatePanelConst.indexGap) {
@@ -435,6 +437,7 @@ final class HimeCandidatesWindow: NSPanel {
         cancelFadeOutIfNeeded()
 
         let model = CandidatePanelModel(candidates: response.candidates,
+                                        focus: response.focus,
                                         codeLine: response.codeLine,
                                         showCodeLine: response.codeInWindow,
                                         page: response.page,

@@ -44,6 +44,8 @@ struct EngineResponse: Decodable {
     /// Render `codeLine` in the candidate window instead of inline.
     let codeInWindow: Bool
     let candidates: [EngineCandidate]
+    /// Zero-based focused candidate in `candidates`; Space commits it.
+    let focus: Int
     /// One-based page number; 0 when no candidate stands.
     let page: Int
     /// Pages the retrieved window spans; 0 when no candidate stands.
@@ -56,6 +58,7 @@ struct EngineResponse: Decodable {
         case codeLine = "code_line"
         case codeInWindow = "code_in_window"
         case candidates
+        case focus
         case page
         case pageCount = "page_count"
     }

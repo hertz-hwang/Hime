@@ -2,7 +2,9 @@
 //
 // All typing state lives in the Rust engine; this class only maps NSEvent
 // keycodes to the hime-ffi key codes, renders the EngineResponse JSON
-// (commit / preedit / candidates) and owns the session lifetime.
+// (commit / preedit / candidates / focus) and owns the session lifetime.
+// Arrow keys are forwarded like any other key: the engine decides whether an
+// axis moves the candidate focus or is swallowed.
 
 import Cocoa
 import InputMethodKit
@@ -75,6 +77,10 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         case 49: return UInt32(HIME_KEY_SPACE)      // Space
         case 51: return UInt32(HIME_KEY_BACKSPACE)  // Delete (Backspace)
         case 53: return UInt32(HIME_KEY_ESCAPE)     // Escape
+        case 123: return UInt32(HIME_KEY_ARROW_LEFT)  // Left
+        case 124: return UInt32(HIME_KEY_ARROW_RIGHT) // Right
+        case 125: return UInt32(HIME_KEY_ARROW_DOWN)  // Down
+        case 126: return UInt32(HIME_KEY_ARROW_UP)    // Up
         default: break
         }
         guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first?.value
