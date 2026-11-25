@@ -217,25 +217,52 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         )
     }
 
-    /// The caret line in global screen coordinates. The end of the marked
-    /// range is where the next character goes, so the panel hangs from the
-    /// insertion point rather than from the start of the composition. Clients
-    /// answering with an empty rect are treated as unknown.
+    /// The line rectangle that anchors the candidate panel, in global screen
+    /// coordinates. `attributes(forCharacterIndex:lineHeightRectangle:)` is
+    /// the IMKit API meant for candidate placement: the index is relative to
+    /// the inline session, so 0 is the start of the composition. Unlike the
+    /// end-of-range `firstRect` call, browsers answer it with a usable screen
+    /// rect, and the line start stays put while the encoding grows, so the
+    /// panel does not slide with every keystroke.
+    ///
+    /// The rect's origin is the line's lower-left edge. Clients that cannot
+    /// provide it fall back to `firstRect`; rects outside the plausible range
+    /// are rejected so a host's uninitialised answer cannot park the panel in
+    /// a corner.
     private func caretRect(from client: IMKTextInput) -> NSRect? {
+        var lineRect = NSRect.zero
+        _ = client.attributes(forCharacterIndex: 0, lineHeightRectangle: &lineRect)
+        if Self.isUsableCaretRect(lineRect) {
+            return lineRect
+        }
+
         let marked = client.markedRange()
         if marked.location != NSNotFound {
             let end = NSRange(location: marked.location + marked.length, length: 0)
             let rect = client.firstRect(forCharacterRange: end, actualRange: nil)
-            if rect != .zero { return rect }
+            if Self.isUsableCaretRect(rect) { return rect }
             let head = client.firstRect(forCharacterRange: marked, actualRange: nil)
-            if head != .zero { return head }
+            if Self.isUsableCaretRect(head) { return head }
         }
         let selection = client.selectedRange()
         if selection.location != NSNotFound {
             let rect = client.firstRect(forCharacterRange: selection, actualRange: nil)
-            if rect != .zero { return rect }
+            if Self.isUsableCaretRect(rect) { return rect }
         }
         return nil
+    }
+
+    /// A line-height rectangle has at least a point of height and finite,
+    /// screen-scale coordinates. Chromium has returned uninitialised structs
+    /// from `firstRectForCharacterRange:` (a near-zero width with a huge or
+    /// negative height); those must not reach the placement code.
+    private static func isUsableCaretRect(_ rect: NSRect) -> Bool {
+        rect != .zero
+            && rect.origin.x.isFinite && rect.origin.y.isFinite
+            && rect.size.width.isFinite && rect.size.height.isFinite
+            && rect.size.height >= 1
+            && abs(rect.origin.x) < 100_000
+            && abs(rect.origin.y) < 100_000
     }
 
     // MARK: - Input menu
