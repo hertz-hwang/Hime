@@ -3,10 +3,11 @@
 // `IMKCandidates` cannot show a code line, per-candidate diff colors or an
 // animated size change, so the shell owns a small borderless panel instead.
 // The Rust engine still decides everything about the content: this file only
-// lays out the EngineResponse, colors its spans and animates the window frame
-// when the candidate count changes.
+// lays out the EngineResponse, colors its spans, follows the live caret with
+// an ease-out motion and cross-fades the frame between content sizes.
 
 import Cocoa
+import QuartzCore
 import SwiftUI
 
 /// Commands a mouse click in the panel sends back through the engine. The
@@ -16,6 +17,10 @@ protocol CandidatePanelDelegate: AnyObject {
     func candidatePanelDidSelect(_ index: Int)
     /// Page control click: -1 previous page, +1 next page.
     func candidatePanelDidPage(_ direction: Int)
+    /// Caret line in global screen coordinates, asked while the panel is
+    /// visible so it can follow scrolling, window moves and focus changes
+    /// without waiting for the next keystroke. Nil keeps the current spot.
+    func candidatePanelCaret() -> NSRect?
 }
 
 /// Everything the panel renders for one response.
@@ -333,24 +338,46 @@ struct CandidatePanelView: View {
 }
 
 /// The floating candidate window: a borderless, non-activating panel that
-/// follows the caret and animates size changes with a fading snapshot of the
-/// previous content.
+/// follows the caret in real time and animates every move and size change.
 final class HimeCandidatesWindow: NSPanel {
     static let shared = HimeCandidatesWindow(contentRect: .zero)
 
     weak var panelDelegate: CandidatePanelDelegate?
 
     private let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
-    /// Last anchored top-left and frame, so a re-render that changes neither
-    /// costs no layout.
+    /// Last requested top-left and frame, so a caret or content update that
+    /// changes neither costs no layout.
     private var lastPin: (topLeft: NSPoint, frame: NSRect)?
-    private var frameToken = 0
+    /// Size and alignment of the content currently rendered, used to place
+    /// the panel between keystrokes without rebuilding the view.
+    private var panelModel: CandidatePanelModel?
+    private var panelMetrics: CandidatePanelMetrics?
+    private var panelAlignment: Alignment = .topLeading
     private var alphaToken = 0
     private var isFadingOut = false
     private var ghostImageView: NSImageView?
 
+    /// Timer that polls the caret while the panel is visible and advances the
+    /// frame animation; it exists only for the lifetime of one visible panel.
+    private var trackingTimer: Timer?
+    private var tickCount = 0
+    private var motion: FrameMotion?
+
+    private struct FrameMotion {
+        let from: NSRect
+        let to: NSRect
+        let start: CFTimeInterval
+        let duration: CFTimeInterval
+    }
+
+    private static let tickInterval: TimeInterval = 1.0 / 60
+    /// Poll the host at 30 Hz; the frame is still advanced every tick, so the
+    /// window moves smoothly while the caret rect is sampled at a rate that
+    /// stays cheap for cross-process clients.
+    private static let caretPollStride = 2
     private static let glideDuration: CFTimeInterval = 0.12
     private static let resizeDuration: CFTimeInterval = 0.15
+    private static let followTolerance: CGFloat = 0.5
     private static let fadeInDuration: CFTimeInterval = 0.13
     private static let fadeOutDuration: CFTimeInterval = 0.12
     private static let fallbackLineHeight: CGFloat = 16
@@ -372,6 +399,10 @@ final class HimeCandidatesWindow: NSPanel {
         let container = NSView(frame: .zero)
         container.wantsLayer = true
         container.layer?.masksToBounds = true
+        // The frame is owned here; the content must not impose a minimum
+        // window size when it grows, otherwise the live resize animation
+        // would clamp to the final size on its first step.
+        hostingView.sizingOptions = []
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(hostingView)
         NSLayoutConstraint.activate([
@@ -392,7 +423,9 @@ final class HimeCandidatesWindow: NSPanel {
 
     /// Render one response. The caller supplies the caret line in global
     /// coordinates; the panel hangs below it, or above it when there is no
-    /// room, and clamps into the screen.
+    /// room, and clamps into the screen. While visible, the panel keeps
+    /// polling the caret so scrolls, window moves and focus changes move it
+    /// even without a keystroke.
     func show(_ response: EngineResponse,
               caret: NSRect?,
               vertical: Bool,
@@ -414,53 +447,51 @@ final class HimeCandidatesWindow: NSPanel {
             return
         }
         let placement = Self.placement(caret: caret, size: metrics.size)
-        let newFrame = NSRect(x: placement.topLeft.x,
-                              y: placement.topLeft.y - metrics.size.height,
-                              width: metrics.size.width,
-                              height: metrics.size.height)
-
-        let view = CandidatePanelView(
-            model: model,
-            metrics: metrics,
-            alignment: placement.alignment,
-            onSelect: { [weak self] index in self?.panelDelegate?.candidatePanelDidSelect(index) },
-            onPage: { [weak self] direction in self?.panelDelegate?.candidatePanelDidPage(direction) }
-        )
-
+        let newFrame = Self.frame(topLeft: placement.topLeft, size: metrics.size)
+        let wasVisible = isVisible
+        let previousSize = panelMetrics?.size ?? frame.size
         let needsPlace = lastPin == nil
-            || !isVisible
-            || lastPin!.topLeft != placement.topLeft
-            || lastPin!.frame != newFrame
-            || newFrame.size != frame.size
-        let willResize = needsPlace && isVisible && newFrame.size != frame.size
+            || !wasVisible
+            || !Self.nearlySame(lastPin!.topLeft, placement.topLeft)
+            || lastPin!.frame.size != newFrame.size
+        let willResize = needsPlace && wasVisible && newFrame.size != previousSize
+
         // Snapshot the outgoing content before the root view is replaced.
         let ghost = willResize ? snapshotContent() : nil
+        let view = makePanelView(model: model, metrics: metrics, alignment: placement.alignment)
+        panelModel = model
+        panelMetrics = metrics
+        panelAlignment = placement.alignment
         hostingView.rootView = AnyView(view)
 
-        guard needsPlace else { return }
-        let wasVisible = isVisible
-        lastPin = (placement.topLeft, newFrame)
-        if !wasVisible {
-            placeWithoutAnimation(newFrame)
-            alphaValue = 0
-            orderFront(nil)
-            fadeIn()
-        } else if newFrame.size == frame.size {
-            animateFrame(to: newFrame, duration: Self.glideDuration)
-        } else if let ghost {
-            animateFrame(to: newFrame, duration: Self.resizeDuration)
-            showGhost(ghost, alignment: placement.alignment, duration: Self.resizeDuration)
-        } else {
-            // A failed snapshot must not leave the frame out of step with the
-            // content: jump instead.
-            placeWithoutAnimation(newFrame)
+        if needsPlace {
+            lastPin = (placement.topLeft, newFrame)
+            if !wasVisible {
+                snap(to: newFrame)
+                alphaValue = 0
+                orderFront(nil)
+                fadeIn()
+            } else if newFrame.size != previousSize {
+                if let ghost {
+                    retarget(to: newFrame, duration: Self.resizeDuration)
+                    showGhost(ghost, alignment: placement.alignment,
+                              duration: Self.resizeDuration)
+                } else {
+                    // A failed snapshot must not leave the frame out of step
+                    // with the content: jump instead.
+                    snap(to: newFrame)
+                }
+            } else {
+                retarget(to: newFrame, duration: Self.glideDuration)
+            }
         }
+        startTracking()
     }
 
     /// Fade the panel out and take it off screen. Safe to call when hidden.
     func hide() {
         lastPin = nil
-        frameToken += 1
+        stopTracking()
         clearGhost()
         guard isVisible, !isFadingOut else { return }
         isFadingOut = true
@@ -533,33 +564,128 @@ final class HimeCandidatesWindow: NSPanel {
                          alignment: alignment)
     }
 
-    // MARK: - Frame animation
+    // MARK: - Live caret tracking
 
-    private func animateFrame(to newFrame: NSRect, duration: CFTimeInterval) {
-        frameToken += 1
-        let token = frameToken
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            context.allowsImplicitAnimation = true
-            self.animator().setFrame(newFrame, display: true)
-        }, completionHandler: { [weak self] in
-            guard let self, self.frameToken == token else { return }
-        })
+    /// One timer drives both jobs while the panel is visible: it asks the
+    /// controller for the caret at 30 Hz and advances the frame toward the
+    /// latest target on every 60 Hz tick.
+    private func startTracking() {
+        guard isVisible, trackingTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.tickInterval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trackingTimer = timer
+        tickCount = 0
     }
 
-    /// Stop any in-flight frame animation before jumping: a plain `setFrame`
-    /// does not cancel an `animator()` animation, so a fast next keystroke
-    /// could otherwise be pulled back to the previous target.
-    private func placeWithoutAnimation(_ newFrame: NSRect) {
-        frameToken += 1
-        clearGhost()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-            self.animator().setFrame(self.frame, display: false)
+    private func stopTracking() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        motion = nil
+    }
+
+    private func tick() {
+        let now = CACurrentMediaTime()
+        if isVisible && !isFadingOut {
+            tickCount += 1
+            if tickCount % Self.caretPollStride == 0 {
+                followCaret()
+            }
         }
+        advanceMotion(at: now)
+    }
+
+    /// Re-place the panel at the current caret. A changed alignment only
+    /// matters while the frame is between two sizes, so the content is
+    /// repinned to the caret-facing corner when it flips.
+    private func followCaret() {
+        guard let caret = panelDelegate?.candidatePanelCaret(),
+              caret != .zero,
+              let metrics = panelMetrics,
+              let pin = lastPin
+        else { return }
+        let placement = Self.placement(caret: caret, size: metrics.size)
+        guard !Self.nearlySame(pin.topLeft, placement.topLeft) else { return }
+        let newFrame = Self.frame(topLeft: placement.topLeft, size: metrics.size)
+        lastPin = (placement.topLeft, newFrame)
+        updateAlignment(placement.alignment)
+        retarget(to: newFrame, duration: Self.glideDuration)
+    }
+
+    /// Repin the rendered content (and any in-flight size change) to the edge
+    /// facing the caret.
+    private func updateAlignment(_ alignment: Alignment) {
+        guard alignment != panelAlignment,
+              let model = panelModel,
+              let metrics = panelMetrics
+        else { return }
+        panelAlignment = alignment
+        hostingView.rootView = AnyView(
+            makePanelView(model: model, metrics: metrics, alignment: alignment)
+        )
+    }
+
+    // MARK: - Frame motion
+
+    /// Jump to a frame immediately, dropping any in-flight motion and ghost.
+    private func snap(to newFrame: NSRect) {
+        motion = nil
+        clearGhost()
         setFrame(newFrame, display: false)
+    }
+
+    /// Start an ease-out motion from the current frame. A retarget mid-flight
+    /// continues from where the window is drawn, so fast caret updates cannot
+    /// yank it back to an older target.
+    private func retarget(to newFrame: NSRect, duration: CFTimeInterval) {
+        guard frame != newFrame else {
+            motion = nil
+            return
+        }
+        motion = FrameMotion(from: frame, to: newFrame,
+                             start: CACurrentMediaTime(), duration: duration)
+    }
+
+    private func advanceMotion(at now: CFTimeInterval) {
+        guard let motion else { return }
+        let progress = motion.duration > 0
+            ? min(max((now - motion.start) / motion.duration, 0), 1)
+            : 1
+        let inverse = 1 - CGFloat(progress)
+        let eased = 1 - inverse * inverse * inverse
+        var next = NSRect(
+            x: motion.from.origin.x + (motion.to.origin.x - motion.from.origin.x) * eased,
+            y: motion.from.origin.y + (motion.to.origin.y - motion.from.origin.y) * eased,
+            width: motion.from.width + (motion.to.width - motion.from.width) * eased,
+            height: motion.from.height + (motion.to.height - motion.from.height) * eased
+        )
+        if progress >= 1 {
+            next = motion.to
+            self.motion = nil
+        }
+        guard next != frame else { return }
+        setFrame(next, display: true)
+    }
+
+    private static func frame(topLeft: NSPoint, size: NSSize) -> NSRect {
+        NSRect(x: topLeft.x, y: topLeft.y - size.height, width: size.width, height: size.height)
+    }
+
+    private static func nearlySame(_ a: NSPoint, _ b: NSPoint) -> Bool {
+        abs(a.x - b.x) < followTolerance && abs(a.y - b.y) < followTolerance
+    }
+
+    private func makePanelView(model: CandidatePanelModel,
+                               metrics: CandidatePanelMetrics,
+                               alignment: Alignment) -> CandidatePanelView {
+        CandidatePanelView(
+            model: model,
+            metrics: metrics,
+            alignment: alignment,
+            onSelect: { [weak self] index in self?.panelDelegate?.candidatePanelDidSelect(index) },
+            onPage: { [weak self] direction in self?.panelDelegate?.candidatePanelDidPage(direction) }
+        )
     }
 
     private func fadeIn() {

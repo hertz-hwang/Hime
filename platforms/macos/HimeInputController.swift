@@ -274,4 +274,11 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         let key = direction < 0 ? pageUpKeyCode : pageDownKeyCode
         sendKey(key, to: client())
     }
+
+    /// The panel polls this while visible so it follows scrolling, window
+    /// moves and focus changes between keystrokes. Nil = no known caret.
+    func candidatePanelCaret() -> NSRect? {
+        guard let client = client() else { return nil }
+        return caretRect(from: client)
+    }
 }
