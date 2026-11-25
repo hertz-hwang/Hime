@@ -34,6 +34,7 @@ private struct EngineConfig: Codable, Equatable {
     var asciiPunct: Int
     var englishPunctAfterAlnum: Bool
     var semicolonQuoteSelect: Bool
+    var showCodeInWindow: Bool
 
     enum CodingKeys: String, CodingKey {
         case pageSize = "page_size"
@@ -45,6 +46,7 @@ private struct EngineConfig: Codable, Equatable {
         case asciiPunct = "ascii_punct"
         case englishPunctAfterAlnum = "english_punct_after_alnum"
         case semicolonQuoteSelect = "semicolon_quote_select"
+        case showCodeInWindow = "show_code_in_window"
     }
 }
 
@@ -170,13 +172,16 @@ final class PreferencesModel: ObservableObject {
     /// `;` / `'` select the 2nd / 3rd candidate while one stands
     /// (`semicolon_quote_select`).
     @Published var semicolonQuoteSelect: Bool { didSet { settingChanged() } }
-    /// Point size of the IMKCandidates text; applied at render time.
+    /// Show the encoding in the candidate window (`show_code_in_window`)
+    /// instead of inline in the input field.
+    @Published var showCodeInWindow: Bool { didSet { settingChanged() } }
+    /// Point size of the candidate text; applied when the panel renders.
     @Published var candidateFontSize: Double { didSet { persist() } }
     /// Candidate window orientation: `false` lays candidates out in a single
     /// horizontal row, `true` stacks them in a vertical column. Like the font
     /// size this is a pure shell rendering detail — it never crosses into the
-    /// engine; `HimeInputController` maps it to the `IMKCandidates` panel type
-    /// whenever candidates are shown (SPEC_MACOS §3.2/§5).
+    /// engine; `HimeInputController` hands it to the panel on every response
+    /// (SPEC_MACOS §3.2/§5).
     @Published var verticalCandidates: Bool { didSet { persist() } }
 
     /// `hime_model_status` mirror for the 模型 page (SPEC §7.5); refreshed
@@ -198,6 +203,7 @@ final class PreferencesModel: ObservableObject {
     private static let asciiPunctKey = "engineAsciiPunct"
     private static let englishPunctAfterAlnumKey = "engineEnglishPunctAfterAlnum"
     private static let semicolonQuoteSelectKey = "engineSemicolonQuoteSelect"
+    private static let showCodeInWindowKey = "engineShowCodeInWindow"
     private static let schemeDirKey = "schemeDir"
     private static let fontSizeKey = "candidateFontSize"
     private static let verticalCandidatesKey = "candidatePanelVertical"
@@ -227,6 +233,7 @@ final class PreferencesModel: ObservableObject {
         asciiPunct = 0
         englishPunctAfterAlnum = false
         semicolonQuoteSelect = false
+        showCodeInWindow = false
         candidateFontSize = defaults.object(forKey: Self.fontSizeKey) as? Double ?? 16
         verticalCandidates = defaults.object(forKey: Self.verticalCandidatesKey) as? Bool ?? false
     }
@@ -369,6 +376,7 @@ final class PreferencesModel: ObservableObject {
         asciiPunct = value(Self.asciiPunctKey, config.asciiPunct)
         englishPunctAfterAlnum = value(Self.englishPunctAfterAlnumKey, config.englishPunctAfterAlnum)
         semicolonQuoteSelect = value(Self.semicolonQuoteSelectKey, config.semicolonQuoteSelect)
+        showCodeInWindow = value(Self.showCodeInWindowKey, config.showCodeInWindow)
     }
 
     /// Engine call: hand the current values to hime_set_config.
@@ -388,7 +396,8 @@ final class PreferencesModel: ObservableObject {
                                   commitNextCode: commitNextCode,
                                   asciiPunct: asciiPunct,
                                   englishPunctAfterAlnum: englishPunctAfterAlnum,
-                                  semicolonQuoteSelect: semicolonQuoteSelect)
+                                  semicolonQuoteSelect: semicolonQuoteSelect,
+                                  showCodeInWindow: showCodeInWindow)
         guard let data = try? JSONEncoder().encode(config),
               let json = String(data: data, encoding: .utf8),
               let cString = json.cString(using: .utf8)
@@ -407,6 +416,7 @@ final class PreferencesModel: ObservableObject {
         defaults.set(asciiPunct, forKey: Self.asciiPunctKey)
         defaults.set(englishPunctAfterAlnum, forKey: Self.englishPunctAfterAlnumKey)
         defaults.set(semicolonQuoteSelect, forKey: Self.semicolonQuoteSelectKey)
+        defaults.set(showCodeInWindow, forKey: Self.showCodeInWindowKey)
         defaults.set(schemeDir, forKey: Self.schemeDirKey)
         defaults.set(candidateFontSize, forKey: Self.fontSizeKey)
         defaults.set(verticalCandidates, forKey: Self.verticalCandidatesKey)
@@ -654,6 +664,9 @@ private struct BasicView: View {
                                hint: "每页候选数，数字键 1-N 选词",
                                value: $model.pageSize,
                                range: PreferencesModel.pageSizeRange)
+                    switchRow(title: "候选窗显示输入码",
+                              hint: "关闭时输入码内嵌在输入框内",
+                              isOn: $model.showCodeInWindow)
                     LabeledContent("候选排列") {
                         Picker("候选排列", selection: $model.verticalCandidates) {
                             Text("横排").tag(false)

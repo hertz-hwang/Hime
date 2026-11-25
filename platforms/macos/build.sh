@@ -40,6 +40,8 @@ swiftc \
     -import-objc-header "${BRIDGE_HEADER}" \
     -o "${CONTENTS}/MacOS/${APP_NAME}" \
     "${SCRIPT_DIR}/main.swift" \
+    "${SCRIPT_DIR}/EngineTypes.swift" \
+    "${SCRIPT_DIR}/CandidatesWindow.swift" \
     "${SCRIPT_DIR}/HimeInputController.swift" \
     "${SCRIPT_DIR}/Preferences.swift" \
     -framework Cocoa \

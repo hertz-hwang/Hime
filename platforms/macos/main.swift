@@ -4,18 +4,15 @@
 // the user data folder (SPEC §5.2): the data folders are created, the
 // persisted model override is replayed, then the selected scheme's table and
 // metadata defaults come up and the persisted preferences are applied. Only
-// after that the IMKServer and the shared candidate panel are created, and
-// the run loop spins. The process stays alive as an IMK server (LSUIElement:
-// no Dock icon, but it can show the preferences window).
+// after that the IMKServer is created and the run loop spins. The process
+// stays alive as an IMK server (LSUIElement: no Dock icon, but it can show
+// the preferences window).
 
 import Cocoa
 import InputMethodKit
 
 let connectionName = "Hime_1_Connection"
 let bundleIdentifier = "com.hime.inputmethod.Hime"
-
-// Shared candidate panel used by every HimeInputController instance.
-var sharedCandidates: IMKCandidates!
 
 guard let schemesDir = Bundle.main.path(forResource: "schemes", ofType: nil) else {
     fputs("Hime: schemes/ not found in bundle Resources\n", stderr)
@@ -40,15 +37,6 @@ guard server != nil else {
     fputs("Hime: failed to create IMKServer (\(connectionName))\n", stderr)
     exit(1)
 }
-
-sharedCandidates = IMKCandidates(server: server,
-                                 panelType: himeCandidatePanelType(
-                                    vertical: PreferencesModel.shared.verticalCandidates))
-// Route keystrokes to the controller (that is, to the Rust engine) before the
-// panel sees them. By default the panel takes key events first and commits its
-// own selection-key choice itself, which would leave the engine composing a
-// stale encoding.
-sharedCandidates.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
 
 // Startup banner: identifies the running build and proves the os_log path
 // works — the Caps Lock field diagnostics (HimeInputController) depend on it.

@@ -7,100 +7,23 @@
 import Cocoa
 import InputMethodKit
 
-// JSON mirror of hime-core's EngineResponse (SPEC §2.2).
-private struct Candidate: Decodable {
-    let text: String
-    let comment: String
-}
-
-private struct EngineResponse: Decodable {
-    let handled: Bool
-    let commitText: String?
-    let preedit: String
-    let candidates: [Candidate]
-
-    enum CodingKeys: String, CodingKey {
-        case handled
-        case commitText = "commit_text"
-        case preedit
-        case candidates
-    }
-}
-
-/// Maps the preferred candidate orientation to the `IMKCandidates` panel type
-/// (SPEC_MACOS §3.2): vertical stacks the candidates in one scrolling column
-/// with the selection keys down the left edge; horizontal lays them out in a
-/// single stepping row, which is the default and the shipped behavior.
-func himeCandidatePanelType(vertical: Bool) -> IMKCandidatePanelType {
-    vertical ? kIMKSingleColumnScrollingCandidatePanel
-             : kIMKSingleRowSteppingCandidatePanel
-}
-
-/// Resizes the vertical candidate panel to the height of the candidates it
-/// actually holds (SPEC_MACOS §3.2): `IMKCandidates` lays its single-column
-/// panel out at a fixed nine-row height, so a short page leaves the panel
-/// mostly empty. The panel window is not reachable through public API, but
-/// it lives in this process (`IMKUIPanel` in `NSApp.windows`) and its
-/// collection document sizes itself to the item count, so the shell finds
-/// the window hosting that view and sets its height to the document's,
-/// holding the edge `show` had anchored to the text in place: the top edge
-/// when the panel hangs below the caret, the bottom edge when there was no
-/// room below and the panel stands above it. `caret` (the caret rectangle
-/// in global coordinates) tells the two cases apart; nil keeps the top
-/// edge. Call this after `show`, which re-lays the panel out and resets the
-/// size every time. A panel-type switch leaves the old window behind
-/// hidden, so only visible windows qualify. The horizontal panel sizes
-/// itself to its row, so nothing is done for it; a missing panel or
-/// document (not laid out yet) leaves the panel untouched.
-func himeFitVerticalCandidatePanel(_ candidates: IMKCandidates, caret: NSRect?) {
-    guard candidates.panelType() == kIMKSingleColumnScrollingCandidatePanel else { return }
-    for window in NSApp.windows where window.isVisible {
-        guard let content = window.contentView,
-              let document = himeFindView(suffixed: "IMKUICandidateCollectionDocumentView", in: content)
-        else { continue }
-        let height = document.bounds.height
-        guard height > 0, abs(content.bounds.height - height) > 0.5 else { return }
-        let frame = window.frame
-        // The panel edge nearer the caret is the edge `show` parked at the
-        // text; that one stays, the other one moves.
-        let keepBottomEdge: Bool
-        if let caret {
-            keepBottomEdge = abs(frame.minY - caret.maxY) < abs(caret.minY - frame.maxY)
-        } else {
-            keepBottomEdge = false
-        }
-        // setContentSize keeps the window's top edge.
-        window.setContentSize(NSSize(width: content.bounds.width, height: height))
-        if keepBottomEdge {
-            window.setFrameOrigin(frame.origin)
-        }
-        return
-    }
-}
-
-/// Depth-first search for a private AppKit view by class-name suffix (the
-/// candidate views have no public class to match on).
-private func himeFindView(suffixed suffix: String, in view: NSView) -> NSView? {
-    for sub in view.subviews {
-        if String(describing: type(of: sub)).hasSuffix(suffix) { return sub }
-        if let deep = himeFindView(suffixed: suffix, in: sub) { return deep }
-    }
-    return nil
-}
-
 @objc(HimeInputController)
-final class HimeInputController: IMKInputController {
+final class HimeInputController: IMKInputController, CandidatePanelDelegate {
     /// ASCII codes the engine maps onto candidate indexes 0-8 (SPEC §3:
     /// digits `1`-`N` select candidates on the current page, `N` being the
     /// configured page size, at most 9). A finished mouse selection is
     /// replayed to the engine as the matching digit.
     private let digitKeyCode: [UInt32] = Array(49...57) // "1" ... "9"
 
+    /// Paging keys, replayed when the candidate window's page control is
+    /// clicked (SPEC §2.1: `-` up, `=` down).
+    private let pageUpKeyCode: UInt32 = 45 // "-"
+    private let pageDownKeyCode: UInt32 = 61 // "="
+
     /// macOS Caps Lock — the 中/英 key of Chinese keyboards (SPEC_MACOS §3.4).
     private let capsLockKeyCode: UInt16 = 57
 
     private var sessionId: UInt64 = 0
-    private var currentCandidates: [Candidate] = []
 
     // MARK: - Lifecycle
 
@@ -110,9 +33,17 @@ final class HimeInputController: IMKInputController {
     }
 
     deinit {
+        HimeCandidatesWindow.shared.hide(ifDelegate: self)
         if sessionId != 0 {
             hime_destroy_session(sessionId)
         }
+    }
+
+    /// Losing the client takes the floating panel down. The engine keeps the
+    /// composition, so returning to this client resumes it.
+    override func deactivateServer(_ sender: Any!) {
+        HimeCandidatesWindow.shared.hide(ifDelegate: self)
+        super.deactivateServer(sender)
     }
 
     // MARK: - Key handling
@@ -161,7 +92,6 @@ final class HimeInputController: IMKInputController {
         }
         defer { hime_free_string(jsonPtr) }
         guard let response = parseResponse(String(cString: jsonPtr)) else { return false }
-        currentCandidates = response.candidates
         render(response, to: client)
         return response.handled
     }
@@ -223,52 +153,59 @@ final class HimeInputController: IMKInputController {
         if let commit = response.commitText, !commit.isEmpty {
             client.insertText(commit, replacementRange: notFound)
         }
-        if response.preedit.isEmpty {
-            client.setMarkedText("", selectionRange: NSRange(location: 0, length: 0),
-                                 replacementRange: notFound)
-        } else {
-            client.setMarkedText(response.preedit,
-                                 selectionRange: NSRange(location: response.preedit.count, length: 0),
-                                 replacementRange: notFound)
-        }
-        if response.candidates.isEmpty {
-            sharedCandidates.hide()
-        } else {
-            // The panel type is fixed at creation, so a change of the
-            // orientation preference is re-cut here before the panel refreshes
-            // (SPEC_MACOS §3.2); only an actual change touches setPanelType.
-            let wantedPanelType =
-                himeCandidatePanelType(vertical: PreferencesModel.shared.verticalCandidates)
-            if sharedCandidates.panelType() != wantedPanelType {
-                sharedCandidates.setPanelType(wantedPanelType)
+        if response.codeInWindow {
+            // Non-embedded preedit: the code lives in the candidate window.
+            // A one-space marked range keeps the host reporting a caret for
+            // placing that window; the composition itself stays in Rust.
+            if response.preedit.isEmpty {
+                client.setMarkedText("", selectionRange: NSRange(location: 0, length: 0),
+                                     replacementRange: notFound)
+            } else {
+                client.setMarkedText(" ", selectionRange: NSRange(location: 0, length: 1),
+                                     replacementRange: notFound)
             }
-            // The preferences window owns the candidate font size; merging it
-            // into the style attributes (which also carry the key-routing flag
-            // set at startup) on every render lets a change show up as soon
-            // as the panel updates.
-            var attributes = sharedCandidates.attributes() ?? [:]
-            attributes[NSAttributedString.Key.font] =
-                NSFont.systemFont(ofSize: PreferencesModel.shared.candidateFontSize)
-            sharedCandidates.setAttributes(attributes)
-            sharedCandidates.update()
-            sharedCandidates.show(kIMKLocateCandidatesBelowHint)
-            // The panel window exists only after the first show and `show`
-            // re-lays it out at the fixed nine-row height, so the height fit
-            // has to follow it; the caret rectangle tells the fit which edge
-            // `show` anchored (SPEC_MACOS §3.2).
-            himeFitVerticalCandidatePanel(sharedCandidates, caret: caretRect(from: client))
+        } else {
+            // The display line may be the top candidate's word-separated
+            // split; the raw encoding remains the engine's own state.
+            let display = response.codeLine.isEmpty ? response.preedit : response.codeLine
+            client.setMarkedText(display,
+                                 selectionRange: NSRange(location: display.utf16.count, length: 0),
+                                 replacementRange: notFound)
         }
+
+        let showsCode = response.codeInWindow && !response.codeLine.isEmpty
+        guard !response.candidates.isEmpty || showsCode else {
+            HimeCandidatesWindow.shared.hide()
+            return
+        }
+        HimeCandidatesWindow.shared.show(
+            response,
+            caret: caretRect(from: client),
+            vertical: PreferencesModel.shared.verticalCandidates,
+            fontSize: CGFloat(PreferencesModel.shared.candidateFontSize),
+            delegate: self
+        )
     }
 
-    /// The composition's caret line in global screen coordinates, so the
-    /// panel fit can tell a panel hanging below the text from one flipped
-    /// above it (SPEC_MACOS §3.2). Clients answering with an empty rect are
-    /// treated as unknown.
+    /// The caret line in global screen coordinates. The end of the marked
+    /// range is where the next character goes, so the panel hangs from the
+    /// insertion point rather than from the start of the composition. Clients
+    /// answering with an empty rect are treated as unknown.
     private func caretRect(from client: IMKTextInput) -> NSRect? {
         let marked = client.markedRange()
-        guard marked.location != NSNotFound else { return nil }
-        let rect = client.firstRect(forCharacterRange: marked, actualRange: nil)
-        return rect == .zero ? nil : rect
+        if marked.location != NSNotFound {
+            let end = NSRange(location: marked.location + marked.length, length: 0)
+            let rect = client.firstRect(forCharacterRange: end, actualRange: nil)
+            if rect != .zero { return rect }
+            let head = client.firstRect(forCharacterRange: marked, actualRange: nil)
+            if head != .zero { return head }
+        }
+        let selection = client.selectedRange()
+        if selection.location != NSNotFound {
+            let rect = client.firstRect(forCharacterRange: selection, actualRange: nil)
+            if rect != .zero { return rect }
+        }
+        return nil
     }
 
     // MARK: - Input menu
@@ -294,23 +231,17 @@ final class HimeInputController: IMKInputController {
 
     // MARK: - Candidate panel
 
-    override func candidates(_ sender: Any!) -> [Any]! {
-        currentCandidates.map { $0.text }
+    /// A click in the panel is a mouse selection, not a key event: replay it
+    /// to the engine as the matching digit so the Rust session stays the only
+    /// owner of the composition.
+    func candidatePanelDidSelect(_ index: Int) {
+        guard index >= 0, index < digitKeyCode.count else { return }
+        sendKey(digitKeyCode[index], to: client())
     }
 
-    /// The panel reports a finished mouse selection here, without a key event.
-    /// Replay it to the engine as the matching digit instead of letting the
-    /// IMK base class commit text, so the Rust session stays the only owner of
-    /// the composition.
-    override func candidateSelected(_ candidateString: NSAttributedString!) {
-        let text = candidateString?.string
-        guard let index = currentCandidates.firstIndex(where: { $0.text == text }),
-              index < digitKeyCode.count
-        else {
-            NSLog("Hime: selected candidate %@ is not in the current list",
-                  candidateString?.string ?? "<nil>")
-            return
-        }
-        sendKey(digitKeyCode[index], to: client())
+    /// The page control replays the engine's paging keys.
+    func candidatePanelDidPage(_ direction: Int) {
+        let key = direction < 0 ? pageUpKeyCode : pageDownKeyCode
+        sendKey(key, to: client())
     }
 }
