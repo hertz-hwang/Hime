@@ -1,4 +1,4 @@
-//! Whole-sentence beam search (port of Fire's `SentenceDecoder`).
+//! Whole-sentence beam search (port of the reference `SentenceDecoder`).
 //!
 //! The key stream is a chain of shape-code words. A *word graph* (`lexicon`)
 //! says which words start at each position; this decoder walks the stream left
@@ -6,7 +6,7 @@
 //! the [`crate::ngram`] model, and returns the highest-scoring complete
 //! sentences.
 //!
-//! Faithful to Fire's deterministic core, which is what 形码整句 is:
+//! Faithful to the reference deterministic core, which is what 形码整句 is:
 //!
 //! - same-text states merge their probability mass (`massScore`) by
 //!   log-sum-exp, while the kept representative is chosen by max-rank, then
@@ -17,7 +17,7 @@
 //!   keeps lexicon order; only multi-word segmentations are re-ranked by score;
 //! - candidates are scored to the end with an EOS transition.
 //!
-//! Deferred, exactly as gated off in Fire when there is no user data (each is
+//! Deferred, exactly as gated off in the reference when there is no user data (each is
 //! an additive score term that reduces to these code paths when inactive): the
 //! learning channels (session cache / user n-gram / correction), the
 //! Aho-Corasick supplement, the per-session incremental lattice (latency only
@@ -89,7 +89,7 @@ fn logsumexp(left: f64, right: f64) -> f64 {
 }
 
 /// Kept-representative rule for two same-text states: lower max-rank wins, then
-/// higher score, then fewer edges (Fire `duplicateBetter`).
+/// higher score, then fewer edges (reference `duplicateBetter`).
 fn duplicate_better(item: &SentenceState, previous: &SentenceState) -> bool {
     if item.max_rank != previous.max_rank {
         return item.max_rank < previous.max_rank;
@@ -101,7 +101,7 @@ fn duplicate_better(item: &SentenceState, previous: &SentenceState) -> bool {
 }
 
 /// Score-first ordering (segmented paths): score, then max-rank, then text.
-/// (Fire's state-level rank-first comparator is unused even there; emit ranks
+/// (the reference's state-level rank-first comparator is unused even there; emit ranks
 /// whole-input single edges via the completed candidate comparator instead.)
 fn state_better_score_first(a: &Rc<SentenceState>, b: &Rc<SentenceState>) -> bool {
     if a.score == b.score {
@@ -223,7 +223,7 @@ fn candidate_of(completed: Completed) -> SentenceCandidate {
 /// pool (port of `SentencePrefixEvidence`). `share` is this prefix's probability
 /// mass over the whole pool; `boundary_share` is the mass that ends a word at
 /// exactly this raw position, and `boundary_closed` marks that every pool path
-/// agrees the sentence splits there (Fire's closed-boundary gate).
+/// agrees the sentence splits there (the reference's closed-boundary gate).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PrefixEvidence {
     pub(crate) text: String,
@@ -882,8 +882,8 @@ pub(crate) fn has_letter(raw: &[u8]) -> bool {
 
 /// Whether the stream carries a rank-selection marker (`;`, `'`, or a digit).
 /// An explicit selection pins the word, so every rank is eligible for a fallback
-/// commit; without one only the table's first choice qualifies (port of Fire's
-/// `Selector.hasSelectionSuffix` / `containsSelector`).
+/// commit; without one only the table's first choice qualifies (port of the
+/// reference `Selector.hasSelectionSuffix` / `containsSelector`).
 pub(crate) fn has_selection_suffix(raw: &[u8]) -> bool {
     raw.iter().any(|&b| b == b';' || b == b'\'' || b.is_ascii_digit())
 }
@@ -897,7 +897,7 @@ pub struct SentenceDecoder;
 impl SentenceDecoder {
     /// Decode `raw_code` into whole-sentence candidates, best first. `context`
     /// is text left of the cursor (used only as model history);
-    /// `allow_duplicate_single` mirrors Fire's "单字重码组句" (on by default).
+    /// `allow_duplicate_single` mirrors the reference "单字重码组句" (on by default).
     ///
     /// Returns empty for an empty / letter-less / over-long input or one holding
     /// a character a sentence code cannot contain.
@@ -924,7 +924,7 @@ impl SentenceDecoder {
     }
 
     /// Decode `raw_code` and also return the early-commit evidence the
-    /// probabilistic auto-commit consumes (port of Fire's `decode(...,
+    /// probabilistic auto-commit consumes (port of the reference `decode(...,
     /// includeEarlyCommit: true)`). The candidate list is identical to
     /// [`Self::decode`]; only the evidence is extra. Returns empty candidates
     /// and default evidence for an unusable input.

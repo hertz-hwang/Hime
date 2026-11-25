@@ -79,7 +79,7 @@ impl SentenceEngine {
     }
 
     /// Whole-sentence candidates for `code`, best first. `context` is the text
-    /// left of the cursor, used only as model history. Applies Fire's default
+    /// left of the cursor, used only as model history. Applies the reference default
     /// 单字重码组句 (`allow_duplicate_single` on).
     #[must_use]
     pub fn decode(&self, code: &str, context: &str) -> Vec<SentenceCandidate> {

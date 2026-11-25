@@ -2,7 +2,7 @@
 //! them (rank-1 简码 word codes, longest-match) and require the decoder to put
 //! the gold sentence first.
 //!
-//! The encoding step mirrors Fire's `SentenceEval` (rank-1 简码, longest-match
+//! The encoding step mirrors the reference `SentenceEval` (rank-1 简码, longest-match
 //! word coding) — it is *test-only* scaffolding, not part of the engine: a real
 //! shell feeds whatever keys the user types. Skipping the encoding would test
 //! nothing about real typing.

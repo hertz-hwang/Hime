@@ -1,4 +1,4 @@
-//! Whole-sentence auto-commit (port of Fire's `SentenceEngine` early-commit
+//! Whole-sentence auto-commit (port of the reference `SentenceEngine` early-commit
 //! and empty-code state machine; SPEC §7.6).
 //!
 //! The candidate pipeline (SPEC §7.3) is stateless — it answers a code with a
@@ -15,7 +15,7 @@
 //!   several generations has "matured": it is committed and the still-unconsumed
 //!   keys stay in the composition so typing continues. Past `first_keys_immunity`
 //!   only, and voided whenever the beam truncated the posterior (except near the
-//!   cap, where a last-resort commit fires on the best closed boundary).
+//!   cap, where a last-resort commit triggers on the best closed boundary).
 //! - **Empty-code commit.** When the previous code fully decoded but a new letter
 //!   makes the whole tail uncoverable and the last segment is no longer a legal
 //!   code prefix, the previous code's first candidate is committed.
@@ -23,7 +23,7 @@
 //! Paging, Backspace, or any manual selection suspends auto-commit for the rest
 //! of the composition; committing the whole code (Space / digit) resets it.
 //!
-//! The deferred Fire channels stay deferred: with no supplement (weighted-word)
+//! The deferred reference channels stay deferred: with no supplement (weighted-word)
 //! data, no prefix is ever supplement-weighted, so the `acceptedTop` guard is
 //! always satisfied; that reduces cleanly to the code below.
 
@@ -88,7 +88,7 @@ pub(crate) struct SentenceAutoCommit {
     empty_pending: Option<EmptyPending>,
     suspended: bool,
     /// Set after an empty-code commit; reserved for future continuation rules,
-    /// carried for parity with Fire.
+    /// carried for parity with the reference implementation.
     continuation: bool,
     context_segments: Vec<String>,
     session_key_count: usize,
@@ -97,7 +97,7 @@ pub(crate) struct SentenceAutoCommit {
 impl SentenceAutoCommit {
     /// Called after a letter is appended to `raw` (the full code). Returns the
     /// fragment to auto-commit and the keys to keep, or `None` to keep
-    /// composing. Mirrors the order of Fire's `keyPressed`: empty-code first,
+    /// composing. Mirrors the order of the reference `keyPressed`: empty-code first,
     /// then the probabilistic early commit.
     pub(crate) fn key_pressed(
         &mut self,
@@ -136,7 +136,7 @@ impl SentenceAutoCommit {
     }
 
     /// Paging / a manual pick: hold auto-commit for the rest of the composition
-    /// and drop accumulated evidence (Fire `suspendAutoCommit`).
+    /// and drop accumulated evidence (the reference `suspendAutoCommit`).
     pub(crate) fn suspend(&mut self) {
         self.reset_evidence();
         self.suspended = true;
@@ -145,7 +145,7 @@ impl SentenceAutoCommit {
 
     /// Backspace (or a selector key): the code just changed, so accumulated
     /// evidence is void and any pending empty-code capture is dropped, but the
-    /// session stays active and re-accumulates on the next keys (Fire
+    /// session stays active and re-accumulates on the next keys (the reference
     /// `evidenceInvalidated`). Unlike [`Self::suspend`] this does not set the
     /// suspended flag — editing the tail keeps auto-commit available.
     pub(crate) fn evidence_invalidated(&mut self) {
@@ -156,7 +156,7 @@ impl SentenceAutoCommit {
     /// The whole code was consumed (Space / digit) or the composition was
     /// dropped: clear all auto-commit state except the committed-text context,
     /// which deliberately survives so the next sentence keeps left context
-    /// (Fire `resetAll`).
+    /// (the reference `resetAll`).
     pub(crate) fn reset(&mut self) {
         self.trackers.clear();
         self.last_seen_raw.clear();
@@ -173,9 +173,9 @@ impl SentenceAutoCommit {
     }
 
     /// Left context for decoding: the most recent committed fragments (≤ 2),
-    /// used as model history only. The cursor context Fire reads from the host
+    /// used as model history only. The cursor context the reference reads from the host
     /// is a shell concern; until that is wired the committed-fragment fallback
-    /// keeps cross-commit context working (Fire `contextText`).
+    /// keeps cross-commit context working (the reference `contextText`).
     fn context_text(&self) -> String {
         self.context_segments.iter().rev().take(2).rev().map(String::as_str).collect()
     }
@@ -191,7 +191,7 @@ impl SentenceAutoCommit {
         }
     }
 
-    /// Fire `try_early_commit`: build the evidence, gate on the first-keys
+    /// The reference `try_early_commit`: build the evidence, gate on the first-keys
     /// immunity and truncation, then accumulate per-prefix maturity and try to
     /// commit.
     fn try_early_commit(
@@ -292,7 +292,7 @@ impl SentenceAutoCommit {
         self.commit_mature_prefix_or_near_cap_fallback(raw, &decode)
     }
 
-    /// Commit a matured prefix, else try the near-cap last-resort (Fire
+    /// Commit a matured prefix, else try the near-cap last-resort (the reference
     /// `commitMaturePrefixOrNearCapFallback`).
     fn commit_mature_prefix_or_near_cap_fallback(
         &mut self,
@@ -305,7 +305,7 @@ impl SentenceAutoCommit {
         self.near_cap_last_resort(raw, decode)
     }
 
-    /// Fire `tryCommitMaturePrefix`: among matured trackers that leave enough
+    /// The reference `tryCommitMaturePrefix`: among matured trackers that leave enough
     /// keys, commit the best (more characters, then higher share, then earlier
     /// boundary).
     fn commit_mature_prefix(&mut self, raw: &str) -> Option<SentenceAutoCommitOutcome> {
@@ -340,7 +340,7 @@ impl SentenceAutoCommit {
         Some(self.commit(raw, tracker.text, tracker.raw_length))
     }
 
-    /// Fire `tryNearCapLastResort`: at the cap with no qualifying evidence, emit
+    /// The reference `tryNearCapLastResort`: at the cap with no qualifying evidence, emit
     /// to the deepest word boundary that still leaves `retain` keys, so the key
     /// never leaks to the host.
     fn near_cap_last_resort(
@@ -357,7 +357,7 @@ impl SentenceAutoCommit {
         let top = decode.candidates.first()?;
         let limit = raw.len() - retain;
         // Boundaries ascend by raw length; take the deepest one at or below the
-        // limit (the loop in Fire walks up the path from the end).
+        // limit (the reference loop walks up the path from the end).
         let (consumed, text) = top
             .boundaries
             .iter()
@@ -390,7 +390,7 @@ impl SentenceAutoCommit {
         self.record_context(text);
     }
 
-    // MARK: - Empty-code commit (Fire capture_empty_code_candidate /
+    // MARK: - Empty-code commit (reference capture_empty_code_candidate /
     // try_empty_code_commit).
 
     fn try_empty_code_commit(
@@ -440,7 +440,7 @@ impl SentenceAutoCommit {
         Some(SentenceAutoCommitOutcome { text: commit, retained_raw })
     }
 
-    /// Fire `captureEmptyCodeCandidate`: decode the previous code and keep its
+    /// The reference `captureEmptyCodeCandidate`: decode the previous code and keep its
     /// first eligible candidate (only the table's first choice unless an explicit
     /// selector was typed). When several are eligible the top must hold the
     /// strong share and match the visible first candidate.
@@ -494,7 +494,7 @@ impl SentenceAutoCommit {
     }
 }
 
-/// Fire `trackerBetter`: more characters, then a higher share, then an earlier
+/// Reference `trackerBetter`: more characters, then a higher share, then an earlier
 /// boundary.
 fn tracker_better(left: &Tracker, right: &Tracker) -> bool {
     if left.text_char_count != right.text_char_count {
@@ -507,7 +507,7 @@ fn tracker_better(left: &Tracker, right: &Tracker) -> bool {
 }
 
 /// Whether the prefix is a node on some visible candidate's path (so the user
-/// could actually see it) and that candidate starts with it (Fire
+/// could actually see it) and that candidate starts with it (reference
 /// `prefixBelongsToVisible`).
 fn prefix_belongs_to_visible(prefix: &PrefixEvidence, visible: &[CompletedView]) -> bool {
     visible.iter().any(|candidate| {
@@ -520,7 +520,7 @@ fn prefix_belongs_to_visible(prefix: &PrefixEvidence, visible: &[CompletedView])
 }
 
 /// Hold existing trackers through a neutral generation without counting it,
-/// dropping any contradicted by a better diverging prefix (Fire
+/// dropping any contradicted by a better diverging prefix (reference
 /// `retainTrackersWithoutCounting`).
 fn retain_trackers_without_counting(
     trackers: &mut HashMap<String, Tracker>,
@@ -582,7 +582,7 @@ fn common_prefix_char_count(left: &str, right: &str) -> usize {
     left.chars().zip(right.chars()).take_while(|(l, r)| l == r).count()
 }
 
-/// Whether `raw` can be covered end to end by whole lexicon edges (Fire
+/// Whether `raw` can be covered end to end by whole lexicon edges (reference
 /// `has_complete_candidate`). It walks reachable code positions the same way the
 /// decoder does, so a "no" means some tail is now unsegmentable.
 fn has_complete_candidate(lexicon: &SentenceLexicon, raw: &str, allow_duplicate_single: bool) -> bool {

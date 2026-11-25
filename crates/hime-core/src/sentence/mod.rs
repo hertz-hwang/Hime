@@ -1,7 +1,7 @@
 //! Whole-sentence (形码整句) decoding.
 //!
-//! Port of Fire's `Fire/Sentence/` engine for shape codes. The candidate for a
-//! long encoding is a whole sentence, not a single word: the encoder splits the
+//! Port of the reference whole-sentence engine for shape codes. The candidate
+//! for a long encoding is a whole sentence, not a single word: the encoder splits the
 //! key stream into words (a word graph), and a beam search over that graph
 //! picks the chain the n-gram model scores highest.
 //!
@@ -10,16 +10,15 @@
 //! beam search over the two. A thin engine ties the three together and is the
 //! single object the engine and shells talk to.
 //!
-//! [`auto_commit`] implements Fire's probabilistic early-commit and empty-code
+//! [`auto_commit`] implements the reference probabilistic early-commit and empty-code
 //! state machine; it is gated on `Config::auto_commit` and lives in the session.
 //!
-//! Deferred relative to Fire (documented where each belongs): the learning
+//! Deferred relative to the reference (documented where each belongs): the learning
 //! channels (session cache / user n-gram / correction), the Aho-Corasick
 //! weighted-word supplement, the per-session incremental lattice (a latency
 //! optimization), and pinyin decoding. None of them affect the deterministic
 //! whole-sentence ranking that is the core of 形码整句; they are additive score
-//! terms gated off when there is no learning or user-word data, exactly as in
-//! Fire.
+//! terms gated off when there is no learning or user-word data, exactly as in the reference.
 
 pub(crate) mod auto_commit;
 pub mod decoder;
@@ -30,7 +29,7 @@ pub use decoder::{SentenceCandidate, SentenceDecoder};
 pub use engine::{SentenceEngine, SentenceModelError, SentenceTranslator};
 pub use lexicon::{SentenceEdge, SentenceLexicon};
 
-/// Beam-search and scoring constants, carried over from Fire's `SentenceConfig`
+/// Beam-search and scoring constants, carried over from the reference `SentenceConfig`
 /// for the shape-code (虎整句) path. The pinyin-only knobs are omitted because
 /// only shape codes are migrated.
 pub(crate) mod config {
@@ -48,7 +47,7 @@ pub(crate) mod config {
     pub const MAX_RAW_LENGTH: usize = 256;
     /// Cap on the raw key stream with auto-commit on. Lower than the manual
     /// cap because the near-cap fallback commits a mature prefix before the
-    /// buffer can grow into the range where decoding slows (Fire keeps it at
+    /// buffer can grow into the range where decoding slows (the reference keeps it at
     /// 64 ≈ sixteen multi-key 形码 characters).
     pub const AUTO_COMMIT_MAX_RAW_LENGTH: usize = 64;
     /// Light penalty for a non-first rank, scaled by ln(rank).
@@ -64,7 +63,7 @@ pub(crate) mod config {
     /// this many, so expansion stays bounded before an explicit de-dup.
     pub const AGGREGATE_DURING_EXPANSION_THRESHOLD: usize = 128;
 
-    // ---- Probabilistic early commit (ported from Fire `SentenceConfig`) ----
+    // ---- Probabilistic early commit (ported from the reference `SentenceConfig`) ----
     /// Posterior share a prefix must reach to qualify as commit evidence.
     pub const EARLY_COMMIT_MINIMUM_SHARE: f64 = 0.995;
     /// Strong-confirmation share; reaching it twice commits without waiting.

@@ -1,7 +1,7 @@
 //! HFNGMF v1 (`.hng`) whole-sentence n-gram model reader (SPEC §7).
 //!
-//! Port of Fire's `NgramModel.swift` / `HngReader` and its executable reference
-//! `verify_hng.py`. The format spec is `docs/hfngmf-v1.md` in the Fire project;
+//! Port of the reference implementation's `NgramModel.swift` / `HngReader` and its executable reference
+//! `verify_hng.py`. The format spec is `docs/hfngmf-v1.md` in the reference project;
 //! the scoring math is the three-level interpolation it documents:
 //!
 //! ```text
@@ -132,7 +132,7 @@ impl NgramModel {
         let file = File::open(path.as_ref())?;
         // SAFETY: the caller keeps `file` alive only long enough to map; the
         // mapping stays valid even if the file is later edited or removed on
-        // macOS, and the model is read-only. This matches Fire's reader, which
+        // macOS, and the model is read-only. This matches the reference reader, which
         // assumes the file is not mutated while loaded.
         let data = unsafe { Mmap::map(&file) }.map_err(LoadError::Io)?;
         Self::from_mmap(data)
@@ -504,7 +504,7 @@ impl NgramModel {
     }
 
     /// Whether the model observed `prev → target` as a bigram (isolated-rare
-    /// signal reserved by Fire; not used by the migrated scoring path today).
+    /// signal reserved by the reference implementation; not used by the migrated scoring path today).
     pub fn has_observed_bigram(&self, prev_cp: u32, target_cp: u32) -> bool {
         let Some(pid) = self.id_of(prev_cp) else {
             return false;
@@ -814,7 +814,7 @@ mod tests {
         assert!(model.meta().contains("HFNGMF v1"));
     }
 
-    /// The `logp` for every trigram must match Fire's `verify_hng.py --probe`
+    /// The `logp` for every trigram must match the reference `verify_hng.py --probe`
     /// to the reported 4 decimals; the `p1` unigrams likewise. This is the
     /// faithfulness gate for the whole reader against the real `.hng`.
     #[test]

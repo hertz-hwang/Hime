@@ -274,7 +274,7 @@ final class HimeInputController: IMKInputController {
     // MARK: - Input menu
 
     /// Commands shown in the text input menu, in the section headed by the
-    /// app's name — the layout 业火 exposes as its "Fire" group.
+    /// app's name group that the text input menu exposes.
     override func menu() -> NSMenu! {
         // IMK special-cases items whose action is `showPreferences:` and
         // invokes it on the controller; targets set on the item are ignored.

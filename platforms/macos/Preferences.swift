@@ -1,6 +1,6 @@
 // Hime input method — the "Hime 首选项" window.
 //
-// Layout mirrors the 业火 (Fire) preferences window: a sidebar listing the
+// Layout: a sidebar listing the
 // sections, a grouped form with the control right-aligned on each row and a
 // grey caption inline after the row title. Above the sidebar a 重新载入
 // button re-scans the bundled and user scheme folders (SPEC §5.2) and

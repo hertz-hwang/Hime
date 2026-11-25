@@ -1,4 +1,4 @@
-//! The whole-sentence word graph (port of Fire's `SentenceLexicon`).
+//! The whole-sentence word graph (port of the reference `SentenceLexicon`).
 //!
 //! A shape-code table (`候选\t编码`, the same layout as a scheme table) is read
 //! into `code → ranked edges`. Rank is the row's position under that code
@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// Two equally-short multi-key codes for one character: only the first seen
-    /// is optimal (matches Fire, which stores the shortest code string itself).
+    /// is optimal (matching the reference, which stores the shortest code string itself).
     #[test]
     fn optimal_single_ties_keep_the_first_code() {
         let lex = SentenceLexicon::parse("好\thd\n好\thx\n");

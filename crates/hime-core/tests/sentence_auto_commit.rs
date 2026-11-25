@@ -84,7 +84,7 @@ fn auto_commit_on_emits_mature_prefixes_and_finishes_on_space() {
     let mut s = Session::sentence(engine, Config { auto_commit: true, ..Config::default() });
 
     let (concat, commits) = type_collect(&mut s, CODE);
-    assert!(!commits.is_empty(), "the probabilistic early commit must fire on a real sentence");
+    assert!(!commits.is_empty(), "the probabilistic early commit must trigger on a real sentence");
     assert!(GOLD.starts_with(&concat), "committed {concat:?} must be a leading prefix of {GOLD:?}");
     assert!(
         concat.chars().count() < GOLD.chars().count(),
@@ -98,7 +98,7 @@ fn auto_commit_on_emits_mature_prefixes_and_finishes_on_space() {
     assert!(r.preedit.is_empty(), "the composition ends on Space");
 }
 
-/// The empty-code commit is the other auto-commit mechanism: it fires when a
+/// The empty-code commit is the other auto-commit mechanism: it triggers when a
 /// new letter makes the tail uncoverable. Its output, like the early commit,
 /// always leaves a non-empty tail, which `type_collect` enforces on every
 /// commit. This code has auto-commit off as the control that the same input is

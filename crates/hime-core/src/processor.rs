@@ -10,7 +10,7 @@
 //! Paging (翻页) moves a page cursor over the candidate list without touching
 //! the encoding: `-` turns to the previous page and `=` to the next, reported
 //! as [`Action::PageUp`] / [`Action::PageDown`] and applied by
-//! [`Session`](crate::session::Session). They fire only while a candidate is on
+//! [`Session`](crate::session::Session). They take effect only while a candidate is on
 //! screen; while composing with nothing to page through both keys are
 //! swallowed, so neither reaches the host nor commits any text. Idle, they stay
 //! ordinary keys the application types.
@@ -317,7 +317,7 @@ mod tests {
 
     /// English punctuation mode (the default) never claims a punctuation
     /// key: idle releases it and composing releases it too. The paging keys
-    /// `-`/`=` are handled separately (see `page_keys_only_fire_with_candidates`).
+    /// `-`/`=` are handled separately (see `page_keys_only_turn_with_candidates`).
     #[test]
     fn english_mode_releases_punctuation() {
         for key in [b',' as u32, b'.' as u32, b'?' as u32, b'"' as u32] {
@@ -334,7 +334,7 @@ mod tests {
     /// candidate they are swallowed — nothing is committed and nothing reaches
     /// the host — and only when idle do they stay ordinary typed keys.
     #[test]
-    fn page_keys_only_fire_with_candidates() {
+    fn page_keys_only_turn_with_candidates() {
         assert_eq!(composing(KEY_PAGE_UP, "a", 1), Action::PageUp);
         assert_eq!(composing(KEY_PAGE_DOWN, "a", 1), Action::PageDown);
         assert_eq!(
@@ -545,7 +545,7 @@ mod tests {
 
     /// With auto-commit on the cap drops to the tighter auto-commit limit, so
     /// the near-cap fallback commits a mature prefix before a long code can
-    /// reach the manual cap (Fire `SentenceConfig.maxRawLength`).
+    /// reach the manual cap (the reference `SentenceConfig.maxRawLength`).
     #[test]
     fn sentence_mode_caps_lower_with_auto_commit_on() {
         let sentence = Config {
