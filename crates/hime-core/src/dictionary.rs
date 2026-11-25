@@ -227,7 +227,7 @@ impl Dictionary {
             if out.len() >= limit {
                 return out;
             }
-            out.push(Candidate { text: e.text.clone(), comment: String::new() });
+            out.push(Candidate::new(e.text.clone(), ""));
         }
         for e in prefix {
             if out.len() >= limit {
@@ -235,7 +235,7 @@ impl Dictionary {
             }
             // `input` is ASCII lowercase, so this byte offset is a char boundary.
             let remaining = &e.code[input.len()..];
-            out.push(Candidate { text: e.text.clone(), comment: format!("~{remaining}") });
+            out.push(Candidate::new(e.text.clone(), format!("~{remaining}")));
         }
         out
     }
@@ -293,7 +293,7 @@ mod tests {
     }
 
     fn cand(text: &str, comment: &str) -> Candidate {
-        Candidate { text: text.into(), comment: comment.into() }
+        Candidate::new(text, comment)
     }
 
     #[test]

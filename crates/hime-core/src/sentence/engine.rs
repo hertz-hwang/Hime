@@ -135,7 +135,12 @@ impl Translator for SentenceTranslator {
             .decode(input, "")
             .into_iter()
             .take(limit)
-            .map(|sentence| Candidate { text: sentence.text, comment: String::new() })
+            .map(|sentence| Candidate {
+                text: sentence.text,
+                comment: String::new(),
+                code: sentence.segmented,
+                spans: Vec::new(),
+            })
             .collect()
     }
 }

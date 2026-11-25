@@ -84,8 +84,12 @@ fn full_flow_through_c_abi() {
     let r = process(session, KEY_A);
     assert_eq!(r["handled"], true);
     assert_eq!(r["preedit"], "a");
+    assert_eq!(r["code_line"], "a");
+    assert_eq!(r["code_in_window"], false);
+    assert_eq!((r["page"].as_u64(), r["page_count"].as_u64()), (Some(1), Some(1)));
     assert_eq!(r["candidates"][0]["text"], "工");
     assert_eq!(r["candidates"][0]["comment"], "");
+    assert_eq!(r["candidates"][0]["spans"], serde_json::json!([]));
 
     let r = process(session, KEY_BACKSPACE);
     assert_eq!(r["handled"], true);
@@ -158,14 +162,23 @@ fn full_flow_through_c_abi() {
     // default, and round-trip through JSON like every other config key.
     assert_eq!(get_config()["english_punct_after_alnum"], false);
     assert_eq!(get_config()["semicolon_quote_select"], false);
-    let both_on = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":true,"semicolon_quote_select":true}"#;
+    assert_eq!(get_config()["show_code_in_window"], false, "the encoding is inline by default");
+    let both_on = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":true,"semicolon_quote_select":true,"show_code_in_window":true}"#;
     assert!(set_config(both_on));
     assert_eq!(get_config()["english_punct_after_alnum"], true);
     assert_eq!(get_config()["semicolon_quote_select"], true);
-    let both_off = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":false,"semicolon_quote_select":false}"#;
+    assert_eq!(get_config()["show_code_in_window"], true);
+    // A live session reports the placement on the next response.
+    let live = hime_create_session();
+    let r = process(live, KEY_A);
+    assert_eq!(r["code_in_window"], true);
+    assert_eq!(r["code_line"], "a");
+    hime_destroy_session(live);
+    let both_off = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":false,"semicolon_quote_select":false,"show_code_in_window":false}"#;
     assert!(set_config(both_off));
     assert_eq!(get_config()["english_punct_after_alnum"], false);
     assert_eq!(get_config()["semicolon_quote_select"], false);
+    assert_eq!(get_config()["show_code_in_window"], false);
 
     // --- schemes: discovery (hime_scan_schemes) and selection ---
 
@@ -187,12 +200,14 @@ fn full_flow_through_c_abi() {
 
     // Switching while a live session is composing keeps the id, drops the
     // composition, and replaces the config with the scheme defaults.
+    assert!(set_config(r#"{"page_size":5,"max_code_len":4,"show_code_in_window":true}"#));
     let live = hime_create_session();
     process(live, KEY_A);
     assert!(select_scheme(liuli["path"].as_str().unwrap()));
 
     let cfg = get_config();
     assert_eq!(cfg["page_size"], 5, "page size survives a scheme switch");
+    assert_eq!(cfg["show_code_in_window"], true, "the preedit placement survives a scheme switch");
     assert_eq!(cfg["max_code_len"], 4);
     assert_eq!(cfg["code_type"], 2, "metadata type 2 = 形码");
     assert_eq!(cfg["auto_commit_length"], 4);

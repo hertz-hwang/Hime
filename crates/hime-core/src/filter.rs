@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     fn cand(text: &str, comment: &str) -> Candidate {
-        Candidate { text: text.into(), comment: comment.into() }
+        Candidate::new(text, comment)
     }
 
     fn texts(list: &[Candidate]) -> Vec<&str> {

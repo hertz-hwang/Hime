@@ -21,6 +21,7 @@
 
 pub mod config;
 pub mod dictionary;
+pub mod diff;
 pub mod filter;
 pub mod ngram;
 pub mod paths;
@@ -35,6 +36,7 @@ pub mod types;
 
 pub use config::{CodeType, Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
 pub use dictionary::{Dictionary, TableFormat};
+pub use diff::{annotate_candidate_diffs, sentence_diff};
 pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use ngram::NgramModel;
 pub use paths::{config_dir, ensure_config_layout, model_path, schemes_dir};
@@ -43,7 +45,7 @@ pub use processor::{Action, Processor};
 pub use scheme::{load_scheme, scan_schemes, SchemeError, SchemeInfo, SchemeMetadata};
 pub use session::Session;
 pub use translator::{TableTranslator, Translator};
-pub use types::{Candidate, EngineResponse};
+pub use types::{Candidate, DiffKind, DiffSpan, EngineResponse};
 
 // Virtual key codes (SPEC §2.1). Printable keys use their ASCII code:
 // letters are 97..=122, digits are 49..=57.

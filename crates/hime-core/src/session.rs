@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::config::{CodeType, Config};
 use crate::dictionary::Dictionary;
+use crate::diff::annotate_candidate_diffs;
 use crate::pipeline::Pipeline;
 use crate::processor::{Action, Processor};
 use crate::punct::{self, QuotePair};
@@ -388,6 +389,12 @@ impl Session {
         let start = self.page * size;
         let end = (start + size).min(self.window.len());
         self.candidates = self.window[start..end].to_vec();
+        // Whole-sentence candidates share most of their text with the page's
+        // top candidate; describe each one relative to it so the shell colors
+        // substitutions, deletions and insertions without any logic of its own.
+        if self.sentence.is_some() {
+            annotate_candidate_diffs(&mut self.candidates);
+        }
     }
 
     /// Move the page cursor, clamped to the first and last page: turning past
@@ -412,13 +419,45 @@ impl Session {
         }
     }
 
+    /// The encoding to display: the first candidate's word-separated code
+    /// split when it covers the raw encoding, otherwise the raw letters. The
+    /// split covers the whole code for a whole-sentence candidate, so the
+    /// shown string is an automatic segmentation of exactly what was typed.
+    fn code_line(&self) -> String {
+        let Some(first) = self.candidates.first() else {
+            return self.input_buffer.clone();
+        };
+        if first.code.is_empty() {
+            return self.input_buffer.clone();
+        }
+        let compact: String = first.code.split_ascii_whitespace().collect();
+        if compact == self.input_buffer {
+            first.code.clone()
+        } else {
+            self.input_buffer.clone()
+        }
+    }
+
+    /// Pages the retrieved window spans; 0 while nothing was retrieved.
+    fn page_count(&self) -> usize {
+        if self.window.is_empty() {
+            0
+        } else {
+            self.window.len().div_ceil(self.config.page_size)
+        }
+    }
+
     /// Bundle current session state into the response a shell renders as-is.
     fn response(&self, handled: bool, commit_text: Option<String>) -> EngineResponse {
         EngineResponse {
             handled,
             commit_text,
             preedit: self.input_buffer.clone(),
+            code_line: self.code_line(),
+            code_in_window: self.config.show_code_in_window,
             candidates: self.candidates.clone(),
+            page: if self.window.is_empty() { 0 } else { self.page + 1 },
+            page_count: self.page_count(),
         }
     }
 }
@@ -470,7 +509,7 @@ mod tests {
         assert!(r.handled);
         assert!(r.commit_text.is_none());
         assert_eq!(r.preedit, "a");
-        assert_eq!(r.candidates[0], Candidate { text: "工".into(), comment: "".into() });
+        assert_eq!(r.candidates[0], Candidate::new("工", ""));
 
         let r = s.process_key(KEY_BACKSPACE);
         assert!(r.handled);
@@ -516,10 +555,10 @@ mod tests {
         assert_eq!(
             r.candidates,
             vec![
-                Candidate { text: "工".into(), comment: "".into() },
-                Candidate { text: "戈".into(), comment: "".into() },
-                Candidate { text: "式".into(), comment: "~a".into() },
-                Candidate { text: "匿".into(), comment: "~d".into() },
+                Candidate::new("工", ""),
+                Candidate::new("戈", ""),
+                Candidate::new("式", "~a"),
+                Candidate::new("匿", "~d"),
             ]
         );
     }
@@ -548,7 +587,7 @@ mod tests {
         let r = s.process_key(b'd' as u32);
         assert!(r.handled);
         assert_eq!(r.preedit, "ad");
-        assert_eq!(r.candidates, vec![Candidate { text: "匿".into(), comment: "".into() }]);
+        assert_eq!(r.candidates, vec![Candidate::new("匿", "")]);
     }
 
     #[test]
@@ -599,7 +638,7 @@ mod tests {
         assert!(r.handled, "a digit with no candidate must be swallowed");
         assert!(r.commit_text.is_none());
         assert_eq!(r.preedit, "ad");
-        assert_eq!(r.candidates, vec![Candidate { text: "匿".into(), comment: "".into() }]);
+        assert_eq!(r.candidates, vec![Candidate::new("匿", "")]);
         // '9' can never map to a candidate (list is capped at 5): swallowed too.
         let r = s.process_key(KEY_9);
         assert!(r.handled);
@@ -704,13 +743,26 @@ mod tests {
         let r = s.process_key(KEY_SPACE);
         let json = serde_json::to_string(&r).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        for field in ["handled", "commit_text", "preedit", "candidates"] {
+        for field in [
+            "handled",
+            "commit_text",
+            "preedit",
+            "code_line",
+            "code_in_window",
+            "candidates",
+            "page",
+            "page_count",
+        ] {
             assert!(v.get(field).is_some(), "missing field {field} in {json}");
         }
         assert_eq!(v["handled"], serde_json::json!(true));
         assert_eq!(v["commit_text"], serde_json::json!("工"));
         assert_eq!(v["preedit"], serde_json::json!(""));
+        assert_eq!(v["code_line"], serde_json::json!(""));
+        assert_eq!(v["code_in_window"], serde_json::json!(false));
         assert_eq!(v["candidates"], serde_json::json!([]));
+        assert_eq!(v["page"], serde_json::json!(0));
+        assert_eq!(v["page_count"], serde_json::json!(0));
 
         let back: EngineResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
@@ -724,7 +776,7 @@ mod tests {
         impl crate::translator::Translator for OnlyStar {
             fn translate(&self, input: &str, _limit: usize) -> Vec<Candidate> {
                 if input == "x" {
-                    vec![Candidate { text: "星".into(), comment: String::new() }]
+                    vec![Candidate::new("星", "")]
                 } else {
                     Vec::new()
                 }
@@ -734,6 +786,57 @@ mod tests {
         let mut s = Session::with_pipeline(pipeline);
         assert_eq!(s.process_key(b'x' as u32).candidates[0].text, "星");
         assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("星"));
+    }
+
+    /// A candidate that carries a word-separated code split covering the raw
+    /// encoding makes the response's display line that split; a table match
+    /// without one shows the raw letters. The page cursor is reported
+    /// one-based with the number of pages the window spans.
+    #[test]
+    fn code_line_is_segmented_and_pages_are_reported() {
+        struct Segmented;
+        impl crate::translator::Translator for Segmented {
+            fn translate(&self, input: &str, _limit: usize) -> Vec<Candidate> {
+                if input == "pms" {
+                    vec![Candidate {
+                        text: "嗨".into(),
+                        comment: String::new(),
+                        code: "p m s".into(),
+                        spans: Vec::new(),
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let mut s = Session::with_pipeline(Pipeline::new(vec![Box::new(Segmented)], vec![]));
+        for key in [b'p' as u32, b'm' as u32, b's' as u32] {
+            s.process_key(key);
+        }
+        let r = s.process_key(b's' as u32); // "pmss": no candidate, raw line
+        assert_eq!(r.code_line, "pmss");
+        assert_eq!(r.page, 0);
+        assert_eq!(r.page_count, 0);
+
+        let r = {
+            // A fresh session lands on the candidate again.
+            let mut t = Session::with_pipeline(Pipeline::new(vec![Box::new(Segmented)], vec![]));
+            for key in [b'p' as u32, b'm' as u32, b's' as u32] {
+                t.process_key(key);
+            }
+            let r = t.process_key(KEY_PAGE_DOWN); // one page only: stays
+            assert_eq!(r.code_line, "p m s", "the candidate supplies the split");
+            r
+        };
+        assert_eq!(r.page, 1);
+        assert_eq!(r.page_count, 1);
+
+        // A table session has no code split and reports its raw encoding.
+        let mut table = session();
+        let r = table.process_key(KEY_A);
+        assert_eq!(r.code_line, "a");
+        assert_eq!(r.page, 1);
+        assert_eq!(r.page_count, 1);
     }
 
     /// What the preferences window promises: a smaller page means fewer
@@ -795,6 +898,8 @@ mod tests {
         let first = s.process_key(b'd' as u32);
         assert_eq!(first.candidates.len(), MAX_CANDIDATES, "the first page is full");
         assert_eq!(first.candidates[0].text, "的", "琉璃v1 ranks 的 first behind d");
+        assert_eq!(first.page, 1, "the page cursor is reported one-based");
+        assert!(first.page_count > 1, "the window spans more than one page");
 
         // Digits keep addressing the page the shell renders, never a later one.
         assert_eq!(
@@ -808,6 +913,7 @@ mod tests {
             t.process_key(KEY_PAGE_DOWN)
         };
         assert_eq!(second.candidates.len(), MAX_CANDIDATES, "the second page is full");
+        assert_eq!(second.page, 2, "the page cursor is reported one-based");
         assert_eq!(second.preedit, "d", "paging leaves the encoding untouched");
         assert_ne!(
             second.candidates[0].text, first.candidates[0].text,

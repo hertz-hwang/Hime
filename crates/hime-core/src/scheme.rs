@@ -69,8 +69,9 @@ impl Default for SchemeMetadata {
 impl SchemeMetadata {
     /// The engine configuration this scheme prescribes: every behavior key
     /// comes from the metadata, only the keys schemes do not define —
-    /// `page_size` and the two pure preference switches — are carried over
-    /// from `base`. Out-of-range metadata is clamped like any other config.
+    /// `page_size`, the two punctuation preference switches and the preedit
+    /// placement — are carried over from `base`. Out-of-range metadata is
+    /// clamped like any other config.
     #[must_use]
     pub fn defaults_for(&self, base: Config) -> Config {
         Config {
@@ -83,6 +84,7 @@ impl SchemeMetadata {
             ascii_punct: self.ascii_punct,
             english_punct_after_alnum: base.english_punct_after_alnum,
             semicolon_quote_select: base.semicolon_quote_select,
+            show_code_in_window: base.show_code_in_window,
         }
         .sanitized()
     }

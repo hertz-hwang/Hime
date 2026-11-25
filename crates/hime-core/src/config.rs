@@ -107,6 +107,10 @@ pub struct Config {
     /// 2nd/3rd-select rule. Schemes do not define it; it survives a scheme
     /// switch.
     pub semicolon_quote_select: bool,
+    /// Show the encoding in the candidate window (the non-embedded preedit
+    /// mode) instead of inline in the input field. Schemes do not define it;
+    /// it survives a scheme switch.
+    pub show_code_in_window: bool,
 }
 
 impl Default for Config {
@@ -121,6 +125,7 @@ impl Default for Config {
             ascii_punct: 0,
             english_punct_after_alnum: false,
             semicolon_quote_select: false,
+            show_code_in_window: false,
         }
     }
 }
@@ -160,25 +165,30 @@ mod tests {
         assert_eq!(config.ascii_punct, 0, "English punctuation is the default");
         assert!(!config.english_punct_after_alnum, "the rule is opt-in");
         assert!(!config.semicolon_quote_select, "; and ' stay punctuation by default");
+        assert!(!config.show_code_in_window, "the encoding is inline by default");
     }
 
-    /// Both punctuation switches cross JSON as plain bools; a JSON that
-    /// names neither keeps both off.
+    /// The punctuation switches and the preedit placement cross JSON as plain
+    /// bools; a JSON that names none of them keeps them off.
     #[test]
     fn punctuation_switches_cross_json_as_bools() {
-        let config: Config =
-            serde_json::from_str(r#"{"english_punct_after_alnum":true,"semicolon_quote_select":true}"#)
-                .unwrap();
+        let config: Config = serde_json::from_str(
+            r#"{"english_punct_after_alnum":true,"semicolon_quote_select":true,"show_code_in_window":true}"#,
+        )
+        .unwrap();
         assert!(config.english_punct_after_alnum);
         assert!(config.semicolon_quote_select);
+        assert!(config.show_code_in_window);
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains(r#""english_punct_after_alnum":true"#), "{json}");
         assert!(json.contains(r#""semicolon_quote_select":true"#), "{json}");
+        assert!(json.contains(r#""show_code_in_window":true"#), "{json}");
 
         let off: Config = serde_json::from_str("{}").unwrap();
         assert!(!off.english_punct_after_alnum);
         assert!(!off.semicolon_quote_select);
+        assert!(!off.show_code_in_window);
     }
 
     #[test]

@@ -95,7 +95,7 @@ mod tests {
             self.texts
                 .iter()
                 .take(limit)
-                .map(|text| Candidate { text: (*text).into(), comment: String::new() })
+                .map(|text| Candidate::new(*text, ""))
                 .collect()
         }
     }
@@ -104,7 +104,7 @@ mod tests {
 
     impl Filter for PrependFilter {
         fn filter(&self, mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-            candidates.insert(0, Candidate { text: "★".into(), comment: String::new() });
+            candidates.insert(0, Candidate::new("★", ""));
             candidates
         }
     }

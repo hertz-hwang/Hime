@@ -45,8 +45,14 @@ uint64_t hime_create_session(void);
 void hime_destroy_session(uint64_t session_id);
 
 /* Process one keystroke. Returns a NUL-terminated JSON string describing the
- * EngineResponse (fields: handled, commit_text, preedit, candidates), or NULL
- * on unknown session / uninitialized engine. modifiers is reserved and
+ * EngineResponse, or NULL on unknown session / uninitialized engine. Fields:
+ * handled, commit_text, preedit (the raw encoding), code_line (the display
+ * line; word-separated when the top candidate supplies a code split),
+ * code_in_window (render code_line in the candidate window instead of inline),
+ * candidates (each with text, comment, code and spans), page (one-based),
+ * page_count. A candidate span is {"text":…,"kind":…} with kind equal,
+ * modified, deleted or inserted relative to the first candidate; table
+ * candidates carry empty spans. modifiers is reserved and
  * ignored. handled is false when the engine leaves the key to the
  * host, which happens for idle ordinary keys and, in punctuation mode, for
  * punctuation the mapping does not claim (also the first mapped punctuation
@@ -59,13 +65,15 @@ char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifier
 /* Read the current engine config as JSON:
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
  *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0,
- *  "english_punct_after_alnum":false,"semicolon_quote_select":false}.
+ *  "english_punct_after_alnum":false,"semicolon_quote_select":false,
+ *  "show_code_in_window":false}.
  * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
  * english_punct_after_alnum releases the first punctuation right after
  * English letters/digits to the host (e.g. the ':' in 12:30).
  * semicolon_quote_select makes ';' pick the 2nd candidate and ''' the 3rd
- * while a candidate stands. Reports the defaults before hime_init. The
- * caller must release the string
+ * while a candidate stands. show_code_in_window renders the encoding in the
+ * candidate window instead of inline. Reports the defaults before hime_init.
+ * The caller must release the string
  * with hime_free_string. */
 char* hime_get_config(void);
 
@@ -88,8 +96,8 @@ char* hime_scan_schemes(const char* dir);
 /* Load the scheme folder at scheme_dir (an entry's "path" from
  * hime_scan_schemes): its table becomes the engine dictionary, its
  * metadata.toml values replace the engine config (that is how selecting a
- * scheme reloads its defaults; page_size,
- * english_punct_after_alnum and semicolon_quote_select survive). Live
+ * scheme reloads its defaults; page_size, english_punct_after_alnum,
+ * semicolon_quote_select and show_code_in_window survive). Live
  * sessions keep their
  * ids, drop any in-progress composition, and are rebuilt for the new source,
  * so a scheme can be switched while typing (including between a 形码 and a

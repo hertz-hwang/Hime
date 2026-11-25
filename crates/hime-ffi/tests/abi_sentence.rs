@@ -65,7 +65,18 @@ fn sentence_scheme_decodes_whole_sentences_through_the_abi() {
         assert_eq!(last["handled"], true);
     }
     assert_eq!(last["preedit"], "gdakakdmtiol", "the long code is not capped");
+    assert_eq!(
+        last["code_line"], "gd ak ak dm ti ol",
+        "the display line is the top candidate's automatic code split"
+    );
     assert_eq!(last["candidates"][0]["text"], "今天天气很好", "gold sentence first");
+    assert_eq!(last["candidates"][0]["code"], "gd ak ak dm ti ol");
+    assert_eq!((last["page"].as_u64(), last["page_count"].as_u64()), (Some(1), Some(2)));
+    let spans = last["candidates"][1]["spans"].as_array().expect("alternative carries spans");
+    assert!(
+        spans.iter().any(|span| span["kind"] != "equal"),
+        "the alternative differs from the top candidate: {spans:?}"
+    );
 
     let r = process(session, KEY_SPACE);
     assert_eq!(r["commit_text"], "今天天气很好", "Space commits the whole sentence");

@@ -176,6 +176,13 @@ pub extern "C" fn hime_destroy_session(session_id: u64) {
 /// with `semicolon_quote_select` a standing candidate turns `;` and `'`
 /// into 2nd/3rd-selection keys (SPEC §3).
 ///
+/// The response carries `preedit` (the raw encoding), `code_line` (the
+/// display line, word-separated when the top candidate supplies a split),
+/// `code_in_window` (render it in the candidate window), one-based `page` /
+/// `page_count`, and candidates whose `code` is the whole-sentence split and
+/// whose `spans` are character-level diff runs against the first candidate
+/// (empty for table matches).
+///
 /// Returns null if the engine is uninitialized, the session id is unknown,
 /// or serialization fails.
 #[no_mangle]
@@ -212,8 +219,9 @@ pub extern "C" fn hime_process_key(
 /// owned by the caller (release it with [`hime_free_string`]). The shape is
 /// `{"page_size":<n>,"max_code_len":<n>,"code_type":<n>,"auto_commit":<bool>,
 /// "auto_commit_length":<n>,"commit_next_code":<n>,"ascii_punct":<n>,
-/// "english_punct_after_alnum":<bool>,"semicolon_quote_select":<bool>}`
-/// (see [`hime_set_config`] and [`hime_core::Config`]).
+/// "english_punct_after_alnum":<bool>,"semicolon_quote_select":<bool>,
+/// "show_code_in_window":<bool>}` (see [`hime_set_config`] and
+/// [`hime_core::Config`]).
 ///
 /// Before `hime_init` the default configuration is reported. Returns null
 /// only if serialization fails.
@@ -318,8 +326,9 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 /// [`hime_scan_schemes`] `path` field): its table becomes the engine
 /// dictionary and its `metadata.toml` values become the engine
 /// configuration, replacing user changes — that is how selecting a scheme
-/// reloads the scheme defaults. `page_size`, `english_punct_after_alnum`
-/// and `semicolon_quote_select` are not scheme-defined and survive. Live
+/// reloads the scheme defaults. `page_size`, `english_punct_after_alnum`,
+/// `semicolon_quote_select` and `show_code_in_window` are not scheme-defined
+/// and survive. Live
 /// sessions keep their ids, drop any in-progress composition,
 /// and are rebuilt for the new source, so a scheme can be switched while
 /// typing (including between a 形码 and a 形码整句 scheme). The engine is

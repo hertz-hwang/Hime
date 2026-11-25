@@ -14,7 +14,8 @@ use std::sync::Arc;
 use hime_core::ngram::find_model_path;
 use hime_core::sentence::SentenceEngine;
 use hime_core::{
-    CodeType, Config, EngineResponse, Session, KEY_BACKSPACE, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_SPACE,
+    CodeType, Config, DiffKind, EngineResponse, Session, KEY_BACKSPACE, KEY_ESCAPE, KEY_PAGE_DOWN,
+    KEY_SPACE,
 };
 
 const TABLE: &str = concat!(
@@ -79,6 +80,17 @@ fn long_code_decodes_a_sentence_and_space_commits_it() {
         "the full 12-key code is held, not capped at the word-code limit"
     );
     assert_eq!(r.candidates[0].text, "今天天气很好", "gold sentence first");
+    assert_eq!(r.code_line, "gd ak ak dm ti ol", "the display line is the top candidate's split");
+    assert_eq!(r.candidates[0].code, "gd ak ak dm ti ol", "the candidate carries its code split");
+    assert_eq!((r.page, r.page_count), (1, 2), "the window spans two pages");
+    assert!(
+        r.candidates.iter().skip(1).all(|candidate| !candidate.spans.is_empty()),
+        "every alternative carries diff spans"
+    );
+    assert!(
+        r.candidates[1].spans.iter().any(|span| span.kind != DiffKind::Equal),
+        "an alternative differs from the top candidate"
+    );
 
     let over = s.process_key(b'x' as u32);
     assert_eq!(over.preedit, "gdakakdmtiolx", "a 13th key keeps extending the sentence");

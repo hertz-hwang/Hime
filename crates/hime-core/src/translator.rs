@@ -54,7 +54,7 @@ mod tests {
     }
 
     fn cand(text: &str, comment: &str) -> Candidate {
-        Candidate { text: text.into(), comment: comment.into() }
+        Candidate::new(text, comment)
     }
 
     /// The translator is the pure table query: exact code first, then longer
