@@ -54,6 +54,10 @@ pub struct Session {
     /// The page `page` selects: the list the shell numbers 1.. and the one
     /// `Processor` validates digits and the paging keys against.
     candidates: Vec<Candidate>,
+    /// Zero-based focused candidate within `candidates`; Space commits it.
+    /// Resets to the first entry whenever the encoding or page changes, and
+    /// stays clamped to the rendered page.
+    focus: usize,
     /// Quote pairing for 中文标点; deliberately survives [`Session::clear`]
     /// so a quote opened before a commit still closes after it.
     quotes: QuotePair,
@@ -89,6 +93,7 @@ impl Session {
             window: Vec::new(),
             page: 0,
             candidates: Vec::new(),
+            focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
             sentence: None,
@@ -106,6 +111,7 @@ impl Session {
             window: Vec::new(),
             page: 0,
             candidates: Vec::new(),
+            focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
             sentence: None,
@@ -131,6 +137,7 @@ impl Session {
             window: Vec::new(),
             page: 0,
             candidates: Vec::new(),
+            focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
             sentence: Some(SentenceComposer {
@@ -230,11 +237,12 @@ impl Session {
                 let Some(punctuation) = punct::map(byte, &mut self.quotes) else {
                     return self.response(true, None);
                 };
-                // Same commit choice as Space: the first candidate, or the
+                // Same commit choice as Space: the focused candidate, or the
                 // letters themselves when nothing matches.
                 let mut commit = self
                     .candidates
-                    .first()
+                    .get(self.focus)
+                    .or_else(|| self.candidates.first())
                     .map(|candidate| candidate.text.clone())
                     .or_else(|| Some(mem::take(&mut self.input_buffer)))
                     .unwrap_or_default();
@@ -242,16 +250,22 @@ impl Session {
                 self.clear();
                 self.response(true, Some(commit))
             }
-            Action::Select(index) => match self.candidates.get(index) {
-                Some(candidate) => {
-                    let commit = candidate.text.clone();
-                    self.clear();
-                    self.response(true, Some(commit))
+            Action::Select(index) => self.commit_candidate(index),
+            Action::SelectFocused => self.commit_candidate(self.focus),
+            Action::FocusPrevious => {
+                if !self.candidates.is_empty() {
+                    self.focus = self.focus.saturating_sub(1);
                 }
-                // The rendered page no longer has that entry; keep composing
-                // rather than commit the wrong text.
-                None => self.response(true, None),
-            },
+                self.suspend_sentence_auto_commit();
+                self.response(true, None)
+            }
+            Action::FocusNext => {
+                if let Some(last) = self.candidates.len().checked_sub(1) {
+                    self.focus = (self.focus + 1).min(last);
+                }
+                self.suspend_sentence_auto_commit();
+                self.response(true, None)
+            }
             Action::PageUp => {
                 self.turn_page(PageDirection::Previous);
                 self.suspend_sentence_auto_commit();
@@ -360,8 +374,21 @@ impl Session {
         }
     }
 
-    /// Hold auto-commit for the rest of the composition (paging, Tab): only
-    /// meaningful for a sentence session.
+    /// Commit candidate `index` if the rendered page holds it; otherwise keep
+    /// composing rather than commit the wrong text.
+    fn commit_candidate(&mut self, index: usize) -> EngineResponse {
+        match self.candidates.get(index) {
+            Some(candidate) => {
+                let commit = candidate.text.clone();
+                self.clear();
+                self.response(true, Some(commit))
+            }
+            None => self.response(true, None),
+        }
+    }
+
+    /// Hold auto-commit for the rest of the composition (paging, focus
+    /// movement): only meaningful for a sentence session.
     fn suspend_sentence_auto_commit(&mut self) {
         if let Some(composer) = self.sentence.as_mut() {
             composer.auto_commit.suspend();
@@ -369,7 +396,8 @@ impl Session {
     }
 
     /// Re-retrieve the whole candidate window for the current encoding and
-    /// show its first page: an encoding change always restarts at the top.
+    /// show its first page: an encoding change always restarts at the top,
+    /// with the first candidate focused.
     fn refresh_candidates(&mut self) {
         self.window = if self.input_buffer.is_empty() {
             Vec::new()
@@ -377,6 +405,7 @@ impl Session {
             self.pipeline.retrieve(&self.input_buffer)
         };
         self.page = 0;
+        self.focus = 0;
         self.apply_page();
     }
 
@@ -389,6 +418,13 @@ impl Session {
         let start = self.page * size;
         let end = (start + size).min(self.window.len());
         self.candidates = self.window[start..end].to_vec();
+        // A config change can resize the page under a standing focus; keep
+        // the index inside the entries the shell renders.
+        self.focus = if self.candidates.is_empty() {
+            0
+        } else {
+            self.focus.min(self.candidates.len() - 1)
+        };
         // Whole-sentence candidates share most of their text with the page's
         // top candidate; describe each one relative to it so the shell colors
         // substitutions, deletions and insertions without any logic of its own.
@@ -404,6 +440,7 @@ impl Session {
             PageDirection::Previous => self.page = self.page.saturating_sub(1),
             PageDirection::Next => self.page = self.page.saturating_add(1),
         }
+        self.focus = 0;
         self.apply_page();
     }
 
@@ -412,6 +449,7 @@ impl Session {
         self.window.clear();
         self.page = 0;
         self.candidates.clear();
+        self.focus = 0;
         // A whole-code commit or abandon ends the composition: drop all
         // auto-commit state except the committed-fragment context.
         if let Some(composer) = self.sentence.as_mut() {
@@ -456,6 +494,7 @@ impl Session {
             code_line: self.code_line(),
             code_in_window: self.config.show_code_in_window,
             candidates: self.candidates.clone(),
+            focus: self.focus,
             page: if self.window.is_empty() { 0 } else { self.page + 1 },
             page_count: self.page_count(),
         }
@@ -466,8 +505,8 @@ impl Session {
 mod tests {
     use super::*;
     use crate::{
-        KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE, MAX_CODE_LEN,
-        MAX_CANDIDATES,
+        KEY_ARROW_DOWN, KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_BACKSPACE, KEY_ENTER,
+        KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE, MAX_CODE_LEN, MAX_CANDIDATES,
     };
 
     const SAMPLE: &str = "a\t工\t100\n\
@@ -538,6 +577,7 @@ mod tests {
     fn idle_passes_through_non_letters() {
         let mut s = session();
         for key in [KEY_SPACE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_1, KEY_9,
+                    KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_ARROW_DOWN,
                     b'-' as u32, b',' as u32, b'"' as u32] {
             let r = s.process_key(key);
             assert!(!r.handled, "idle key {key} must pass through");
@@ -599,6 +639,99 @@ mod tests {
         assert!(r.commit_text.is_none());
         assert_eq!(r.preedit, "");
         assert!(r.candidates.is_empty());
+    }
+
+    /// A horizontal candidate row moves its focus with Left/Right; the
+    /// vertical pair stays inert, and Space commits whichever entry has the
+    /// focus instead of always the first.
+    #[test]
+    fn horizontal_arrows_focus_and_space_commits_the_focused_candidate() {
+        let mut s = session();
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.focus, 0, "the first candidate starts focused");
+
+        let r = s.process_key(KEY_ARROW_RIGHT);
+        assert!(r.handled);
+        assert_eq!(r.focus, 1);
+        assert_eq!(r.preedit, "a", "moving focus leaves the encoding alone");
+
+        let r = s.process_key(KEY_ARROW_LEFT);
+        assert_eq!(r.focus, 0);
+        let r = s.process_key(KEY_ARROW_LEFT);
+        assert_eq!(r.focus, 0, "focus holds on the first candidate");
+
+        let r = s.process_key(KEY_ARROW_RIGHT);
+        assert_eq!(r.focus, 1);
+        for key in [KEY_ARROW_UP, KEY_ARROW_DOWN] {
+            let r = s.process_key(key);
+            assert!(r.handled, "the orthogonal axis is swallowed");
+            assert_eq!(r.focus, 1, "and does not move the focus");
+        }
+
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("戈"), "Space commits the focus");
+        assert_eq!(r.focus, 0, "a commit resets the focus");
+    }
+
+    /// A vertical candidate column swaps the axis: Up/Down move, Left/Right
+    /// are swallowed. Moving past the last entry holds there.
+    #[test]
+    fn vertical_arrows_focus_and_clamp_to_the_page() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { vertical_candidates: true, ..Config::default() });
+        let r = s.process_key(KEY_A);
+        assert_eq!(r.candidates.len(), 4);
+
+        let r = s.process_key(KEY_ARROW_DOWN);
+        assert_eq!(r.focus, 1);
+        let r = s.process_key(KEY_ARROW_UP);
+        assert_eq!(r.focus, 0);
+        for key in [KEY_ARROW_LEFT, KEY_ARROW_RIGHT] {
+            let r = s.process_key(key);
+            assert!(r.handled);
+            assert_eq!(r.focus, 0, "the horizontal pair is inert in a vertical column");
+        }
+        for _ in 0..10 {
+            s.process_key(KEY_ARROW_DOWN);
+        }
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("匿"), "focus stops on the last candidate");
+    }
+
+    /// Any change to the rendered page starts the focus over: a new encoding,
+    /// Backspace, and paging all focus the first entry of the new list.
+    #[test]
+    fn focus_resets_when_the_candidate_page_changes() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { page_size: 2, ..Config::default() });
+        s.process_key(KEY_A);
+        assert_eq!(s.process_key(KEY_ARROW_RIGHT).focus, 1);
+
+        let r = s.process_key(b'd' as u32); // "ad" narrows to 匿
+        assert_eq!(r.focus, 0);
+        assert_eq!(r.candidates[0].text, "匿");
+
+        let r = s.process_key(KEY_BACKSPACE); // back to "a"
+        assert_eq!(r.focus, 0);
+        assert_eq!(r.candidates[0].text, "工");
+        s.process_key(KEY_ARROW_RIGHT);
+        let r = s.process_key(KEY_PAGE_DOWN);
+        assert_eq!(r.page, 2);
+        assert_eq!(r.focus, 0, "turning the page focuses its first candidate");
+        assert_eq!(r.candidates[0].text, "式");
+    }
+
+    /// The 中文标点 commit shares Space's choice: a focused candidate takes
+    /// the punctuation instead of the first entry.
+    #[test]
+    fn punctuation_follows_the_focused_candidate() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        s.process_key(KEY_A);
+        s.process_key(KEY_ARROW_RIGHT);
+        let r = s.process_key(b',' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("戈，"));
+        assert_eq!(r.preedit, "");
     }
 
     #[test]
@@ -750,6 +883,7 @@ mod tests {
             "code_line",
             "code_in_window",
             "candidates",
+            "focus",
             "page",
             "page_count",
         ] {
@@ -761,6 +895,7 @@ mod tests {
         assert_eq!(v["code_line"], serde_json::json!(""));
         assert_eq!(v["code_in_window"], serde_json::json!(false));
         assert_eq!(v["candidates"], serde_json::json!([]));
+        assert_eq!(v["focus"], serde_json::json!(0));
         assert_eq!(v["page"], serde_json::json!(0));
         assert_eq!(v["page_count"], serde_json::json!(0));
 

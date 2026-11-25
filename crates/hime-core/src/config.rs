@@ -111,6 +111,12 @@ pub struct Config {
     /// mode) instead of inline in the input field. Schemes do not define it;
     /// it survives a scheme switch.
     pub show_code_in_window: bool,
+    /// Candidate window orientation: `false` lays candidates in one
+    /// horizontal row, `true` stacks them in a vertical column. The key model
+    /// follows it: horizontal candidates move focus with Left/Right, vertical
+    /// ones with Up/Down. Schemes do not define it; it survives a scheme
+    /// switch.
+    pub vertical_candidates: bool,
 }
 
 impl Default for Config {
@@ -126,6 +132,7 @@ impl Default for Config {
             english_punct_after_alnum: false,
             semicolon_quote_select: false,
             show_code_in_window: false,
+            vertical_candidates: false,
         }
     }
 }
@@ -166,29 +173,33 @@ mod tests {
         assert!(!config.english_punct_after_alnum, "the rule is opt-in");
         assert!(!config.semicolon_quote_select, "; and ' stay punctuation by default");
         assert!(!config.show_code_in_window, "the encoding is inline by default");
+        assert!(!config.vertical_candidates, "candidates are horizontal by default");
     }
 
-    /// The punctuation switches and the preedit placement cross JSON as plain
-    /// bools; a JSON that names none of them keeps them off.
+    /// The punctuation switches, preedit placement and candidate layout cross
+    /// JSON as plain bools; a JSON that names none of them keeps them off.
     #[test]
-    fn punctuation_switches_cross_json_as_bools() {
+    fn preference_switches_cross_json_as_bools() {
         let config: Config = serde_json::from_str(
-            r#"{"english_punct_after_alnum":true,"semicolon_quote_select":true,"show_code_in_window":true}"#,
+            r#"{"english_punct_after_alnum":true,"semicolon_quote_select":true,"show_code_in_window":true,"vertical_candidates":true}"#,
         )
         .unwrap();
         assert!(config.english_punct_after_alnum);
         assert!(config.semicolon_quote_select);
         assert!(config.show_code_in_window);
+        assert!(config.vertical_candidates);
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains(r#""english_punct_after_alnum":true"#), "{json}");
         assert!(json.contains(r#""semicolon_quote_select":true"#), "{json}");
         assert!(json.contains(r#""show_code_in_window":true"#), "{json}");
+        assert!(json.contains(r#""vertical_candidates":true"#), "{json}");
 
         let off: Config = serde_json::from_str("{}").unwrap();
         assert!(!off.english_punct_after_alnum);
         assert!(!off.semicolon_quote_select);
         assert!(!off.show_code_in_window);
+        assert!(!off.vertical_candidates);
     }
 
     #[test]

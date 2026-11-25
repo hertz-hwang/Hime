@@ -11,6 +11,10 @@ use hime_ffi::{
 const KEY_A: u32 = 97;
 const KEY_BACKSPACE: u32 = 8;
 const KEY_SPACE: u32 = 32;
+const KEY_ARROW_LEFT: u32 = 0x2190;
+const KEY_ARROW_UP: u32 = 0x2191;
+const KEY_ARROW_RIGHT: u32 = 0x2192;
+const KEY_ARROW_DOWN: u32 = 0x2193;
 
 fn sample_dict_path() -> CString {
     CString::new(concat!(
@@ -87,6 +91,7 @@ fn full_flow_through_c_abi() {
     assert_eq!(r["code_line"], "a");
     assert_eq!(r["code_in_window"], false);
     assert_eq!((r["page"].as_u64(), r["page_count"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(r["focus"], 0);
     assert_eq!(r["candidates"][0]["text"], "工");
     assert_eq!(r["candidates"][0]["comment"], "");
     assert_eq!(r["candidates"][0]["spans"], serde_json::json!([]));
@@ -107,6 +112,35 @@ fn full_flow_through_c_abi() {
     // Destroying makes the id unknown again.
     hime_destroy_session(session);
     assert!(hime_process_key(session, KEY_A, 0).is_null());
+
+    // Arrow focus: horizontal candidates move with Left/Right, Space commits
+    // the focused entry, and the vertical pair is swallowed.
+    let arrows = hime_create_session();
+    let r = process(arrows, KEY_A);
+    assert_eq!(r["focus"], 0, "the first candidate starts focused");
+    assert_eq!(process(arrows, KEY_ARROW_RIGHT)["focus"], 1);
+    assert_eq!(process(arrows, KEY_ARROW_LEFT)["focus"], 0);
+    let r = process(arrows, KEY_ARROW_DOWN);
+    assert_eq!((r["handled"].as_bool(), r["focus"].as_u64()), (Some(true), Some(0)));
+    assert_eq!(process(arrows, KEY_ARROW_RIGHT)["focus"], 1);
+    let r = process(arrows, KEY_SPACE);
+    assert_eq!(r["commit_text"], "戈", "Space commits the focused candidate");
+    hime_destroy_session(arrows);
+
+    // A vertical candidate column swaps the axis: Up/Down move, Left/Right
+    // stay inert.
+    assert!(set_config(r#"{"page_size":5,"max_code_len":4,"vertical_candidates":true}"#));
+    assert_eq!(get_config()["vertical_candidates"], true);
+    let vertical = hime_create_session();
+    process(vertical, KEY_A);
+    assert_eq!(process(vertical, KEY_ARROW_UP)["focus"], 0);
+    assert_eq!(process(vertical, KEY_ARROW_DOWN)["focus"], 1);
+    assert_eq!(process(vertical, KEY_ARROW_RIGHT)["focus"], 1);
+    let r = process(vertical, KEY_SPACE);
+    assert_eq!(r["commit_text"], "戈");
+    hime_destroy_session(vertical);
+    assert!(set_config(r#"{"page_size":5,"max_code_len":4,"vertical_candidates":false}"#));
+    assert_eq!(get_config()["vertical_candidates"], false);
 
     // Sessions stay independent: two live sessions, distinct buffers.
     let s1 = hime_create_session();
@@ -163,6 +197,7 @@ fn full_flow_through_c_abi() {
     assert_eq!(get_config()["english_punct_after_alnum"], false);
     assert_eq!(get_config()["semicolon_quote_select"], false);
     assert_eq!(get_config()["show_code_in_window"], false, "the encoding is inline by default");
+    assert_eq!(get_config()["vertical_candidates"], false, "candidates are horizontal by default");
     let both_on = r#"{"page_size":5,"max_code_len":4,"english_punct_after_alnum":true,"semicolon_quote_select":true,"show_code_in_window":true}"#;
     assert!(set_config(both_on));
     assert_eq!(get_config()["english_punct_after_alnum"], true);
@@ -200,14 +235,23 @@ fn full_flow_through_c_abi() {
 
     // Switching while a live session is composing keeps the id, drops the
     // composition, and replaces the config with the scheme defaults.
-    assert!(set_config(r#"{"page_size":5,"max_code_len":4,"show_code_in_window":true}"#));
+    assert!(set_config(
+        r#"{"page_size":5,"max_code_len":4,"show_code_in_window":true,"vertical_candidates":true}"#
+    ));
     let live = hime_create_session();
     process(live, KEY_A);
     assert!(select_scheme(liuli["path"].as_str().unwrap()));
 
     let cfg = get_config();
     assert_eq!(cfg["page_size"], 5, "page size survives a scheme switch");
-    assert_eq!(cfg["show_code_in_window"], true, "the preedit placement survives a scheme switch");
+    assert_eq!(
+        cfg["show_code_in_window"], true,
+        "the preedit placement survives a scheme switch"
+    );
+    assert_eq!(
+        cfg["vertical_candidates"], true,
+        "the candidate layout survives a scheme switch"
+    );
     assert_eq!(cfg["max_code_len"], 4);
     assert_eq!(cfg["code_type"], 2, "metadata type 2 = 形码");
     assert_eq!(cfg["auto_commit_length"], 4);

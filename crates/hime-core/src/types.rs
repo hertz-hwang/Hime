@@ -75,6 +75,9 @@ pub struct EngineResponse {
     pub code_in_window: bool,
     /// Candidate window contents (at most `page_size`).
     pub candidates: Vec<Candidate>,
+    /// Zero-based index of the focused candidate within `candidates`; 0 when
+    /// the list is empty. Space commits this entry.
+    pub focus: usize,
     /// One-based page number of `candidates` within the whole retrieved
     /// window; 0 when there is no candidate.
     pub page: usize,

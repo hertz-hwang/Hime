@@ -54,6 +54,15 @@ pub const KEY_ENTER: u32 = 13;
 pub const KEY_ESCAPE: u32 = 27;
 pub const KEY_SPACE: u32 = 32;
 
+/// Arrow keys (SPEC §2.1/§3). They sit above the ASCII range so they can
+/// never collide with a printable key the shell forwards unchanged. While a
+/// candidate stands, the axis matching the candidate-window orientation moves
+/// the focus; the other axis is swallowed.
+pub const KEY_ARROW_LEFT: u32 = 0x2190;
+pub const KEY_ARROW_UP: u32 = 0x2191;
+pub const KEY_ARROW_RIGHT: u32 = 0x2192;
+pub const KEY_ARROW_DOWN: u32 = 0x2193;
+
 /// Candidate paging keys (`SPEC` §3): `-` turns to the previous page,
 /// `=` to the next. They carry their own ASCII code (the shell forwards
 /// printable keys unchanged) and only take effect while a candidate is shown.

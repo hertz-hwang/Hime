@@ -14,11 +14,19 @@
 //! screen; while composing with nothing to page through both keys are
 //! swallowed, so neither reaches the host nor commits any text. Idle, they stay
 //! ordinary keys the application types.
+//!
+//! Arrow keys move the focus through the candidates on the current page.
+//! The layout decides the axis: horizontal candidates use Left/Right, vertical
+//! ones use Up/Down. The other axis is swallowed while a candidate stands, and
+//! both axes are swallowed while composing without candidates.
 
 use crate::config::{CodeType, Config};
 use crate::punct;
 use crate::sentence::config::max_raw_length;
-use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE};
+use crate::{
+    KEY_ARROW_DOWN, KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_BACKSPACE, KEY_ENTER,
+    KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE,
+};
 
 /// What the engine should do about one key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +41,13 @@ pub enum Action {
     Discard,
     /// Commit candidate `index` of the rendered list (0-based).
     Select(usize),
+    /// Commit the focused candidate (the one Space names); the session owns
+    /// the focused index.
+    SelectFocused,
+    /// Move the focus one candidate toward the start of the page.
+    FocusPrevious,
+    /// Move the focus one candidate toward the end of the page.
+    FocusNext,
     /// Turn to the previous candidate page (`KEY_PAGE_UP`, the `-` key). The
     /// encoding is untouched; `Session` moves a page cursor. Emitted only
     /// while a candidate is on screen.
@@ -51,9 +66,9 @@ pub enum Action {
     /// Commit the 中文标点 text of this ASCII punctuation key (the
     /// `Config::ascii_punct = 1` mode) and stay idle.
     CommitPunct(u8),
-    /// Commit the current encoding's first candidate (the raw letters when
-    /// no candidate matches) followed by the 中文标点 text of this key, and
-    /// end the composition.
+    /// Commit the focused candidate (the raw letters when no candidate
+    /// matches) followed by the 中文标点 text of this key, and end the
+    /// composition.
     CommitCandidatePunct(u8),
     /// Intercepted with no effect, so the host's Marked Text keeps running.
     Noop,
@@ -142,11 +157,17 @@ impl Processor {
         match key {
             KEY_BACKSPACE => Action::DeleteCode,
             KEY_ESCAPE => Action::Discard,
-            // The first candidate wins; with nothing selectable, commit the
-            // raw encoding instead.
-            KEY_SPACE if candidate_count > 0 => Action::Select(0),
+            // Space commits the focused candidate; with nothing selectable,
+            // commit the raw encoding instead.
+            KEY_SPACE if candidate_count > 0 => Action::SelectFocused,
             KEY_SPACE => Action::CommitRaw,
             KEY_ENTER => Action::CommitRaw,
+            // The candidate-window orientation picks the moving axis; the
+            // other axis is swallowed so it cannot move the host's caret
+            // through a standing composition.
+            key @ (KEY_ARROW_LEFT | KEY_ARROW_RIGHT | KEY_ARROW_UP | KEY_ARROW_DOWN) => {
+                arrow_focus(key, candidate_count, config)
+            }
             // Paging turns the candidate list but only while a candidate is
             // shown. With nothing to page through the key is swallowed:
             // neither `-` nor `=` may leak to the host mid-composition, and
@@ -199,6 +220,20 @@ impl Processor {
     }
 }
 
+/// Focus movement for one arrow key. Only the axis matching the candidate
+/// layout moves, and only while the current page holds a candidate; an
+/// orthogonal arrow (and any arrow with nothing to focus) is a no-op.
+fn arrow_focus(key: u32, candidate_count: usize, config: Config) -> Action {
+    if candidate_count == 0 {
+        return Action::Noop;
+    }
+    match (key, config.vertical_candidates) {
+        (KEY_ARROW_LEFT, false) | (KEY_ARROW_UP, true) => Action::FocusPrevious,
+        (KEY_ARROW_RIGHT, false) | (KEY_ARROW_DOWN, true) => Action::FocusNext,
+        _ => Action::Noop,
+    }
+}
+
 /// Digits that can name a candidate: `1` up to the configured page size.
 fn is_selection_key(key: u32, config: Config) -> bool {
     (ASCII_1..ASCII_1 + config.page_size as u32).contains(&key)
@@ -223,7 +258,10 @@ fn is_symbol_key(key: u32) -> bool {
 mod tests {
     use super::*;
     use crate::sentence::config::{AUTO_COMMIT_MAX_RAW_LENGTH, MAX_RAW_LENGTH};
-    use crate::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
+    use crate::{
+        KEY_ARROW_DOWN, KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_BACKSPACE, KEY_ENTER,
+        KEY_ESCAPE, KEY_SPACE,
+    };
 
     const KEY_A: u32 = 97;
     const KEY_D: u32 = 100;
@@ -278,9 +316,60 @@ mod tests {
     }
 
     #[test]
-    fn space_picks_the_first_candidate_or_commits_the_raw_code() {
-        assert_eq!(composing(KEY_SPACE, "a", 3), Action::Select(0));
+    fn space_commits_the_focused_candidate_or_the_raw_code() {
+        assert_eq!(composing(KEY_SPACE, "a", 3), Action::SelectFocused);
         assert_eq!(composing(KEY_SPACE, "q", 0), Action::CommitRaw);
+    }
+
+    /// The candidate layout picks the arrow axis. While a candidate stands,
+    /// the matching pair moves the focus and the other pair is swallowed;
+    /// with no candidate every arrow is swallowed, and idle they pass.
+    #[test]
+    fn arrow_keys_move_along_the_candidate_layout_axis() {
+        let horizontal = Config::default();
+        assert_eq!(
+            Processor::decide(KEY_ARROW_LEFT, "a", 3, horizontal, false),
+            Action::FocusPrevious
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_RIGHT, "a", 3, horizontal, false),
+            Action::FocusNext
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_UP, "a", 3, horizontal, false),
+            Action::Noop,
+            "the vertical pair is inert in a horizontal window"
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_DOWN, "a", 3, horizontal, false),
+            Action::Noop
+        );
+
+        let vertical = Config { vertical_candidates: true, ..Config::default() };
+        assert_eq!(
+            Processor::decide(KEY_ARROW_UP, "a", 3, vertical, false),
+            Action::FocusPrevious
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_DOWN, "a", 3, vertical, false),
+            Action::FocusNext
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_LEFT, "a", 3, vertical, false),
+            Action::Noop,
+            "the horizontal pair is inert in a vertical column"
+        );
+        assert_eq!(
+            Processor::decide(KEY_ARROW_RIGHT, "a", 3, vertical, false),
+            Action::Noop
+        );
+
+        // Nothing to focus: every arrow is swallowed mid-composition.
+        for key in [KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_ARROW_DOWN] {
+            assert_eq!(Processor::decide(key, "q", 0, horizontal, false), Action::Noop);
+            assert_eq!(Processor::decide(key, "q", 0, vertical, false), Action::Noop);
+            assert_eq!(idle(key), Action::Pass);
+        }
     }
 
     /// Digits are valid only against the list the shell is rendering, which is
@@ -408,7 +497,7 @@ mod tests {
             Processor::decide(KEY_BACKSPACE, "a", 1, cn, false),
             Action::DeleteCode
         );
-        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn, false), Action::Select(0));
+        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn, false), Action::SelectFocused);
     }
 
     /// The preferences window moves both limits, and the decision table
@@ -579,7 +668,10 @@ mod tests {
     #[test]
     fn sentence_mode_keeps_selection_and_editing_keys() {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
-        assert_eq!(Processor::decide(KEY_SPACE, "jin", 3, sentence, false), Action::Select(0));
+        assert_eq!(
+            Processor::decide(KEY_SPACE, "jin", 3, sentence, false),
+            Action::SelectFocused
+        );
         assert_eq!(Processor::decide(KEY_SPACE, "q", 0, sentence, false), Action::CommitRaw);
         assert_eq!(Processor::decide(KEY_2, "jin", 3, sentence, false), Action::Select(1));
         assert_eq!(Processor::decide(KEY_BACKSPACE, "jin", 3, sentence, false), Action::DeleteCode);

@@ -24,11 +24,18 @@ extern "C" {
 
 /* Virtual key codes accepted by hime_process_key. Printable keys pass their
  * ASCII code: lowercase letters are 97..122, digits are 49..57, punctuation
- * its own shifted code (e.g. '?' is 63). */
+ * its own shifted code (e.g. '?' is 63). Arrow keys use codes above ASCII so
+ * they can never collide with a printable key. While a candidate stands, the
+ * axis matching the candidate-window orientation moves the focus (horizontal
+ * candidates: Left/Right; vertical: Up/Down); the other axis is swallowed. */
 #define HIME_KEY_BACKSPACE 8
 #define HIME_KEY_ENTER 13
 #define HIME_KEY_ESCAPE 27
 #define HIME_KEY_SPACE 32
+#define HIME_KEY_ARROW_LEFT 0x2190
+#define HIME_KEY_ARROW_UP 0x2191
+#define HIME_KEY_ARROW_RIGHT 0x2192
+#define HIME_KEY_ARROW_DOWN 0x2193
 
 /* Load a lexicon (absolute path) and initialize the global engine. Accepted
  * row formats: scheme table `text\tcode` (the default, e.g. 琉璃v1) or
@@ -49,12 +56,15 @@ void hime_destroy_session(uint64_t session_id);
  * handled, commit_text, preedit (the raw encoding), code_line (the display
  * line; word-separated when the top candidate supplies a code split),
  * code_in_window (render code_line in the candidate window instead of inline),
- * candidates (each with text, comment, code and spans), page (one-based),
- * page_count. A candidate span is {"text":…,"kind":…} with kind equal,
- * modified, deleted or inserted relative to the first candidate; table
- * candidates carry empty spans. modifiers is reserved and
- * ignored. handled is false when the engine leaves the key to the
- * host, which happens for idle ordinary keys and, in punctuation mode, for
+ * candidates (each with text, comment, code and spans), focus (zero-based
+ * focused candidate in candidates), page (one-based), page_count. A candidate
+ * span is {"text":…,"kind":…} with kind equal, modified, deleted or inserted
+ * relative to the first candidate; table candidates carry empty spans.
+ * Space commits the focused candidate. The arrow keys move the focus along
+ * the axis of vertical_candidates and are swallowed on the other axis while a
+ * candidate stands. modifiers is reserved and ignored. handled is false when
+ * the engine leaves the key to the host, which happens for idle ordinary keys
+ * and, in punctuation mode, for
  * punctuation the mapping does not claim (also the first mapped punctuation
  * right after English letters/digits when english_punct_after_alnum is on).
  * When semicolon_quote_select is on and a candidate is shown, ';' and '''
@@ -66,15 +76,16 @@ char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifier
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
  *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0,
  *  "english_punct_after_alnum":false,"semicolon_quote_select":false,
- *  "show_code_in_window":false}.
+ *  "show_code_in_window":false,"vertical_candidates":false}.
  * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
  * english_punct_after_alnum releases the first punctuation right after
  * English letters/digits to the host (e.g. the ':' in 12:30).
  * semicolon_quote_select makes ';' pick the 2nd candidate and ''' the 3rd
  * while a candidate stands. show_code_in_window renders the encoding in the
- * candidate window instead of inline. Reports the defaults before hime_init.
- * The caller must release the string
- * with hime_free_string. */
+ * candidate window instead of inline. vertical_candidates stacks the window
+ * in a column and makes Up/Down the focus-movement arrows (horizontal uses
+ * Left/Right). Reports the defaults before hime_init. The caller must release
+ * the string with hime_free_string. */
 char* hime_get_config(void);
 
 /* Apply a config given as JSON (keys as in hime_get_config; see
@@ -97,7 +108,8 @@ char* hime_scan_schemes(const char* dir);
  * hime_scan_schemes): its table becomes the engine dictionary, its
  * metadata.toml values replace the engine config (that is how selecting a
  * scheme reloads its defaults; page_size, english_punct_after_alnum,
- * semicolon_quote_select and show_code_in_window survive). Live
+ * semicolon_quote_select, show_code_in_window and vertical_candidates
+ * survive). Live
  * sessions keep their
  * ids, drop any in-progress composition, and are rebuilt for the new source,
  * so a scheme can be switched while typing (including between a 形码 and a

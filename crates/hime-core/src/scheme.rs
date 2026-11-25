@@ -69,9 +69,9 @@ impl Default for SchemeMetadata {
 impl SchemeMetadata {
     /// The engine configuration this scheme prescribes: every behavior key
     /// comes from the metadata, only the keys schemes do not define —
-    /// `page_size`, the two punctuation preference switches and the preedit
-    /// placement — are carried over from `base`. Out-of-range metadata is
-    /// clamped like any other config.
+    /// `page_size`, the two punctuation preference switches, the preedit
+    /// placement and the candidate layout — are carried over from `base`.
+    /// Out-of-range metadata is clamped like any other config.
     #[must_use]
     pub fn defaults_for(&self, base: Config) -> Config {
         Config {
@@ -85,6 +85,7 @@ impl SchemeMetadata {
             english_punct_after_alnum: base.english_punct_after_alnum,
             semicolon_quote_select: base.semicolon_quote_select,
             show_code_in_window: base.show_code_in_window,
+            vertical_candidates: base.vertical_candidates,
         }
         .sanitized()
     }
@@ -326,6 +327,7 @@ mod tests {
             page_size: 8,
             english_punct_after_alnum: true,
             semicolon_quote_select: true,
+            vertical_candidates: true,
             ..Config::default()
         };
         let config = metadata.defaults_for(base);
@@ -334,6 +336,7 @@ mod tests {
             config.english_punct_after_alnum && config.semicolon_quote_select,
             "preference switches survive a scheme switch"
         );
+        assert!(config.vertical_candidates, "the candidate layout survives a scheme switch");
         assert_eq!(config.max_code_len, 6);
         assert_eq!(config.code_type, CodeType::Shuangpin);
         assert!(config.auto_commit);
