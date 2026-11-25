@@ -23,22 +23,42 @@
 ### 2.2 引擎输出响应 (`EngineResponse` - 需支持 `serde::Serialize`)
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DiffKind { Equal, Modified, Deleted, Inserted } // JSON: equal/modified/deleted/inserted
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiffSpan {
+    pub text: String,    // 连续候选字符
+    pub kind: DiffKind,  // 相对本页首选候选的差异类型
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Candidate {
-    pub text: String,    // 候选词文字，如 "工"
-    pub comment: String, // 编码提示（如后续编码补全提示），当前可为空字符串
+    pub text: String,         // 候选词文字，如 "工"
+    pub comment: String,      // 编码提示（如后续编码补全提示），当前可为空字符串
+    pub code: String,         // 整句候选背后的编码分段，如 "pms sdf gh ds"；词表候选为空
+    pub spans: Vec<DiffSpan>, // 相对本页首选候选的差异片段；空表示整体用正常文字色
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EngineResponse {
     pub handled: bool,               // true 表示输入法拦截该按键；false 表示交还给系统处理
     pub commit_text: Option<String>, // 需要直接上屏的文本
-    pub preedit: String,             // 输入框内带下划线的内嵌编码预览
+    pub preedit: String,             // 已输入的原码
+    pub code_line: String,           // 展示用编码行：首选候选的 code 恰好覆盖原码时用其分段，否则等于 preedit
+    pub code_in_window: bool,        // true = 输入码显示在候选窗（非嵌入模式）；false = 内嵌在输入框
     pub candidates: Vec<Candidate>,  // 当前候选词列表（长度不超过 page_size，见 §2.3）
+    pub page: usize,                 // 当前页，1 起；无候选时为 0
+    pub page_count: usize,           // 检索窗口的总页数；无候选时为 0
 }
 ```
 
+- `code_line` 由引擎计算：整句候选的 `code` 是解码路径按词的编码切分（空格连接），当去掉空格后与原码一致时作为展示行，否则退回原码。于是输入的码串会随首选候选自动分段（如 `pmssdfghdskfje` 显示为 `pms sdf gh ds kf je`）。
+- `spans` 由引擎在切页后计算，基准是**当前页**的首选候选：等长替换 `modified`、候选侧净短 `deleted`、候选侧净长 `inserted`、相同 `equal`。首选候选自身与词表候选为空。外壳只按类型取色，不做比对。
+- `code_in_window` 来自 `Config.show_code_in_window`；外壳据此决定内嵌 Marked Text 还是把 `code_line` 画在候选窗里。
+- `page`/`page_count` 供候选窗页码（如 `1/4`）使用，页码是打字状态，归 `Session`。
+
 ### 2.3 引擎配置 (`Config` - `hime_core::config`)
-首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义与截断候选页时读取它。除 `page_size` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。其中 `code_type` 是方案的固有属性，面板只读展示，用户不可改。
+首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义、生成响应与截断候选页时读取它。除 `page_size`、`english_punct_after_alnum`、`semicolon_quote_select`、`show_code_in_window` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。其中 `code_type` 是方案的固有属性，面板只读展示，用户不可改。
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,16 +73,18 @@ pub struct Config {
     pub ascii_punct: u8,          // 标点输出：0 英文标点 / 1 中文标点，即 metadata 的 ascii_punct，JSON 里就是这个数字（非布尔）；sanitized() 把其它值钳到 1
     pub english_punct_after_alnum: bool, // 英文/数字后使用英文标点：中文标点下紧随字母/数字的首个表键标点放行给宿主（如 12:30）；方案不定义它，切换方案时保留
     pub semicolon_quote_select: bool,    // 使用分号/引号二三选：编码态有候选时 `;` 选第 2、`'` 选第 3 候选；方案不定义它，切换方案时保留
+    pub show_code_in_window: bool,       // 输入码显示在候选窗（非嵌入模式），关闭时内嵌在输入框；方案不定义它，切换方案时保留
 }
 ```
 
-- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`），未设置时行为与从前完全一致。
+- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
 - 形码整句（`code_type = 3`）下 `max_code_len`、`auto_commit_length`、`commit_next_code` 均为无效配置（整句不按词码长截断、不顶码提交，自动上屏走 §7.6 的整句算法而非唯一候选规则）；macOS 面板在 `type = 3` 时置灰这三行，`auto_commit` 保留可编辑。见 §7.4。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
 - `Session::set_config` 只按新页长重切当前页（页码夹进新范围），不再重建检索链或重取候选——页长只影响切页，编码输入中途改配置也从下一次响应起生效。
 - `ascii_punct` 由 §3 的按键模型消费：`0` 英文标点，可打印符号全部原样放行给宿主；`1` 中文标点，标点映射表（§3.1）内的键被引擎拦截并输出该键的映射文字，表外符号仍然放行。`english_punct_after_alnum` 只在 `ascii_punct = 1` 下改变表键的处理（§3.1）；`semicolon_quote_select` 与标点模式无关，只改写编码态 `;`/`'` 的含义（§3）。
+- `show_code_in_window` 不进按键模型，只决定响应里的 `code_in_window` 与外壳把 `code_line` 画在输入框还是候选窗；它和 `page_size` 一样由用户在面板设置、不被方案元数据覆盖。
 
 ## 3. 形码状态机逻辑 (`Session::process_key`)
 按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）同样由 `Session` 持有并传入，`Processor` 只读。翻页（page）由 `Processor` 发 `PageUp`/`PageDown`、由 `Session` 维护页码，不动编码缓冲（详见 §3「翻页」条）。
@@ -133,7 +155,8 @@ pub struct Config {
 ### 4.3 每页数量、检索窗口与翻页
 - 一页的候选数（也是候选窗编号数字键能选中的数量、`EngineResponse.candidates` 的长度上限）由 `Config.page_size` 决定（§2.3）；默认值 `MAX_CANDIDATES = 5`。
 - `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量，让窗口宽于一页、能翻页。
-- 顺序是「先取满窗口 → 跑完所有 Filter → 交回 `Session`」，被丢弃的重复项让后面的匹配补位、而不是让窗口变短。切页在 `Session` 里做：它保存整个窗口与页码，把第 `page` 页（`window[page*page_size .. ][0..page_size]`）放进 `EngineResponse.candidates`，`PageUp`/`PageDown` 移动页码并夹到首尾页；编码变化即复位到第 0 页。页码是打字状态，归 `Session`（Fat Core），外壳只渲染当前页。
+- 顺序是「先取满窗口 → 跑完所有 Filter → 交回 `Session`」，被丢弃的重复项让后面的匹配补位、而不是让窗口变短。切页在 `Session` 里做：它保存整个窗口与页码，把第 `page` 页（`window[page*page_size .. ][0..page_size]`）放进 `EngineResponse.candidates`，`PageUp`/`PageDown` 移动页码并夹到首尾页；编码变化即复位到第 0 页。响应同时给出 1 起的 `page` 与总页数 `page_count`（无候选时均为 0），外壳据此画页码并处理鼠标翻页。页码是打字状态，归 `Session`（Fat Core），外壳只渲染当前页。
+- 整句方案下，切页后再按当前页首选候选生成每个候选的 `spans` 与 `code_line`（§2.2），因此翻页后差异基准与码串分段都跟随本页首选，词表方案不做差异标色。
 
 ## 5. 词库检索 (`Dictionary`)
 - 支持两种码表格式，按首个数据行的列数自动判别（2 列 → 方案码表，3 列 → 带权重 TSV）；`#` 开头的行是注释（真实方案码表以 `#name=`/`#describe=`/`#author=` 元数据块开头），空行忽略：
@@ -156,7 +179,7 @@ pub struct Config {
 | `commit_next_code` | 整数 | 顶码提交的码位 N，0 为关闭 | 是 |
 | `ascii_punct` | 0/1 | 标点输出：0 英文标点 / 1 中文标点，即 `Config.ascii_punct` | 是 |
 
-- 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改（`type` 除外：编码类型由方案决定，面板只读跟随）；切换方案时再按新方案的元数据重载默认值（`page_size`、`english_punct_after_alnum`、`semicolon_quote_select` 三项不由方案定义，跨方案保留用户设置）。
+- 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改（`type` 除外：编码类型由方案决定，面板只读跟随）；切换方案时再按新方案的元数据重载默认值（`page_size`、`english_punct_after_alnum`、`semicolon_quote_select`、`show_code_in_window` 四项不由方案定义，跨方案保留用户设置）。
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
 - `scan_schemes(dir)` 按文件夹名排序扫描，目录不可读返回空表；缺 `metadata.toml` 的普通子文件夹不算方案，单个文件夹坏了记 stderr 跳过，不拖累其余。`load_scheme(dir)` 读取单个文件夹。对外壳的接口见 §6。
 
@@ -210,7 +233,7 @@ char* hime_scan_schemes(const char* dir);
 // 选中 scheme_dir（scan 条目里的 path）：按方案 type 决定候选来源——形码整句
 // (type 3) 用 n-gram 模型 + 方案表构建整句引擎，其余把方案码表作为词库；其
 // metadata 值整体替换引擎配置（切换方案即重载方案默认值，page_size、
-// english_punct_after_alnum、semicolon_quote_select 保留）。
+// english_punct_after_alnum、semicolon_quote_select、show_code_in_window 保留）。
 // 现有会话保持 id、按新来源原地重建并丢弃进行中的编码（词库↔整句可互切）；
 // 引擎未初始化则初始化。整句方案缺 .hng 模型时返回 false 且引擎不变。
 // 非法路径或加载失败返回 false，引擎保持不变
@@ -305,7 +328,10 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   无状态 `decode(code, context)`（沿用默认 单字重码组句 开启），整体以 `Arc`
   跨会话共享。`SentenceTranslator` 把引擎适配为 `Translator`，整句候选因此接入
   既有检索管线（`Pipeline::sentence`，无需去重——解码本就一文本一候选）；整段
-  编码已被消费，候选不带 `~剩余码` 注释。
+  编码已被消费，候选不带 `~剩余码` 注释。解码器给出的 `segmented`（空格连接的
+  编码切分）放进 `Candidate.code`；`Session` 切页后用首选候选的 `code` 生成
+  `code_line`，并按本页首选候选给每个候选生成 `spans`（§2.2），外壳无需再做分段
+  或比对。
 - 状态机（§3）：`code_type = 形码整句` 时字母只受解码器上限约束——不按
   `max_code_len` 截断、也不触发 `commit_next_code` 顶码提交，再按一个字母是延长
   整句。上限随自动上屏开关二选一：关闭时取手动上限 `MAX_RAW_LENGTH = 256`（手动
