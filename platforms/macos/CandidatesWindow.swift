@@ -346,7 +346,6 @@ final class HimeCandidatesWindow: NSPanel {
     private var lastPin: (topLeft: NSPoint, frame: NSRect)?
     private var frameToken = 0
     private var alphaToken = 0
-    private var isAnimatingFrame = false
     private var isFadingOut = false
     private var ghostImageView: NSImageView?
 
@@ -462,7 +461,6 @@ final class HimeCandidatesWindow: NSPanel {
     func hide() {
         lastPin = nil
         frameToken += 1
-        isAnimatingFrame = false
         clearGhost()
         guard isVisible, !isFadingOut else { return }
         isFadingOut = true
@@ -538,7 +536,6 @@ final class HimeCandidatesWindow: NSPanel {
     // MARK: - Frame animation
 
     private func animateFrame(to newFrame: NSRect, duration: CFTimeInterval) {
-        isAnimatingFrame = true
         frameToken += 1
         let token = frameToken
         NSAnimationContext.runAnimationGroup({ context in
@@ -548,7 +545,6 @@ final class HimeCandidatesWindow: NSPanel {
             self.animator().setFrame(newFrame, display: true)
         }, completionHandler: { [weak self] in
             guard let self, self.frameToken == token else { return }
-            self.isAnimatingFrame = false
         })
     }
 
@@ -557,7 +553,6 @@ final class HimeCandidatesWindow: NSPanel {
     /// could otherwise be pulled back to the previous target.
     private func placeWithoutAnimation(_ newFrame: NSRect) {
         frameToken += 1
-        isAnimatingFrame = false
         clearGhost()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
