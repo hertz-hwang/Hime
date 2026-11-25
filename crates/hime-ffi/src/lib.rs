@@ -16,16 +16,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use hime_core::ngram::{find_model_path, probe_model, set_model_override};
 use hime_core::sentence::SentenceEngine;
+use hime_core::pinyin::SharedPinyin;
 use hime_core::{
     ensure_config_layout, load_scheme, scan_schemes, schemes_dir, CodeType, Config, Dictionary,
-    Session,
+    PinyinLexicon, ReverseLookup, Session,
 };
 
-/// Where candidates come from: a word table, or the whole-sentence engine a
-/// 形码整句 (type 3) scheme needs. This decides how every session is built.
+/// Where candidates come from: a 形码 word table, the whole-sentence engine a
+/// 形码整句 (type 3) scheme needs, or the pinyin lexicon a 全拼 (type 0)
+/// scheme carries. This decides how every session is built.
 enum EngineSource {
     Table(Arc<Dictionary>),
     Sentence(Arc<SentenceEngine>),
+    Pinyin(Arc<PinyinLexicon>),
 }
 
 /// Global engine state, present only after a successful `hime_init`.
@@ -34,6 +37,12 @@ struct Engine {
     config: Config,
     sessions: HashMap<u64, Session>,
     next_session_id: u64,
+    /// The shared pinyin table: the candidate source of a 全拼 scheme and the
+    /// query side of 反查 in every other scheme (SPEC §8). The table is read
+    /// on first use, so a process that never needs pinyin pays nothing for
+    /// it; `None` when no table was found beside the schemes, in which case
+    /// 反查 stays unavailable.
+    pinyin: Option<Arc<SharedPinyin>>,
     /// The `.hng` path a 形码整句 source loaded from (SPEC §7.5); `None`
     /// for a word table. Reported by `hime_model_status` so the panel can
     /// show the file the engine actually uses.
@@ -41,13 +50,14 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(source: EngineSource) -> Self {
+    fn new(source: EngineSource, pinyin_path: Option<PathBuf>) -> Self {
         Self {
             source,
             config: Config::default(),
             sessions: HashMap::new(),
             next_session_id: 1,
             model_path: None,
+            pinyin: pinyin_path.map(|path| Arc::new(SharedPinyin::new(path))),
         }
     }
 
@@ -55,9 +65,24 @@ impl Engine {
     /// source builds a sentence session (long codes decode whole sentences);
     /// a table source builds the word-lookup session.
     fn build_session(&self) -> Session {
-        match &self.source {
+        // 反查 shares one pinyin table across schemes; a scheme whose table is
+        // missing simply keeps `` ` `` as punctuation. A 全拼 session has no
+        // lookup at all — that scheme *is* the pinyin side (SPEC §8.3).
+        let session = match &self.source {
             EngineSource::Table(dict) => Session::with_config(Arc::clone(dict), self.config),
             EngineSource::Sentence(engine) => Session::sentence(Arc::clone(engine), self.config),
+            EngineSource::Pinyin(lexicon) => {
+                return Session::pinyin(Arc::clone(lexicon), self.config);
+            }
+        };
+        match (&self.pinyin, &self.source) {
+            (Some(pinyin), EngineSource::Table(dict)) => session.with_reverse(Arc::new(
+                ReverseLookup::for_table(Arc::clone(pinyin), Arc::clone(dict)),
+            )),
+            (Some(pinyin), EngineSource::Sentence(engine)) => session.with_reverse(Arc::new(
+                ReverseLookup::for_sentence(Arc::clone(pinyin), Arc::clone(engine)),
+            )),
+            _ => session,
         }
     }
 
@@ -72,6 +97,21 @@ impl Engine {
             self.sessions.insert(id, session);
         }
     }
+}
+
+/// Where the pinyin table lives: the `pinyin` scheme folder beside the one
+/// being selected (both the bundled `data/schemes` and the user folder keep
+/// that layout, SPEC §5.2/§8.1), or an explicit file given by
+/// `hime_set_pinyin_path`. A 全拼 scheme carries its own table, so it wins.
+fn pinyin_table_near(scheme_path: &Path) -> Option<PathBuf> {
+    let schemes_dir = scheme_path.parent()?;
+    if let Ok(info) = load_scheme(&schemes_dir.join("pinyin")) {
+        let path = PathBuf::from(info.table);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 static ENGINE: OnceLock<Mutex<Option<Engine>>> = OnceLock::new();
@@ -124,8 +164,9 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
     match Dictionary::load(path) {
         Ok(dict) => {
             let dict = Arc::new(dict);
+            let pinyin = pinyin_table_near(Path::new(path));
             with_engine("hime_init", |slot| {
-                *slot = Some(Engine::new(EngineSource::Table(dict)));
+                *slot = Some(Engine::new(EngineSource::Table(dict), pinyin));
             });
             true
         }
@@ -369,8 +410,10 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
         }
     };
     // A 形码整句 (type 3) scheme decodes with the n-gram model over a sentence
-    // table; every other scheme is a word table. Building the engine here lets
-    // a bad model fail the call without touching the live engine.
+    // table, a 全拼 (type 0) scheme looks pinyin words up, and every other
+    // scheme is a word table. Building the engine here lets a bad model or
+    // table fail the call without touching the live engine.
+    let mut pinyin = pinyin_table_near(Path::new(path));
     let (source, loaded_model) = match info.metadata.code_type {
         CodeType::XingmaSentence => {
             let Some(model) = find_model_path() else {
@@ -387,6 +430,18 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
                 }
             }
         }
+        CodeType::Quanpin => match PinyinLexicon::load(&info.table) {
+            Ok(lexicon) => {
+                // The scheme's own table is also the reverse source, so a
+                // user pinyin scheme serves 反查 in the shape schemes.
+                pinyin = Some(PathBuf::from(&info.table));
+                (EngineSource::Pinyin(Arc::new(lexicon)), None)
+            }
+            Err(e) => {
+                eprintln!("hime-ffi: failed to load pinyin table {:?}: {e}", info.table);
+                return false;
+            }
+        },
         _ => match Dictionary::load(&info.table) {
             Ok(dict) => (EngineSource::Table(Arc::new(dict)), None),
             Err(e) => {
@@ -397,7 +452,7 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     };
     with_engine("hime_select_scheme", |slot| match slot.as_mut() {
         None => {
-            let mut engine = Engine::new(source);
+            let mut engine = Engine::new(source, pinyin);
             engine.config = info.metadata.defaults_for(engine.config);
             engine.model_path = loaded_model;
             *slot = Some(engine);
@@ -407,6 +462,17 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             engine.config = info.metadata.defaults_for(engine.config);
             engine.source = source;
             engine.model_path = loaded_model;
+            // A different pinyin table (or a different folder) replaces the
+            // shared one; an unchanged path keeps the loaded table and every
+            // running session keeps reading it.
+            let same_path = match (&engine.pinyin, &pinyin) {
+                (Some(current), Some(path)) => current.path() == path,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same_path {
+                engine.pinyin = pinyin.map(|path| Arc::new(SharedPinyin::new(path)));
+            }
             engine.rebuild_sessions();
             true
         }

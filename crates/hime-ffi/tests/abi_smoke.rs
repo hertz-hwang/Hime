@@ -280,4 +280,86 @@ fn full_flow_through_c_abi() {
     // A folder that is not a scheme leaves the engine untouched.
     assert!(!select_scheme("/nonexistent/scheme-folder"));
     assert_eq!(get_config()["commit_next_code"], 5);
+
+    // --- 全拼 (SPEC §8.2): a type-0 scheme serves pinyin words ---
+
+    let pinyin = schemes
+        .iter()
+        .find(|s| s["dir"] == "pinyin")
+        .expect("the shipped 全拼 scheme is discovered");
+    assert_eq!(pinyin["name"], "全拼");
+    assert_eq!(pinyin["type"], 0);
+    assert!(pinyin["table"].as_str().unwrap().ends_with("py.hdict"), "{pinyin}");
+    assert!(select_scheme(pinyin["path"].as_str().unwrap()));
+
+    let cfg = get_config();
+    assert_eq!(cfg["code_type"], 0, "metadata type 0 = 全拼");
+    assert_eq!(cfg["ascii_punct"], 1, "the pinyin scheme types Chinese punctuation");
+
+    let pinyin_session = hime_create_session();
+    let mut r = process(pinyin_session, b'n' as u32);
+    assert_eq!(r["preedit"], "n");
+    assert!(!r["candidates"].as_array().unwrap().is_empty());
+    for key in *b"ihao" {
+        r = process(pinyin_session, u32::from(key));
+    }
+    assert_eq!(r["preedit"], "nihao", "a pinyin code outgrows the 形码 word cap");
+    assert_eq!(r["code_line"], "ni hao", "the top candidate supplies the split");
+    assert_eq!(r["candidates"][0]["text"], "你好");
+    assert_eq!(r["candidates"][0]["code"], "ni hao");
+    assert_eq!(r["candidates"][0]["comment"], "", "pinyin candidates carry no ~comment");
+    let r = process(pinyin_session, KEY_SPACE);
+    assert_eq!(r["commit_text"], "你好");
+    assert_eq!(r["preedit"], "");
+    hime_destroy_session(pinyin_session);
+
+    // 全拼 owns no reverse lookup: the backtick stays the mapped punctuation
+    // key and never opens a query.
+    let pinyin_session = hime_create_session();
+    let r = process(pinyin_session, 96);
+    assert_eq!(r["handled"], true);
+    assert_eq!(r["commit_text"], "`");
+    assert_eq!(r["preedit"], "");
+    hime_destroy_session(pinyin_session);
+
+    // --- 反查 (SPEC §8.3): backtick + full pinyin lists scheme codes ---
+
+    assert!(select_scheme(liuli["path"].as_str().unwrap()));
+    let reverse = hime_create_session();
+    let r = process(reverse, 96);
+    assert_eq!(r["handled"], true);
+    assert!(r["commit_text"].is_null());
+    assert_eq!(r["preedit"], "", "the marker is session state, not encoding text");
+    assert_eq!(r["code_line"], "`", "the display line keeps the marker");
+
+    let mut r = r;
+    for key in *b"nihao" {
+        r = process(reverse, u32::from(key));
+    }
+    assert_eq!(r["preedit"], "nihao");
+    assert_eq!(r["code_line"], "`ni hao");
+    assert_eq!(r["candidates"][0]["text"], "你好");
+    assert_eq!(r["candidates"][0]["comment"], "flol", "琉璃 hands over the full code");
+    assert_eq!(r["candidates"][0]["code"], "ni hao");
+    let r = process(reverse, KEY_SPACE);
+    assert_eq!(r["commit_text"], "你好");
+    hime_destroy_session(reverse);
+
+    // Backtick then Space commits the literal backtick, so the key stays
+    // typeable at all.
+    let reverse = hime_create_session();
+    process(reverse, 96);
+    let r = process(reverse, KEY_SPACE);
+    assert_eq!(r["commit_text"], "`");
+    assert_eq!(r["preedit"], "");
+    hime_destroy_session(reverse);
+
+    // Esc closes the lookup without committing anything.
+    let reverse = hime_create_session();
+    process(reverse, 96);
+    process(reverse, b'n' as u32);
+    let r = process(reverse, 27);
+    assert!(r["commit_text"].is_null());
+    assert_eq!(r["preedit"], "");
+    hime_destroy_session(reverse);
 }

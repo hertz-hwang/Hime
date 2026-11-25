@@ -24,8 +24,8 @@ extern "C" {
 
 /* Virtual key codes accepted by hime_process_key. Printable keys pass their
  * ASCII code: lowercase letters are 97..122, digits are 49..57, punctuation
- * its own shifted code (e.g. '?' is 63). Arrow keys use codes above ASCII so
- * they can never collide with a printable key. While a candidate stands, the
+ * its own shifted code (e.g. '?' is 63); the backtick is 96. Arrow keys use
+ * codes above ASCII so they can never collide with a printable key. While a candidate stands, the
  * axis matching the candidate-window orientation moves the focus (horizontal
  * candidates: Left/Right; vertical: Up/Down); the other axis is swallowed. */
 #define HIME_KEY_BACKSPACE 8
@@ -36,10 +36,12 @@ extern "C" {
 #define HIME_KEY_ARROW_UP 0x2191
 #define HIME_KEY_ARROW_RIGHT 0x2192
 #define HIME_KEY_ARROW_DOWN 0x2193
+#define HIME_KEY_BACKTICK 96
 
 /* Load a lexicon (absolute path) and initialize the global engine. Accepted
  * row formats: scheme table `text\tcode` (the default, e.g. 琉璃v1) or
- * weighted TSV `code\ttext\tweight`. Returns false when the path is
+ * weighted TSV `code\ttext\tweight`; a `.hdict` container is read as its
+ * payload row stream (docs/SPEC.md §8.1). Returns false when the path is
  * null/invalid or the dictionary fails to load. Calling again re-initializes
  * the engine and drops all sessions. */
 bool hime_init(const char* dict_path);
@@ -68,11 +70,19 @@ void hime_destroy_session(uint64_t session_id);
  * punctuation the mapping does not claim (also the first mapped punctuation
  * right after English letters/digits when english_punct_after_alnum is on).
  * When semicolon_quote_select is on and a candidate is shown, ';' and '''
- * select the 2nd/3rd candidate instead of emitting punctuation. The caller
- * must release the string with hime_free_string. */
+ * select the 2nd/3rd candidate instead of emitting punctuation.
+ *
+ * Shape schemes (形码 / 形码整句) also answer 反查 (docs/SPEC.md §8.3): a
+ * backtick (key 96) opens the lookup, the letters that follow are full
+ * pinyin, and each candidate's comment holds the active scheme's complete
+ * code for that word (empty when the scheme lists no such entry). Backtick
+ * then Space commits the literal '`'. A 全拼 scheme has no lookup, so the
+ * backtick stays punctuation there. The caller must release the string with
+ * hime_free_string. */
 char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifiers);
 
-/* Read the current engine config as JSON:
+/* Read the current engine config as JSON (code_type is 0 全拼 / 1 双拼 /
+ * 2 形码 / 3 形码整句):
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
  *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0,
  *  "english_punct_after_alnum":false,"semicolon_quote_select":false,
