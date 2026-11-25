@@ -18,6 +18,7 @@
   - `KEY_ENTER = 13`
   - `KEY_ESCAPE = 27`
   - `KEY_SPACE = 32`
+  - 方向键：`KEY_ARROW_LEFT = 0x2190`、`KEY_ARROW_UP = 0x2191`、`KEY_ARROW_RIGHT = 0x2192`、`KEY_ARROW_DOWN = 0x2193`。码位在 ASCII 之上，不会与外壳原样转发的可打印键冲突。有候选时按候选排列决定哪一对移动焦点（见 §3）。
 - 翻页键：`KEY_PAGE_UP = 45`（`-`，上翻页）、`KEY_PAGE_DOWN = 61`（`=`，下翻页）。它们就是自身的 ASCII 码（外壳原样转发可打印键），仅在「有候选」时翻页；编码态无候选时被吞掉，空闲态交还宿主（见 §3）。
 
 ### 2.2 引擎输出响应 (`EngineResponse` - 需支持 `serde::Serialize`)
@@ -47,18 +48,20 @@ pub struct EngineResponse {
     pub code_line: String,           // 展示用编码行：首选候选的 code 恰好覆盖原码时用其分段，否则等于 preedit
     pub code_in_window: bool,        // true = 输入码显示在候选窗（非嵌入模式）；false = 内嵌在输入框
     pub candidates: Vec<Candidate>,  // 当前候选词列表（长度不超过 page_size，见 §2.3）
+    pub focus: usize,                // 当前页焦点候选的 0 起索引；无候选时为 0
     pub page: usize,                 // 当前页，1 起；无候选时为 0
     pub page_count: usize,           // 检索窗口的总页数；无候选时为 0
 }
 ```
 
 - `code_line` 由引擎计算：整句候选的 `code` 是解码路径按词的编码切分（空格连接），当去掉空格后与原码一致时作为展示行，否则退回原码。于是输入的码串会随首选候选自动分段（如 `pmssdfghdskfje` 显示为 `pms sdf gh ds kf je`）。
+- `focus` 是打字状态，归 `Session`：候选窗高亮 `candidates[focus]`，空格提交该候选。编码变化、退格、翻页与提交都把它复位到当前页第 1 项；改配置重切页时钳进新页范围。
 - `spans` 由引擎在切页后计算，基准是**当前页**的首选候选：等长替换 `modified`、候选侧净短 `deleted`、候选侧净长 `inserted`、相同 `equal`。首选候选自身与词表候选为空。外壳只按类型取色，不做比对。
 - `code_in_window` 来自 `Config.show_code_in_window`；外壳据此决定内嵌 Marked Text 还是把 `code_line` 画在候选窗里。
 - `page`/`page_count` 供候选窗页码（如 `1/4`）使用，页码是打字状态，归 `Session`。
 
 ### 2.3 引擎配置 (`Config` - `hime_core::config`)
-首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义、生成响应与截断候选页时读取它。除 `page_size`、`english_punct_after_alnum`、`semicolon_quote_select`、`show_code_in_window` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。其中 `code_type` 是方案的固有属性，面板只读展示，用户不可改。
+首选项窗口能改的参数，纯值类型；FFI 层持有一份全局副本，随会话创建下发给每个 `Session`，`Session` 在决定按键含义、生成响应与截断候选页时读取它。除 `page_size`、`english_punct_after_alnum`、`semicolon_quote_select`、`show_code_in_window`、`vertical_candidates` 外，各键的默认值由所选方案的 `metadata.toml` 给出（见 §5.1）：选中方案时引擎配置整体替换为方案默认值，用户此后的修改在切回该方案前有效。其中 `code_type` 是方案的固有属性，面板只读展示，用户不可改。
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,10 +77,11 @@ pub struct Config {
     pub english_punct_after_alnum: bool, // 英文/数字后使用英文标点：中文标点下紧随字母/数字的首个表键标点放行给宿主（如 12:30）；方案不定义它，切换方案时保留
     pub semicolon_quote_select: bool,    // 使用分号/引号二三选：编码态有候选时 `;` 选第 2、`'` 选第 3 候选；方案不定义它，切换方案时保留
     pub show_code_in_window: bool,       // 输入码显示在候选窗（非嵌入模式），关闭时内嵌在输入框；方案不定义它，切换方案时保留
+    pub vertical_candidates: bool,       // 候选竖排：true 一列、false 一行；同时决定焦点方向键（竖排上下、横排左右）；方案不定义它，切换方案时保留
 }
 ```
 
-- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`），未设置时行为与从前完全一致。
+- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`、`vertical_candidates = false`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
 - 形码整句（`code_type = 3`）下 `max_code_len`、`auto_commit_length`、`commit_next_code` 均为无效配置（整句不按词码长截断、不顶码提交，自动上屏走 §7.6 的整句算法而非唯一候选规则）；macOS 面板在 `type = 3` 时置灰这三行，`auto_commit` 保留可编辑。见 §7.4。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
@@ -85,9 +89,10 @@ pub struct Config {
 - `Session::set_config` 只按新页长重切当前页（页码夹进新范围），不再重建检索链或重取候选——页长只影响切页，编码输入中途改配置也从下一次响应起生效。
 - `ascii_punct` 由 §3 的按键模型消费：`0` 英文标点，可打印符号全部原样放行给宿主；`1` 中文标点，标点映射表（§3.1）内的键被引擎拦截并输出该键的映射文字，表外符号仍然放行。`english_punct_after_alnum` 只在 `ascii_punct = 1` 下改变表键的处理（§3.1）；`semicolon_quote_select` 与标点模式无关，只改写编码态 `;`/`'` 的含义（§3）。
 - `show_code_in_window` 不进按键模型，只决定响应里的 `code_in_window` 与外壳把 `code_line` 画在输入框还是候选窗；它和 `page_size` 一样由用户在面板设置、不被方案元数据覆盖。
+- `vertical_candidates` 同时决定候选窗排版与按键模型的方向轴（§3）：它原本是纯 Shell 渲染参数，加入焦点候选后按键语义依赖排列，因此并入引擎配置；方案元数据不定义它，切换方案时保留。
 
 ## 3. 形码状态机逻辑 (`Session::process_key`)
-按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）同样由 `Session` 持有并传入，`Processor` 只读。翻页（page）由 `Processor` 发 `PageUp`/`PageDown`、由 `Session` 维护页码，不动编码缓冲（详见 §3「翻页」条）。
+按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `SelectFocused` / `FocusPrevious` / `FocusNext` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）与焦点索引同样由 `Session` 持有，`Processor` 只读。翻页（page）与焦点移动由 `Processor` 发对应 `Action`、由 `Session` 维护页码与焦点，不动编码缓冲（详见 §3「翻页」「焦点候选与方向键」条）。
 `candidate_count` 传入的是**当前页**渲染的候选数，因此数字键始终只选中当前页上的词，`-`/`=` 的「有候选」判据也只看当前页是否为空。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
@@ -103,12 +108,13 @@ pub struct Config {
    - 自动上屏（`Config.auto_commit`）：追加字母并重新检索后，若码长达到 `auto_commit_length` 且候选恰好只剩 1 个，该候选直接进 `commit_text` 并清空状态，返回 `handled: true`；同一次按键若已因顶码产生提交，两段文字拼接在同一个 `commit_text` 里。只由追加字母触发；Backspace 或改配置恰好留下唯一候选都不触发。本规则只作用于词码会话；形码整句（`code_type = 3`）的 `auto_commit` 走 §7.6 的概率 / 空码整句自动上屏，不受 `auto_commit_length` 约束。
    - 输入 `KEY_BACKSPACE`：删除 `input_buffer` 最后一个字符。若删空，清空 `preedit` 和 `candidates`；若未删空，重新检索词库。返回 `handled: true`。
    - 输入 `KEY_ESCAPE`：清空 `input_buffer`、清空候选，返回 `handled: true`。
-   - 输入 `KEY_SPACE`：若有候选词，取第 1 个候选词放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
+   - 输入 `KEY_SPACE`：若有候选词，取**焦点候选**（`focus`，初值 0）放入 `commit_text`；若无候选词，将 `input_buffer` 原样放入 `commit_text`（或清空）。随后清空 `input_buffer`，返回 `handled: true`。
    - 输入 `1`-`N`（`N` = `page_size`，默认 5）：若对应索引（0 起）存在候选词，将该词放入 `commit_text`，清空 `input_buffer`，返回 `handled: true`。数字索引按**当前页**从 0 计，翻页后仍只选当前页上的词。
    - 分号/引号二三选（`Config.semicolon_quote_select`）：当前页有候选时 `;`（59）选第 2 候选、`'`（39）选第 3 候选——候选不足则选中本页最后一个（`Select(min(序号, 候选数-1))`）：唯一候选时两键与 Space 一样提交首选，唯二候选时都提交第 2，≥3 候选时分号第 2、引号第 3。选中即提交上屏、清空状态，返回 `handled: true`；本条排在标点条之前，中文标点下有候选时 `;`/`'` 因此不再输出 `；` 与引号。无候选时本条不适用，两键回到下方标点/放行规则。
-   - **翻页**：输入 `KEY_PAGE_UP`（`-`）或 `KEY_PAGE_DOWN`（`=`），当且仅当**当前页有候选**时触发——`=` 下翻页、`-` 上翻页，`input_buffer`、`preedit` 不变，只换 `candidates` 为邻页，返回 `handled: true`。页码由 `Session` 持有，翻页越界（首页再上翻、末页再下翻）停在原地，仍返回 `handled: true`。编码任何变化（追加字母、退格、顶码、方案或配置变更）都把页码复位到第一页。**无候选时** `PageUp`/`PageDown` 不触发，两键按 No-op 拦截：返回 `handled: true`、`commit_text` 为空、`input_buffer` 与 `candidates` 原样保留，两种标点模式一致——既不放行给宿主，也不输出任何标点。编码为空的空闲态两键仍是普通键，按本节第 1 条放行给宿主（`handled: false`）。
+   - **翻页**：输入 `KEY_PAGE_UP`（`-`）或 `KEY_PAGE_DOWN`（`=`），当且仅当**当前页有候选**时触发——`=` 下翻页、`-` 上翻页，`input_buffer`、`preedit` 不变，只换 `candidates` 为邻页，返回 `handled: true`。页码由 `Session` 持有，翻页越界（首页再上翻、末页再下翻）停在原地，仍返回 `handled: true`。编码任何变化（追加字母、退格、顶码、方案或配置变更）都把页码复位到第一页；翻页把焦点复位到新页第 1 项。**无候选时** `PageUp`/`PageDown` 不触发，两键按 No-op 拦截：返回 `handled: true`、`commit_text` 为空、`input_buffer` 与 `candidates` 原样保留，两种标点模式一致——既不放行给宿主，也不输出任何标点。编码为空的空闲态两键仍是普通键，按本节第 1 条放行给宿主（`handled: false`）。
+   - **焦点候选与方向键**：当前页有候选时，方向键沿候选窗排列的轴移动焦点——`Config.vertical_candidates = false`（横排）用 `KEY_ARROW_LEFT`/`KEY_ARROW_RIGHT` 前移/后移，`true`（竖排）用 `KEY_ARROW_UP`/`KEY_ARROW_DOWN`；与排列正交的另一对方向键被吞掉（`handled: true`、状态不变），不会把宿主光标移进组字区。焦点停在当前页首/末项（越界不动），不自动翻页；编码变化、退格、翻页与任何提交都把焦点复位到 0。无候选时四键都按 No-op 吞掉；空闲态按本节第 1 条放行。移动焦点同时按 §7.6 挂起整句自动上屏。
    - 输入 `KEY_ENTER`：将 `input_buffer` 英文原样放入 `commit_text`，清空状态，返回 `handled: true`。
-   - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：第 1 候选（无候选则把已编码字母原样）拼接该键的映射文字进 `commit_text`，清空状态，返回 `handled: true`。
+   - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：焦点候选（无候选则把已编码字母原样）拼接该键的映射文字进 `commit_text`，清空状态，返回 `handled: true`。
    - 两个模式共同：表外的可打印符号键放行，返回 `handled: false`，组字状态原样保留——宿主把符号直接插入正文，内嵌预编辑继续站立，后续按键照常回到引擎续编。大写 `A`-`Z`（Shift+字母的最终字符）同样放行：编码只收小写。翻页键 `-`/`=` 属表外符号，唯一不参与本条：它们由上面的翻页条接管，无候选时按 No-op 吞掉。这是「编码态每个键都被拦截」契约唯一的例外。
    - 其他任何按键（含超出码长限制的 `a`-`z`、对应索引无候选词或超出页长的数字、以及所有未列出的键码）：一律作为 No-op 拦截，`input_buffer`、`preedit`、`candidates` 全部保持原状，返回 `handled: true`。目的：编码态存在宿主 Marked Text 时，防止未消费按键落到系统打断内嵌预编辑。
 
@@ -117,7 +123,7 @@ pub struct Config {
 
 - **英文标点（`ascii_punct = 0`）**：引擎不认领任何标点，可打印符号在空闲与编码态一律放行（返回 `handled: false`），宿主直接插入半角字符。翻页键 `-`/`=` 是唯一例外：编码态无候选时被吞掉（§3）。
 - **中文标点（`ascii_punct = 1`）**：下表内的键由引擎认领，输出该键在表里的映射文字（空闲直接进 `commit_text`；编码态先提交第 1 候选再拼接映射文字，见 §3）。认领看的是键本身在不在表里，与上档组合无关——`?`（63）、`^`（94）自身就是表键；表外的可打印符号两种模式下一律放行，翻页键 `-`/`=` 同样按 §3 处理（本表不含 `-` 与 `=`，两种模式下它们都不输出标点）。
-- **英文/数字后使用英文标点（`Config.english_punct_after_alnum`）**：只在中文标点下生效。`Session` 持有 `after_alnum` 状态——「最近一次交给宿主的文字是否以英文字母或数字结尾」：带 `commit_text` 的响应按提交文字末字符更新（上屏汉字即复位）；被放行的键按自身更新（字母/数字置真，Space 与可打印符号置假）；控制键（Backspace、Enter、方向键等）看不到宿主现在握着什么，状态原样保留。开启且状态为真时，空闲态的表键标点放行半角并复位状态——仅「首个」标点变英文，随后的标点回到中文映射；表外符号本就放行，置假后照常接续。编码态不受本开关影响：编码中的字母没有交给宿主，标点仍按 §3 提交第 1 候选。大写经 §3 放行，同样武装该状态（`A:` 的冒号出半角）。
+- **英文/数字后使用英文标点（`Config.english_punct_after_alnum`）**：只在中文标点下生效。`Session` 持有 `after_alnum` 状态——「最近一次交给宿主的文字是否以英文字母或数字结尾」：带 `commit_text` 的响应按提交文字末字符更新（上屏汉字即复位）；被放行的键按自身更新（字母/数字置真，Space 与可打印符号置假）；控制键（Backspace、Enter、方向键等）看不到宿主现在握着什么，状态原样保留。开启且状态为真时，空闲态的表键标点放行半角并复位状态——仅「首个」标点变英文，随后的标点回到中文映射；表外符号本就放行，置假后照常接续。编码态不受本开关影响：编码中的字母没有交给宿主，标点仍按 §3 提交焦点候选。大写经 §3 放行，同样武装该状态（`A:` 的冒号出半角）。
 
 映射表按键码升序，20 个直接映射加两组引号：
 
@@ -155,7 +161,7 @@ pub struct Config {
 ### 4.3 每页数量、检索窗口与翻页
 - 一页的候选数（也是候选窗编号数字键能选中的数量、`EngineResponse.candidates` 的长度上限）由 `Config.page_size` 决定（§2.3）；默认值 `MAX_CANDIDATES = 5`。
 - `FETCH_CANDIDATES = 32`：每个 Translator 的检索预算，刻意大于每页数量，让窗口宽于一页、能翻页。
-- 顺序是「先取满窗口 → 跑完所有 Filter → 交回 `Session`」，被丢弃的重复项让后面的匹配补位、而不是让窗口变短。切页在 `Session` 里做：它保存整个窗口与页码，把第 `page` 页（`window[page*page_size .. ][0..page_size]`）放进 `EngineResponse.candidates`，`PageUp`/`PageDown` 移动页码并夹到首尾页；编码变化即复位到第 0 页。响应同时给出 1 起的 `page` 与总页数 `page_count`（无候选时均为 0），外壳据此画页码并处理鼠标翻页。页码是打字状态，归 `Session`（Fat Core），外壳只渲染当前页。
+- 顺序是「先取满窗口 → 跑完所有 Filter → 交回 `Session`」，被丢弃的重复项让后面的匹配补位、而不是让窗口变短。切页在 `Session` 里做：它保存整个窗口与页码，把第 `page` 页（`window[page*page_size .. ][0..page_size]`）放进 `EngineResponse.candidates`，`PageUp`/`PageDown` 移动页码并夹到首尾页；编码变化即复位到第 0 页。焦点 `focus` 与页码一同切页：新页从第 1 项开始。响应同时给出 1 起的 `page`、总页数 `page_count`（无候选时均为 0）与 `focus`，外壳据此画页码、高亮焦点并处理鼠标翻页。页码与焦点是打字状态，归 `Session`（Fat Core），外壳只渲染当前页。
 - 整句方案下，切页后再按当前页首选候选生成每个候选的 `spans` 与 `code_line`（§2.2），因此翻页后差异基准与码串分段都跟随本页首选，词表方案不做差异标色。
 
 ## 5. 词库检索 (`Dictionary`)
@@ -233,7 +239,8 @@ char* hime_scan_schemes(const char* dir);
 // 选中 scheme_dir（scan 条目里的 path）：按方案 type 决定候选来源——形码整句
 // (type 3) 用 n-gram 模型 + 方案表构建整句引擎，其余把方案码表作为词库；其
 // metadata 值整体替换引擎配置（切换方案即重载方案默认值，page_size、
-// english_punct_after_alnum、semicolon_quote_select、show_code_in_window 保留）。
+// english_punct_after_alnum、semicolon_quote_select、show_code_in_window、
+// vertical_candidates 保留）。
 // 现有会话保持 id、按新来源原地重建并丢弃进行中的编码（词库↔整句可互切）；
 // 引擎未初始化则初始化。整句方案缺 .hng 模型时返回 false 且引擎不变。
 // 非法路径或加载失败返回 false，引擎保持不变
@@ -384,7 +391,7 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
   被任何词图边覆盖、且末段不再是合法码前缀时，提交上一码的首候选，保留新字母作为
   新码起点。
 
-会话挂起与复位对齐参考实现：翻页 / 候选高亮循环 → `suspend`（本条整句内挂起自动上屏
+会话挂起与复位对齐参考实现：翻页 / 候选焦点移动 → `suspend`（本条整句内挂起自动上屏
 并清空证据）；退格 → `evidence_invalidated`（仅作废证据、会话保留，继续敲可重新
 积累）；空格 / 数字 / Esc / 回车等消费整码 → `reset`（清空全部状态，仅保留已上屏
 片段作跨提交左上下文，供下一条整句打分）。解码用的左上下文取最近至多两条已上屏
