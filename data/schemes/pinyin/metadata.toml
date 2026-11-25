@@ -1,0 +1,10 @@
+name = "全拼"
+describe = "拼音，全拼"
+author = "-"
+type = 0
+
+max_code = 32
+auto_commit = false
+auto_commit_length = 4
+commit_next_code = 0
+ascii_punct = 1
