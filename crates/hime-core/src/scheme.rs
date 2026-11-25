@@ -111,7 +111,7 @@ pub enum SchemeError {
     Io(std::io::Error),
     /// `metadata.toml` is not valid TOML or has a wrong-typed value.
     Metadata(String),
-    /// The folder holds no `*.txt` table file.
+    /// The folder holds no `*.txt` or `*.hdict` table file.
     NoTable,
 }
 
@@ -120,7 +120,7 @@ impl fmt::Display for SchemeError {
         match self {
             SchemeError::Io(e) => write!(f, "io error: {e}"),
             SchemeError::Metadata(message) => write!(f, "metadata.toml: {message}"),
-            SchemeError::NoTable => write!(f, "no *.txt table file in the scheme folder"),
+            SchemeError::NoTable => write!(f, "no *.txt or *.hdict table file in the scheme folder"),
         }
     }
 }
@@ -152,21 +152,36 @@ pub fn load_scheme(dir: &Path) -> Result<SchemeInfo, SchemeError> {
     Ok(SchemeInfo { dir: dir_name, path: dir.display().to_string(), table, metadata })
 }
 
-/// The table file of a scheme folder: the alphabetically first `*.txt`.
+/// The table file of a scheme folder: the alphabetically first `*.txt`, or
+/// — when the folder holds no `.txt` — the alphabetically first `*.hdict`.
+/// A pinyin scheme ships its table as a compressed `.hdict` container
+/// (SPEC §8.1); 形码 and 形码整句 schemes keep using plain text tables, and a
+/// `.txt` beside an `.hdict` still wins so a user can drop a readable table
+/// into an existing folder.
 fn find_table(dir: &Path) -> Result<String, SchemeError> {
     let mut names: Vec<String> = fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
-            entry.path().is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "txt")
+            let path = entry.path();
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext == "txt" || ext == "hdict")
         })
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    names.sort();
+    names.sort_by_key(|name| (table_rank(name), name.clone()));
     names
         .first()
         .map(|name| dir.join(name).display().to_string())
         .ok_or(SchemeError::NoTable)
+}
+
+/// `.txt` tables outrank `.hdict` containers; the sort above is alphabetical
+/// inside each rank.
+fn table_rank(name: &str) -> u8 {
+    if name.ends_with(".txt") { 0 } else { 1 }
 }
 
 /// Discover the schemes under `dir` (the `data/schemes/` layout), sorted by
@@ -246,6 +261,35 @@ mod tests {
         let json = serde_json::to_string(&schemes).unwrap();
         assert!(json.contains(r#""name":"琉璃字词""#), "{json}");
         assert!(json.contains(r#""type":2"#), "{json}");
+    }
+
+    /// The shipped 全拼 scheme keeps its table in a `.hdict` container and
+    /// declares `type = 0`; scanning must find it without any `.txt` in the
+    /// folder.
+    #[test]
+    fn parses_the_shipped_pinyin_scheme() {
+        let info = load_scheme(&scheme_root().join("pinyin")).expect("pinyin scheme loads");
+        assert_eq!(info.dir, "pinyin");
+        assert_eq!(info.metadata.name, "全拼");
+        assert_eq!(info.metadata.code_type, CodeType::Quanpin);
+        assert!(info.table.ends_with("py.hdict"), "{}", info.table);
+        assert!(
+            scan_schemes(&scheme_root()).iter().any(|s| s.dir == "pinyin"),
+            "the scheme list includes 全拼"
+        );
+    }
+
+    /// A `.txt` beside a `.hdict` wins: the readable table is what the user
+    /// dropped in on purpose.
+    #[test]
+    fn a_txt_table_outranks_an_hdict_in_the_same_folder() {
+        let dir = temp_folder("prefer-txt");
+        std::fs::write(dir.join("metadata.toml"), "type = 0\n").unwrap();
+        std::fs::write(dir.join("a.hdict"), b"not read").unwrap();
+        std::fs::write(dir.join("z.txt"), "在\ta\n").unwrap();
+        let info = load_scheme(&dir).unwrap();
+        assert!(info.table.ends_with("z.txt"), "{}", info.table);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

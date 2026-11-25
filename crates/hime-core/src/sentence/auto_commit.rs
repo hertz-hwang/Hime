@@ -80,7 +80,7 @@ fn tracker_key(text: &str, raw_length: usize) -> String {
 
 /// The per-session auto-commit state. Owns only plain data (no `Rc`), so it
 /// stays `Send` and lives directly in the session.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct SentenceAutoCommit {
     trackers: HashMap<String, Tracker>,
     last_seen_raw: String,

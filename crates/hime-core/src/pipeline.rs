@@ -18,6 +18,7 @@ pub struct Pipeline {
     filters: Vec<Box<dyn Filter>>,
 }
 
+
 /// The stages are trait objects without their own `Debug`, so a session can
 /// still be inspected by showing how it is wired.
 impl std::fmt::Debug for Pipeline {
@@ -57,6 +58,23 @@ impl Pipeline {
         Self::new(vec![Box::new(crate::sentence::SentenceTranslator::new(engine))], vec![])
     }
 
+    /// The 全拼 chain: one pinyin word source, then de-duplicate. The lexicon
+    /// already offers each text once per query, so the filter is a guard
+    /// rather than a workhorse — but it is the same stage as every other
+    /// chain, which keeps page cutting identical.
+    pub fn pinyin(lexicon: Arc<crate::pinyin::PinyinLexicon>) -> Self {
+        Self::new(
+            vec![Box::new(crate::pinyin::PinyinTranslator::new(lexicon))],
+            vec![Box::new(DedupFilter)],
+        )
+    }
+
+    /// The 反查 chain: pinyin candidates that already carry the active
+    /// scheme's code in `comment`, so there is nothing left to filter.
+    pub fn reverse(lookup: Arc<crate::reverse::ReverseLookup>) -> Self {
+        Self::new(vec![Box::new(ReverseTranslator { lookup })], vec![])
+    }
+
     /// The full candidate window for `code`, best first: every match the
     /// translators report after the filters run, wider than one page.
     pub fn retrieve(&self, code: &str) -> Vec<Candidate> {
@@ -68,6 +86,18 @@ impl Pipeline {
         self.filters
             .iter()
             .fold(merged, |candidates, filter| filter.filter(candidates))
+    }
+}
+
+/// The 反查 source: pinyin words plus the active scheme's codes.
+#[derive(Debug)]
+struct ReverseTranslator {
+    lookup: Arc<crate::reverse::ReverseLookup>,
+}
+
+impl Translator for ReverseTranslator {
+    fn translate(&self, input: &str, limit: usize) -> Vec<Candidate> {
+        self.lookup.lookup(input, limit)
     }
 }
 

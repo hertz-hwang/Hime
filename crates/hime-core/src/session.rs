@@ -10,14 +10,21 @@ use std::mem;
 use std::sync::Arc;
 
 use crate::config::{CodeType, Config};
+use crate::pinyin::PinyinLexicon;
 use crate::dictionary::Dictionary;
 use crate::diff::annotate_candidate_diffs;
 use crate::pipeline::Pipeline;
-use crate::processor::{Action, Processor};
+use crate::processor::{Action, Processor, ReverseState};
 use crate::punct::{self, QuotePair};
+use crate::reverse::ReverseLookup;
 use crate::sentence::auto_commit::SentenceAutoCommit;
 use crate::sentence::SentenceEngine;
 use crate::types::{Candidate, EngineResponse};
+
+/// Marker that opens 反查 (SPEC §8.3). The session keeps it out of the
+/// encoding itself: `input_buffer` only ever holds the pinyin query, so the
+/// translator, paging and digits work on it unchanged.
+const REVERSE_PREFIX: char = '`';
 
 /// 形码整句 auto-commit state plus the engine it re-decodes with. Present only
 /// for a [`Session::sentence`] session; the auto-commit itself is inert unless
@@ -71,6 +78,14 @@ pub struct Session {
     /// 形码整句 probabilistic/empty-code auto-commit state; `None` for every
     /// non-sentence session, which keeps the sentence path fully gated.
     sentence: Option<SentenceComposer>,
+    /// 反查 source (SPEC §8.3): present exactly when the scheme has an
+    /// encoding worth looking up, i.e. 形码 or 形码整句. A 全拼 session never
+    /// has one, so `` ` `` keeps its punctuation meaning there.
+    reverse: Option<Arc<ReverseLookup>>,
+    /// Whether 反查 is open. Held here rather than as a `` ` `` inside
+    /// `input_buffer`, so the query alone reaches the pipeline and the
+    /// encoding grows exactly like a 全拼 one.
+    reversing: bool,
 }
 
 impl Session {
@@ -97,6 +112,8 @@ impl Session {
             quotes: QuotePair::default(),
             after_alnum: false,
             sentence: None,
+            reverse: None,
+            reversing: false,
         }
     }
 
@@ -115,6 +132,8 @@ impl Session {
             quotes: QuotePair::default(),
             after_alnum: false,
             sentence: None,
+            reverse: None,
+            reversing: false,
         }
     }
 
@@ -144,7 +163,44 @@ impl Session {
                 engine,
                 auto_commit: SentenceAutoCommit::default(),
             }),
+            reverse: None,
+            reversing: false,
         }
+    }
+
+    /// Session for 全拼: encodings are full pinyin and candidates come from
+    /// `lexicon`. The key model is the table one, with the longer pinyin code
+    /// cap and no overflow commit (`Processor` reads `code_type`); paging,
+    /// digits, Space and punctuation behave exactly as they do for 形码.
+    pub fn pinyin(lexicon: Arc<PinyinLexicon>, config: Config) -> Self {
+        let config = Config { code_type: CodeType::Quanpin, ..config }.sanitized();
+        let pipeline = Pipeline::pinyin(Arc::clone(&lexicon));
+        Self {
+            dict: None,
+            config,
+            pipeline,
+            input_buffer: String::new(),
+            window: Vec::new(),
+            page: 0,
+            candidates: Vec::new(),
+            focus: 0,
+            quotes: QuotePair::default(),
+            after_alnum: false,
+            sentence: None,
+            reverse: None,
+            reversing: false,
+        }
+    }
+
+    /// Enable 反查 for this session (SPEC §8.3): `` ` `` then full pinyin
+    /// lists pinyin words with the active scheme's codes in their comment.
+    /// Only a scheme that has codes to look up should call this — a 全拼
+    /// session must not, or `` ` `` would stop being the punctuation key the
+    /// mapping table defines.
+    #[must_use]
+    pub fn with_reverse(mut self, lookup: Arc<ReverseLookup>) -> Self {
+        self.reverse = Some(lookup);
+        self
     }
 
     /// The configuration this session applies to keys and pages.
@@ -193,6 +249,7 @@ impl Session {
             self.candidates.len(),
             self.config,
             self.after_alnum,
+            self.reverse_state(),
         );
         let response = match decision {
             Action::Pass => self.response(false, None),
@@ -213,8 +270,10 @@ impl Session {
             Action::DeleteCode => {
                 self.input_buffer.pop();
                 self.refresh_candidates();
-                if let Some(composer) = self.sentence.as_mut() {
-                    composer.auto_commit.evidence_invalidated();
+                if !self.reversing {
+                    if let Some(composer) = self.sentence.as_mut() {
+                        composer.auto_commit.evidence_invalidated();
+                    }
                 }
                 self.response(true, None)
             }
@@ -226,6 +285,15 @@ impl Session {
                 let commit = mem::take(&mut self.input_buffer);
                 self.clear();
                 self.response(true, Some(commit))
+            }
+            Action::StartReverse => {
+                self.reversing = true;
+                self.refresh_candidates();
+                self.response(true, None)
+            }
+            Action::CommitBacktick => {
+                self.clear();
+                self.response(true, Some(REVERSE_PREFIX.to_string()))
             }
             Action::CommitPunct(byte) => match punct::map(byte, &mut self.quotes) {
                 Some(text) => self.response(true, Some(text.to_owned())),
@@ -317,10 +385,19 @@ impl Session {
         self.refresh_candidates();
         // 形码整句 replaces the unique-candidate rule with the probabilistic
         // auto-commit; the word-code rule below only applies to table sessions.
-        if self.sentence.is_some() {
+        // Neither runs while 反查 is open: the query is pinyin, not a code the
+        // scheme could decode, so nothing may go to the host on its own.
+        if self.sentence.is_some() && !self.reversing {
             return self.sentence_auto_commit(pending);
         }
-        if self.config.auto_commit
+        // 反查 never auto-commits: the user is looking up codes, and the
+        // candidates are the pinyin words, not what they meant to type. 全拼
+        // does not either: a pinyin encoding is usually a prefix of a longer
+        // word, so a unique match is not a decision the engine may make for
+        // the user (the reference implementation behaves the same way).
+        if !self.reversing
+            && self.config.code_type != CodeType::Quanpin
+            && self.config.auto_commit
             && self.input_buffer.len() >= self.config.auto_commit_length
             && self.candidates.len() == 1
         {
@@ -387,6 +464,31 @@ impl Session {
         }
     }
 
+    /// What `` ` `` means right now (SPEC §8.3). Only a session with a reverse
+    /// lookup has one at all, so a 全拼 session reports
+    /// [`ReverseState::Unsupported`] and `` ` `` stays punctuation.
+    fn reverse_state(&self) -> ReverseState {
+        if self.reverse.is_none() {
+            ReverseState::Unsupported
+        } else if self.reversing {
+            ReverseState::Open
+        } else {
+            ReverseState::Closed
+        }
+    }
+
+    /// The chain 反查 retrieves from: pinyin words carrying the scheme codes.
+    ///
+    /// Built per keystroke from the shared lookup rather than swapped into
+    /// `pipeline`, so leaving 反查 restores the scheme chain by simply
+    /// clearing [`Self::reversing`] — there is nothing to put back.
+    fn reverse_pipeline(&self) -> Pipeline {
+        match &self.reverse {
+            Some(lookup) => Pipeline::reverse(Arc::clone(lookup)),
+            None => Pipeline::new(vec![], vec![]),
+        }
+    }
+
     /// Hold auto-commit for the rest of the composition (paging, focus
     /// movement): only meaningful for a sentence session.
     fn suspend_sentence_auto_commit(&mut self) {
@@ -401,6 +503,8 @@ impl Session {
     fn refresh_candidates(&mut self) {
         self.window = if self.input_buffer.is_empty() {
             Vec::new()
+        } else if self.reversing {
+            self.reverse_pipeline().retrieve(&self.input_buffer)
         } else {
             self.pipeline.retrieve(&self.input_buffer)
         };
@@ -428,7 +532,9 @@ impl Session {
         // Whole-sentence candidates share most of their text with the page's
         // top candidate; describe each one relative to it so the shell colors
         // substitutions, deletions and insertions without any logic of its own.
-        if self.sentence.is_some() {
+        // 反查 lists pinyin words, not competing decodings of one code: diff
+        // colors there would only decorate unrelated words.
+        if self.sentence.is_some() && !self.reversing {
             annotate_candidate_diffs(&mut self.candidates);
         }
     }
@@ -446,6 +552,7 @@ impl Session {
 
     fn clear(&mut self) {
         self.input_buffer.clear();
+        self.reversing = false;
         self.window.clear();
         self.page = 0;
         self.candidates.clear();
@@ -459,9 +566,20 @@ impl Session {
 
     /// The encoding to display: the first candidate's word-separated code
     /// split when it covers the raw encoding, otherwise the raw letters. The
-    /// split covers the whole code for a whole-sentence candidate, so the
-    /// shown string is an automatic segmentation of exactly what was typed.
+    /// split covers the whole code for a whole-sentence or pinyin candidate,
+    /// so the shown string is an automatic segmentation of exactly what was
+    /// typed. 反查 keeps its marker in front, so the line reads `` `ni hao ``
+    /// and it is obvious the window is a lookup.
     fn code_line(&self) -> String {
+        let line = self.source_code_line();
+        if self.reversing {
+            format!("{REVERSE_PREFIX}{line}")
+        } else {
+            line
+        }
+    }
+
+    fn source_code_line(&self) -> String {
         let Some(first) = self.candidates.first() else {
             return self.input_buffer.clone();
         };
@@ -1438,5 +1556,232 @@ mod tests {
             Some(second.candidates[1].text.as_str()),
             "; picks the 2nd candidate of the current page"
         );
+    }
+
+    // --- 全拼 (SPEC §8.2) ---
+
+    fn pinyin_lexicon() -> Arc<crate::PinyinLexicon> {
+        Arc::new(crate::PinyinLexicon::parse(
+            "你好\tnihao\t200\n\
+             你\tni\t100\n\
+             开\tkai\t90\n\
+             开发\tkaifa\t100\n\
+             先\txian\t100\n",
+        ))
+    }
+
+    fn pinyin_session() -> Session {
+        Session::pinyin(pinyin_lexicon(), Config::default())
+    }
+
+    /// 全拼 accepts a whole run of pinyin letters, shows the syllable split
+    /// and commits the focused candidate with Space.
+    #[test]
+    fn pinyin_types_a_long_code_and_commits_with_space() {
+        let mut s = pinyin_session();
+        let mut response = s.process_key(b'n' as u32);
+        assert!(response.handled);
+        assert_eq!(response.candidates[0].text, "你");
+        for key in [b'i' as u32, b'h' as u32, b'a' as u32, b'o' as u32] {
+            response = s.process_key(key);
+            assert!(response.handled);
+        }
+        assert_eq!(response.preedit, "nihao");
+        assert_eq!(response.code_line, "ni hao", "the split comes from the candidate");
+        assert_eq!(response.candidates[0].text, "你好");
+        assert_eq!(response.candidates[0].code, "ni hao");
+        assert!(response.candidates[0].comment.is_empty());
+
+        let committed = s.process_key(KEY_SPACE);
+        assert_eq!(committed.commit_text.as_deref(), Some("你好"));
+        assert!(committed.candidates.is_empty());
+    }
+
+    /// A pinyin encoding outgrows the 形码 word cap: `nihao` is five letters.
+    #[test]
+    fn pinyin_codes_grow_past_the_word_cap() {
+        let mut s = pinyin_session();
+        for key in [b'k' as u32, b'a' as u32, b'i' as u32, b'f' as u32, b'a' as u32] {
+            let r = s.process_key(key);
+            assert!(r.handled, "key {} was swallowed", key as u8 as char);
+        }
+        assert_eq!(s.input_buffer, "kaifa");
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("开发"));
+    }
+
+    /// 全拼 ignores the 顶码规则: the 5th letter extends the code instead of
+    /// committing the first four.
+    #[test]
+    fn pinyin_never_overflow_commits() {
+        let conf = Config { commit_next_code: 5, max_code_len: 4, ..Config::default() };
+        let mut s = Session::pinyin(pinyin_lexicon(), conf);
+        for key in [b'k' as u32, b'a' as u32, b'i' as u32, b'f' as u32] {
+            assert!(s.process_key(key).commit_text.is_none(), "no commit at 4 letters");
+        }
+        let r = s.process_key(b'a' as u32);
+        assert!(r.commit_text.is_none(), "the 5th letter must not overflow");
+        assert_eq!(r.preedit, "kaifa");
+    }
+
+    /// Digits, paging and punctuation follow the table rules in 全拼 too.
+    #[test]
+    fn pinyin_keeps_the_table_key_model() {
+        let conf = Config { ascii_punct: 1, ..Config::default() };
+        let mut s = Session::pinyin(pinyin_lexicon(), conf);
+        s.process_key(b'n' as u32);
+        s.process_key(b'i' as u32);
+        let digits = s.process_key(KEY_2);
+        assert_eq!(digits.commit_text.as_deref(), Some("你好"), "the 2nd `ni` candidate");
+
+        s.process_key(b'n' as u32);
+        let punct = s.process_key(b',' as u32);
+        assert_eq!(punct.commit_text.as_deref(), Some("你，"), "中文标点 joins the candidate");
+    }
+
+    /// 全拼 owns no reverse lookup: `` ` `` stays the punctuation key the
+    /// mapping table defines and never opens a lookup.
+    #[test]
+    fn pinyin_backtick_stays_punctuation() {
+        let conf = Config { ascii_punct: 1, ..Config::default() };
+        let mut s = Session::pinyin(pinyin_lexicon(), conf);
+        let r = s.process_key(b'`' as u32);
+        assert!(r.handled);
+        assert_eq!(r.commit_text.as_deref(), Some("`"), "the mapping outputs ` itself");
+        assert!(r.preedit.is_empty());
+
+        let mut english = pinyin_session();
+        assert!(!english.process_key(b'`' as u32).handled, "English mode releases it");
+    }
+
+    // --- 反查 (SPEC §8.3) ---
+
+    fn reverse_session() -> Session {
+        let dict = Arc::new(
+            Dictionary::parse_str("你\tfl\n你\tflll\n你好\tflol\n好\tolgu\n").expect("table"),
+        );
+        let lookup = Arc::new(crate::ReverseLookup::from_lexicon(
+            Arc::new(crate::PinyinLexicon::parse(
+                "你好\tnihao\t200\n你\tni\t100\n好\thao\t90\n",
+            )),
+            dict.clone(),
+        ));
+        Session::with_config(dict, Config::default()).with_reverse(lookup)
+    }
+
+    #[test]
+    fn backtick_then_pinyin_lists_codes() {
+        let mut s = reverse_session();
+        let opened = s.process_key(b'`' as u32);
+        assert!(opened.handled);
+        assert!(opened.commit_text.is_none());
+        assert_eq!(opened.preedit, "", "the marker lives in the session");
+        assert!(opened.candidates.is_empty());
+
+        let mut response = opened;
+        for key in [b'n' as u32, b'i' as u32, b'h' as u32] {
+            response = s.process_key(key);
+        }
+        assert_eq!(response.preedit, "nih");
+        assert_eq!(
+            response.code_line, "`nih",
+            "an unfinished query shows the raw letters behind the 反查 marker"
+        );
+        assert_eq!(response.candidates[0].text, "你好");
+        assert_eq!(response.candidates[0].comment, "flol", "the scheme's full code");
+        assert_eq!(response.candidates[0].code, "ni hao");
+
+        let committed = s.process_key(KEY_SPACE);
+        assert_eq!(committed.commit_text.as_deref(), Some("你好"));
+        assert!(committed.candidates.is_empty());
+    }
+
+    #[test]
+    fn backtick_then_space_commits_the_marker() {
+        let mut s = reverse_session();
+        s.process_key(b'`' as u32);
+        let r = s.process_key(KEY_SPACE);
+        assert!(r.handled);
+        assert_eq!(r.commit_text.as_deref(), Some("`"));
+        assert_eq!(r.preedit, "");
+        assert!(r.candidates.is_empty());
+
+        // Idle again: a plain backtick still opens the lookup.
+        assert!(s.process_key(b'`' as u32).handled);
+    }
+
+    #[test]
+    fn escape_leaves_reverse_without_committing() {
+        let mut s = reverse_session();
+        s.process_key(b'`' as u32);
+        s.process_key(b'n' as u32);
+        let r = s.process_key(KEY_ESCAPE);
+        assert!(r.handled);
+        assert!(r.commit_text.is_none());
+        assert_eq!(r.preedit, "");
+        assert!(r.candidates.is_empty());
+
+        // The next letter is an ordinary 形码 encoding again.
+        let r = s.process_key(b'f' as u32);
+        assert_eq!(r.preedit, "f");
+        assert_eq!(r.candidates[0].text, "你");
+    }
+
+    #[test]
+    fn backspace_narrows_the_reverse_query() {
+        let mut s = reverse_session();
+        s.process_key(b'`' as u32);
+        for key in [b'n' as u32, b'i' as u32] {
+            s.process_key(key);
+        }
+        let r = s.process_key(KEY_BACKSPACE);
+        assert_eq!(r.preedit, "n");
+        assert_eq!(r.candidates[0].text, "你", "one letter reads as one syllable");
+        assert!(r.candidates.iter().any(|c| c.text == "你好"));
+        let r = s.process_key(KEY_BACKSPACE);
+        assert_eq!(r.preedit, "");
+        assert!(r.candidates.is_empty(), "an empty query lists nothing");
+        assert!(s.reversing, "still open until Space, Esc or a commit");
+    }
+
+    #[test]
+    fn digits_select_a_reverse_candidate() {
+        let mut s = reverse_session();
+        s.process_key(b'`' as u32);
+        s.process_key(b'n' as u32);
+        s.process_key(b'i' as u32);
+        let r = s.process_key(KEY_2);
+        assert_eq!(r.commit_text.as_deref(), Some("你好"), "2nd `ni` candidate");
+        assert!(!s.reversing, "a commit closes the lookup");
+    }
+
+    /// 反查 does not auto-commit even when the setting is on: one match is
+    /// still something the user must choose.
+    #[test]
+    fn reverse_never_auto_commits() {
+        let dict = Arc::new(Dictionary::parse_str("你好\tflol\n").expect("table"));
+        let lookup = Arc::new(crate::ReverseLookup::from_lexicon(
+            Arc::new(crate::PinyinLexicon::parse("你好\tnihao\t200\n")),
+            dict.clone(),
+        ));
+        let mut s = Session::with_config(
+            dict,
+            Config { auto_commit: true, auto_commit_length: 1, ..Config::default() },
+        )
+        .with_reverse(lookup);
+        s.process_key(b'`' as u32);
+        let r = s.process_key(b'n' as u32);
+        assert!(r.commit_text.is_none(), "the lookup waits for Space");
+        assert_eq!(r.candidates[0].text, "你好");
+    }
+
+    /// A 形码 session without a lookup keeps `` ` `` as punctuation; the
+    /// reverse state is what gates it, not the scheme type alone.
+    #[test]
+    fn a_session_without_a_lookup_keeps_backtick_as_punctuation() {
+        let dict = Arc::new(Dictionary::parse_str("a\t工\t100\n").expect("table"));
+        let mut s = Session::with_config(dict, Config { ascii_punct: 1, ..Config::default() });
+        let r = s.process_key(b'`' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("`"));
     }
 }

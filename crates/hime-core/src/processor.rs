@@ -19,8 +19,14 @@
 //! The layout decides the axis: horizontal candidates use Left/Right, vertical
 //! ones use Up/Down. The other axis is swallowed while a candidate stands, and
 //! both axes are swallowed while composing without candidates.
+//!
+//! Two encodings are longer than a word code: 全拼 (a code is a run of pinyin
+//! syllables, capped at [`crate::pinyin::MAX_CODE_LEN`]) and 反查 (the same
+//! cap, reached by `` ` `` plus pinyin). Neither overflows and neither takes
+//! part in 顶码提交 (SPEC §8.2/§8.3).
 
 use crate::config::{CodeType, Config};
+use crate::pinyin::MAX_CODE_LEN as PINYIN_MAX_CODE_LEN;
 use crate::punct;
 use crate::sentence::config::max_raw_length;
 use crate::{
@@ -72,7 +78,29 @@ pub enum Action {
     CommitCandidatePunct(u8),
     /// Intercepted with no effect, so the host's Marked Text keeps running.
     Noop,
+    /// Open 反查 (SPEC §8.3): the following letters are full pinyin and the
+    /// candidates carry the active scheme's codes.
+    StartReverse,
+    /// Commit the literal `` ` `` (the user pressed `` ` `` then Space without
+    /// typing a query) and leave 反查.
+    CommitBacktick,
 }
+
+/// Whether 反查 is possible right now (SPEC §8.3). Only a 形码 or 形码整句
+/// scheme has codes to look up, so a 全拼 session always answers
+/// [`ReverseState::Unsupported`] and `` ` `` keeps its punctuation meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReverseState {
+    /// The scheme has no reverse lookup.
+    Unsupported,
+    /// The scheme has one and it is closed; `` ` `` opens it.
+    Closed,
+    /// 反查 is open: the encoding starts with `` ` ``.
+    Open,
+}
+
+/// The key that opens 反查.
+pub const KEY_BACKTICK: u32 = 96;
 
 /// Printable-key ASCII codes; digits `1`..=`5` select candidates 0..=4.
 const ASCII_A: u32 = 97;
@@ -97,22 +125,32 @@ impl Processor {
     /// punctuation mode. `after_alnum` reports whether the text the engine
     /// last sent or released to the host ended in an English letter or digit
     /// (the state the `english_punct_after_alnum` rule reads; [`Session`]
-    /// owns it).
+    /// owns it). `reverse` says whether 反查 is available and open; while it
+    /// is open `code` is the pinyin query behind the `` ` ``.
     pub fn decide(
         key: u32,
         code: &str,
         candidate_count: usize,
         config: Config,
         after_alnum: bool,
+        reverse: ReverseState,
     ) -> Action {
         let letter = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8);
+
+        if reverse == ReverseState::Open {
+            return decide_reverse(key, code, candidate_count, config);
+        }
 
         // Idle: a letter starts a composition, 中文标点 mode commits its
         // mapped punctuation, everything else belongs to the application.
         // With `english_punct_after_alnum` on, the first punctuation right
         // after English letters or digits is released instead: a time like
-        // `12:30` must reach the host in ASCII.
+        // `12:30` must reach the host in ASCII. `` ` `` opens 反查 in a scheme
+        // that has codes to look up (SPEC §8.3).
         if code.is_empty() {
+            if key == KEY_BACKTICK && reverse == ReverseState::Closed {
+                return Action::StartReverse;
+            }
             return match letter {
                 Some(byte) => Action::AppendCode(byte),
                 None
@@ -127,6 +165,15 @@ impl Processor {
         }
 
         if let Some(byte) = letter {
+            // 全拼: one encoding is a run of pinyin syllables, so it grows to
+            // the pinyin table's code cap and never overflow-commits.
+            if config.code_type == CodeType::Quanpin {
+                return if code.len() < PINYIN_MAX_CODE_LEN {
+                    Action::AppendCode(byte)
+                } else {
+                    Action::Noop
+                };
+            }
             // 形码整句: the key stream is one whole sentence, so it is capped
             // only by the decoder's own limit and never overflows — a further
             // letter extends the sentence, and selecting or Space commits it.
@@ -220,6 +267,61 @@ impl Processor {
     }
 }
 
+/// The key table while 反查 is open (SPEC §8.3). `code` is the pinyin query
+/// behind the `` ` ``: empty right after opening, letters as they come.
+fn decide_reverse(key: u32, code: &str, candidate_count: usize, config: Config) -> Action {
+    if let Some(byte) = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8) {
+        return if code.len() < PINYIN_MAX_CODE_LEN {
+            Action::AppendCode(byte)
+        } else {
+            Action::Noop
+        };
+    }
+    match key {
+        // Backspace eats the query one letter at a time; on an empty query
+        // there is nothing left to eat, so the lookup closes — the same
+        // meaning Esc has.
+        KEY_BACKSPACE if code.is_empty() => Action::Discard,
+        KEY_BACKSPACE => Action::DeleteCode,
+        // Esc, Enter and a second `` ` `` close the lookup; nothing is
+        // committed because the query was never text the user wanted.
+        KEY_ESCAPE | KEY_ENTER | KEY_BACKTICK => Action::Discard,
+        // Space with no query yet is the literal backtick (the documented way
+        // to type `` ` `` at all); with a query it commits the focused
+        // candidate, and with nothing to commit the lookup just ends.
+        KEY_SPACE if code.is_empty() => Action::CommitBacktick,
+        KEY_SPACE if candidate_count > 0 => Action::SelectFocused,
+        KEY_SPACE => Action::Discard,
+        key @ (KEY_ARROW_LEFT | KEY_ARROW_RIGHT | KEY_ARROW_UP | KEY_ARROW_DOWN) => {
+            arrow_focus(key, candidate_count, config)
+        }
+        KEY_PAGE_UP if candidate_count > 0 => Action::PageUp,
+        KEY_PAGE_UP => Action::Noop,
+        KEY_PAGE_DOWN if candidate_count > 0 => Action::PageDown,
+        KEY_PAGE_DOWN => Action::Noop,
+        key @ (ASCII_SEMICOLON | ASCII_QUOTE)
+            if config.semicolon_quote_select && candidate_count > 0 =>
+        {
+            let wanted = if key == ASCII_QUOTE { 2 } else { 1 };
+            Action::Select(wanted.min(candidate_count - 1))
+        }
+        key if is_selection_key(key, config) => {
+            let index = (key - ASCII_1) as usize;
+            if index < candidate_count.min(config.page_size) {
+                Action::Select(index)
+            } else {
+                Action::Noop
+            }
+        }
+        key if chinese_punct(config) && is_punct_key(key) => {
+            Action::CommitCandidatePunct(key as u8)
+        }
+        key if is_symbol_key(key) => Action::Pass,
+        ASCII_A_UPPER..=ASCII_Z_UPPER => Action::Pass,
+        _ => Action::Noop,
+    }
+}
+
 /// Focus movement for one arrow key. Only the axis matching the candidate
 /// layout moves, and only while the current page holds a candidate; an
 /// orthogonal arrow (and any arrow with nothing to focus) is a no-op.
@@ -272,12 +374,18 @@ mod tests {
     const KEY_7: u32 = 55;
     const KEY_9: u32 = 57;
 
+    /// Ordinary decision with 反查 unavailable: the shape nearly every case
+    /// below has.
+    fn decide(key: u32, code: &str, candidates: usize, config: Config, after_alnum: bool) -> Action {
+        Processor::decide(key, code, candidates, config, after_alnum, ReverseState::Unsupported)
+    }
+
     fn idle(key: u32) -> Action {
-        Processor::decide(key, "", 0, Config::default(), false)
+        decide(key, "", 0, Config::default(), false)
     }
 
     fn composing(key: u32, code: &str, candidates: usize) -> Action {
-        Processor::decide(key, code, candidates, Config::default(), false)
+        decide(key, code, candidates, Config::default(), false)
     }
 
     #[test]
@@ -328,46 +436,46 @@ mod tests {
     fn arrow_keys_move_along_the_candidate_layout_axis() {
         let horizontal = Config::default();
         assert_eq!(
-            Processor::decide(KEY_ARROW_LEFT, "a", 3, horizontal, false),
+            decide(KEY_ARROW_LEFT, "a", 3, horizontal, false),
             Action::FocusPrevious
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_RIGHT, "a", 3, horizontal, false),
+            decide(KEY_ARROW_RIGHT, "a", 3, horizontal, false),
             Action::FocusNext
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_UP, "a", 3, horizontal, false),
+            decide(KEY_ARROW_UP, "a", 3, horizontal, false),
             Action::Noop,
             "the vertical pair is inert in a horizontal window"
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_DOWN, "a", 3, horizontal, false),
+            decide(KEY_ARROW_DOWN, "a", 3, horizontal, false),
             Action::Noop
         );
 
         let vertical = Config { vertical_candidates: true, ..Config::default() };
         assert_eq!(
-            Processor::decide(KEY_ARROW_UP, "a", 3, vertical, false),
+            decide(KEY_ARROW_UP, "a", 3, vertical, false),
             Action::FocusPrevious
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_DOWN, "a", 3, vertical, false),
+            decide(KEY_ARROW_DOWN, "a", 3, vertical, false),
             Action::FocusNext
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_LEFT, "a", 3, vertical, false),
+            decide(KEY_ARROW_LEFT, "a", 3, vertical, false),
             Action::Noop,
             "the horizontal pair is inert in a vertical column"
         );
         assert_eq!(
-            Processor::decide(KEY_ARROW_RIGHT, "a", 3, vertical, false),
+            decide(KEY_ARROW_RIGHT, "a", 3, vertical, false),
             Action::Noop
         );
 
         // Nothing to focus: every arrow is swallowed mid-composition.
         for key in [KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_ARROW_DOWN] {
-            assert_eq!(Processor::decide(key, "q", 0, horizontal, false), Action::Noop);
-            assert_eq!(Processor::decide(key, "q", 0, vertical, false), Action::Noop);
+            assert_eq!(decide(key, "q", 0, horizontal, false), Action::Noop);
+            assert_eq!(decide(key, "q", 0, vertical, false), Action::Noop);
             assert_eq!(idle(key), Action::Pass);
         }
     }
@@ -448,14 +556,14 @@ mod tests {
             ascii_punct: 1,
             ..Config::default()
         };
-        assert_eq!(Processor::decide(KEY_PAGE_UP, "a", 1, cn, false), Action::PageUp);
+        assert_eq!(decide(KEY_PAGE_UP, "a", 1, cn, false), Action::PageUp);
         assert_eq!(
-            Processor::decide(KEY_PAGE_UP, "q", 0, cn, false),
+            decide(KEY_PAGE_UP, "q", 0, cn, false),
             Action::Noop,
             "no candidate: - emits nothing"
         );
         assert_eq!(
-            Processor::decide(KEY_PAGE_DOWN, "q", 0, cn, false),
+            decide(KEY_PAGE_DOWN, "q", 0, cn, false),
             Action::Noop,
             "no candidate: = emits nothing"
         );
@@ -470,34 +578,34 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(b',' as u32, "", 0, cn, false),
+            decide(b',' as u32, "", 0, cn, false),
             Action::CommitPunct(b',')
         );
         assert_eq!(
-            Processor::decide(b',' as u32, "a", 1, cn, false),
+            decide(b',' as u32, "a", 1, cn, false),
             Action::CommitCandidatePunct(b','),
             "mid-composition punctuation joins the candidate commit"
         );
         assert_eq!(
-            Processor::decide(b'%' as u32, "", 0, cn, false),
+            decide(b'%' as u32, "", 0, cn, false),
             Action::Pass,
             "unmapped keys stay passed through"
         );
         assert_eq!(
-            Processor::decide(b'%' as u32, "a", 1, cn, false),
+            decide(b'%' as u32, "a", 1, cn, false),
             Action::Pass,
             "unmapped keys are released even mid-composition"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "", 0, cn, false),
+            decide(KEY_A, "", 0, cn, false),
             Action::AppendCode(b'a')
         );
-        assert_eq!(Processor::decide(KEY_1, "a", 1, cn, false), Action::Select(0));
+        assert_eq!(decide(KEY_1, "a", 1, cn, false), Action::Select(0));
         assert_eq!(
-            Processor::decide(KEY_BACKSPACE, "a", 1, cn, false),
+            decide(KEY_BACKSPACE, "a", 1, cn, false),
             Action::DeleteCode
         );
-        assert_eq!(Processor::decide(KEY_SPACE, "a", 1, cn, false), Action::SelectFocused);
+        assert_eq!(decide(KEY_SPACE, "a", 1, cn, false), Action::SelectFocused);
     }
 
     /// The preferences window moves both limits, and the decision table
@@ -509,14 +617,14 @@ mod tests {
             max_code_len: 2,
             ..Config::default()
         };
-        assert_eq!(Processor::decide(KEY_6, "a", 6, custom, false), Action::Select(5));
+        assert_eq!(decide(KEY_6, "a", 6, custom, false), Action::Select(5));
         assert_eq!(
-            Processor::decide(KEY_7, "a", 6, custom, false),
+            decide(KEY_7, "a", 6, custom, false),
             Action::Noop,
             "7 is beyond a 6-key page"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "ab", 1, custom, false),
+            decide(KEY_A, "ab", 1, custom, false),
             Action::Noop,
             "a letter over the configured code cap is swallowed"
         );
@@ -532,17 +640,17 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 3, overflow, false),
+            decide(KEY_D, "abcd", 3, overflow, false),
             Action::OverflowCommit(b'd'),
             "the 5th letter commits at N=5"
         );
         assert_eq!(
-            Processor::decide(KEY_D, "abc", 3, overflow, false),
+            decide(KEY_D, "abc", 3, overflow, false),
             Action::AppendCode(b'd'),
             "the 4th letter still extends the encoding"
         );
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 0, overflow, false),
+            decide(KEY_D, "abcd", 0, overflow, false),
             Action::OverflowCommit(b'd'),
             "without a candidate the raw letters are what overflow commits"
         );
@@ -553,7 +661,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, off, false),
+            decide(KEY_D, "abcd", 1, off, false),
             Action::Noop,
             "0 turns the rule off"
         );
@@ -565,7 +673,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, unreachable, false),
+            decide(KEY_D, "abcd", 1, unreachable, false),
             Action::Noop
         );
 
@@ -576,7 +684,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abc", 1, below_cap, false),
+            decide(KEY_D, "abc", 1, below_cap, false),
             Action::OverflowCommit(b'd')
         );
     }
@@ -588,7 +696,7 @@ mod tests {
     fn sentence_mode_ignores_the_word_cap_and_never_overflows() {
         let word = Config { max_code_len: 4, commit_next_code: 5, ..Config::default() };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, word, false),
+            decide(KEY_D, "abcd", 1, word, false),
             Action::OverflowCommit(b'd'),
             "the same config overflows in word mode"
         );
@@ -600,13 +708,13 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_D, "abcd", 1, sentence, false),
+            decide(KEY_D, "abcd", 1, sentence, false),
             Action::AppendCode(b'd'),
             "no overflow at the 5th letter in 形码整句"
         );
         let long = "a".repeat(64);
         assert_eq!(
-            Processor::decide(KEY_D, &long, 1, sentence, false),
+            decide(KEY_D, &long, 1, sentence, false),
             Action::AppendCode(b'd'),
             "a long code keeps extending"
         );
@@ -620,13 +728,13 @@ mod tests {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
         let at_limit = "a".repeat(MAX_RAW_LENGTH - 1);
         assert_eq!(
-            Processor::decide(KEY_A, &at_limit, 1, sentence, false),
+            decide(KEY_A, &at_limit, 1, sentence, false),
             Action::AppendCode(b'a'),
             "the letter that reaches the limit is accepted"
         );
         let full = "a".repeat(MAX_RAW_LENGTH);
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, sentence, false),
+            decide(KEY_A, &full, 1, sentence, false),
             Action::Noop,
             "letters past the limit are swallowed"
         );
@@ -644,19 +752,19 @@ mod tests {
         };
         let at_limit = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH - 1);
         assert_eq!(
-            Processor::decide(KEY_A, &at_limit, 1, sentence, false),
+            decide(KEY_A, &at_limit, 1, sentence, false),
             Action::AppendCode(b'a'),
             "the letter reaching the auto-commit cap is accepted"
         );
         let full = "a".repeat(AUTO_COMMIT_MAX_RAW_LENGTH);
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, sentence, false),
+            decide(KEY_A, &full, 1, sentence, false),
             Action::Noop,
             "letters past the auto-commit cap are swallowed"
         );
         // Well below the manual cap: a code the manual cap would still allow.
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, Config { auto_commit: false, ..sentence }, false),
+            decide(KEY_A, &full, 1, Config { auto_commit: false, ..sentence }, false),
             Action::AppendCode(b'a'),
             "auto-commit off keeps extending past the 64-key cap"
         );
@@ -669,14 +777,14 @@ mod tests {
     fn sentence_mode_keeps_selection_and_editing_keys() {
         let sentence = Config { code_type: CodeType::XingmaSentence, ..Config::default() };
         assert_eq!(
-            Processor::decide(KEY_SPACE, "jin", 3, sentence, false),
+            decide(KEY_SPACE, "jin", 3, sentence, false),
             Action::SelectFocused
         );
-        assert_eq!(Processor::decide(KEY_SPACE, "q", 0, sentence, false), Action::CommitRaw);
-        assert_eq!(Processor::decide(KEY_2, "jin", 3, sentence, false), Action::Select(1));
-        assert_eq!(Processor::decide(KEY_BACKSPACE, "jin", 3, sentence, false), Action::DeleteCode);
-        assert_eq!(Processor::decide(KEY_ESCAPE, "jin", 3, sentence, false), Action::Discard);
-        assert_eq!(Processor::decide(KEY_ENTER, "jin", 3, sentence, false), Action::CommitRaw);
+        assert_eq!(decide(KEY_SPACE, "q", 0, sentence, false), Action::CommitRaw);
+        assert_eq!(decide(KEY_2, "jin", 3, sentence, false), Action::Select(1));
+        assert_eq!(decide(KEY_BACKSPACE, "jin", 3, sentence, false), Action::DeleteCode);
+        assert_eq!(decide(KEY_ESCAPE, "jin", 3, sentence, false), Action::Discard);
+        assert_eq!(decide(KEY_ENTER, "jin", 3, sentence, false), Action::CommitRaw);
     }
 
     /// `english_punct_after_alnum` on: the first mapped punctuation right
@@ -691,19 +799,19 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(b',' as u32, "", 0, cn, true),
+            decide(b',' as u32, "", 0, cn, true),
             Action::Pass,
             "after alphanumerics , reaches the host as ,"
         );
-        assert_eq!(Processor::decide(b',' as u32, "", 0, cn, false), Action::CommitPunct(b','));
+        assert_eq!(decide(b',' as u32, "", 0, cn, false), Action::CommitPunct(b','));
         assert_eq!(
-            Processor::decide(b',' as u32, "a", 1, cn, true),
+            decide(b',' as u32, "a", 1, cn, true),
             Action::CommitCandidatePunct(b','),
             "mid-composition punctuation joins the candidate regardless"
         );
         let off = Config { ascii_punct: 1, ..Config::default() };
         assert_eq!(
-            Processor::decide(b',' as u32, "", 0, off, true),
+            decide(b',' as u32, "", 0, off, true),
             Action::CommitPunct(b','),
             "the rule is inert while the switch is off"
         );
@@ -717,7 +825,7 @@ mod tests {
         assert_eq!(idle(b'H' as u32), Action::Pass);
         assert_eq!(composing(b'H' as u32, "a", 3), Action::Pass, "a capital never extends the code");
         let cn = Config { ascii_punct: 1, ..Config::default() };
-        assert_eq!(Processor::decide(b'H' as u32, "a", 1, cn, false), Action::Pass);
+        assert_eq!(decide(b'H' as u32, "a", 1, cn, false), Action::Pass);
     }
 
     /// 分号/引号二三选: `;` selects the 2nd candidate, `'` the 3rd, and a
@@ -729,13 +837,13 @@ mod tests {
         let sel = Config { semicolon_quote_select: true, ..Config::default() };
         let key_semicolon = b';' as u32;
         let key_quote = b'\'' as u32;
-        assert_eq!(Processor::decide(key_semicolon, "a", 1, sel, false), Action::Select(0));
-        assert_eq!(Processor::decide(key_quote, "a", 1, sel, false), Action::Select(0));
-        assert_eq!(Processor::decide(key_semicolon, "a", 2, sel, false), Action::Select(1));
-        assert_eq!(Processor::decide(key_quote, "a", 2, sel, false), Action::Select(1));
-        assert_eq!(Processor::decide(key_semicolon, "a", 3, sel, false), Action::Select(1));
-        assert_eq!(Processor::decide(key_quote, "a", 3, sel, false), Action::Select(2));
-        assert_eq!(Processor::decide(key_quote, "a", 5, sel, false), Action::Select(2));
+        assert_eq!(decide(key_semicolon, "a", 1, sel, false), Action::Select(0));
+        assert_eq!(decide(key_quote, "a", 1, sel, false), Action::Select(0));
+        assert_eq!(decide(key_semicolon, "a", 2, sel, false), Action::Select(1));
+        assert_eq!(decide(key_quote, "a", 2, sel, false), Action::Select(1));
+        assert_eq!(decide(key_semicolon, "a", 3, sel, false), Action::Select(1));
+        assert_eq!(decide(key_quote, "a", 3, sel, false), Action::Select(2));
+        assert_eq!(decide(key_quote, "a", 5, sel, false), Action::Select(2));
     }
 
     /// The selection keys hold only while a candidate is on screen. With
@@ -751,21 +859,130 @@ mod tests {
         };
         let sel_en = Config { semicolon_quote_select: true, ..Config::default() };
         assert_eq!(
-            Processor::decide(b';' as u32, "q", 0, sel_cn, false),
+            decide(b';' as u32, "q", 0, sel_cn, false),
             Action::CommitCandidatePunct(b';'),
             "no candidate: ; is punctuation again"
         );
         assert_eq!(
-            Processor::decide(b'\'' as u32, "q", 0, sel_cn, false),
+            decide(b'\'' as u32, "q", 0, sel_cn, false),
             Action::CommitCandidatePunct(b'\'')
         );
-        assert_eq!(Processor::decide(b';' as u32, "q", 0, sel_en, false), Action::Pass);
-        assert_eq!(Processor::decide(b';' as u32, "", 0, sel_cn, false), Action::CommitPunct(b';'));
+        assert_eq!(decide(b';' as u32, "q", 0, sel_en, false), Action::Pass);
+        assert_eq!(decide(b';' as u32, "", 0, sel_cn, false), Action::CommitPunct(b';'));
         let off_cn = Config { ascii_punct: 1, ..Config::default() };
         assert_eq!(
-            Processor::decide(b';' as u32, "a", 3, off_cn, false),
+            decide(b';' as u32, "a", 3, off_cn, false),
             Action::CommitCandidatePunct(b';'),
             "off: ; joins the candidate commit as before"
+        );
+    }
+
+    // --- 全拼 and 反查 (SPEC §8) ---
+
+    /// 全拼 accepts letters up to the pinyin cap and ignores the word cap and
+    /// 顶码 rule entirely.
+    #[test]
+    fn quanpin_caps_at_the_pinyin_code_length_and_never_overflows() {
+        let quanpin = Config {
+            code_type: CodeType::Quanpin,
+            max_code_len: 4,
+            commit_next_code: 5,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(KEY_A, "abcd", 3, quanpin, false, ReverseState::Unsupported),
+            Action::AppendCode(b'a'),
+            "a word cap of 4 does not apply to a pinyin code"
+        );
+        assert_eq!(
+            Processor::decide(KEY_A, "abcd", 3, quanpin, false, ReverseState::Unsupported),
+            Action::AppendCode(b'a'),
+            "nor does the overflow rule"
+        );
+        let full = "a".repeat(PINYIN_MAX_CODE_LEN);
+        assert_eq!(
+            Processor::decide(KEY_A, &full, 1, quanpin, false, ReverseState::Unsupported),
+            Action::Noop,
+            "the pinyin cap still ends the code"
+        );
+    }
+
+    /// `` ` `` opens 反查 only where a lookup exists; without one it keeps the
+    /// punctuation meaning the mapping table gives it.
+    #[test]
+    fn backtick_opens_reverse_only_when_available() {
+        let config = Config::default();
+        assert_eq!(
+            Processor::decide(KEY_BACKTICK, "", 0, config, false, ReverseState::Closed),
+            Action::StartReverse
+        );
+        assert_eq!(
+            Processor::decide(KEY_BACKTICK, "", 0, config, false, ReverseState::Unsupported),
+            Action::Pass,
+            "an unsupported lookup leaves the key to the host in English mode"
+        );
+        let cn = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(
+            Processor::decide(KEY_BACKTICK, "", 0, cn, false, ReverseState::Unsupported),
+            Action::CommitPunct(b'`'),
+            "and to the punctuation table in 中文标点 mode"
+        );
+        assert_eq!(
+            Processor::decide(KEY_A, "", 0, config, false, ReverseState::Closed),
+            Action::AppendCode(b'a'),
+            "ordinary idle keys are unaffected by an available lookup"
+        );
+    }
+
+    /// The 反查 key table: letters extend the query, Space commits the marker
+    /// when the query is empty and the focused candidate otherwise, and the
+    /// closing keys commit nothing.
+    #[test]
+    fn reverse_keys_extend_select_and_close() {
+        let config = Config::default();
+        let open = |key, code: &str, candidates| {
+            Processor::decide(key, code, candidates, config, false, ReverseState::Open)
+        };
+        assert_eq!(open(KEY_A, "", 0), Action::AppendCode(b'a'));
+        assert_eq!(open(KEY_A, "nihao", 3), Action::AppendCode(b'a'));
+        let full = "a".repeat(PINYIN_MAX_CODE_LEN);
+        assert_eq!(open(KEY_A, &full, 1), Action::Noop, "the pinyin cap applies");
+
+        assert_eq!(open(KEY_SPACE, "", 0), Action::CommitBacktick);
+        assert_eq!(open(KEY_SPACE, "ni", 2), Action::SelectFocused);
+        assert_eq!(open(KEY_SPACE, "zz", 0), Action::Discard, "nothing to commit");
+
+        assert_eq!(open(KEY_ESCAPE, "ni", 2), Action::Discard);
+        assert_eq!(open(KEY_ENTER, "ni", 2), Action::Discard);
+        assert_eq!(open(KEY_BACKTICK, "ni", 2), Action::Discard);
+        assert_eq!(open(KEY_BACKSPACE, "ni", 2), Action::DeleteCode);
+        assert_eq!(
+            open(KEY_BACKSPACE, "", 0),
+            Action::Discard,
+            "deleting past the query closes the lookup"
+        );
+
+        assert_eq!(open(KEY_1, "ni", 3), Action::Select(0));
+        assert_eq!(open(KEY_PAGE_DOWN, "ni", 3), Action::PageDown);
+        assert_eq!(open(KEY_ARROW_RIGHT, "ni", 3), Action::FocusNext);
+        assert_eq!(open(b'%' as u32, "ni", 3), Action::Pass);
+        assert_eq!(open(b'H' as u32, "ni", 3), Action::Pass);
+        assert_eq!(open(0x1000, "ni", 3), Action::Noop);
+    }
+
+    /// In 反查 the punctuation table still applies, so a 中文标点 comma commits
+    /// the focused candidate with the punctuation after it.
+    #[test]
+    fn reverse_keeps_the_punctuation_rules() {
+        let cn = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(
+            Processor::decide(b',' as u32, "ni", 2, cn, false, ReverseState::Open),
+            Action::CommitCandidatePunct(b',')
+        );
+        let sel = Config { semicolon_quote_select: true, ..Config::default() };
+        assert_eq!(
+            Processor::decide(b';' as u32, "ni", 3, sel, false, ReverseState::Open),
+            Action::Select(1)
         );
     }
 }

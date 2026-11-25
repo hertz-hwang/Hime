@@ -16,8 +16,10 @@ use crate::{MAX_CANDIDATES, MAX_CODE_LEN};
 /// `1`-`9`, so a bigger page would hold candidates no key can reach.
 pub const PAGE_SIZE_MAX: usize = 9;
 
-/// Largest encoding cap worth accepting; longer than any shipped scheme.
-pub const MAX_CODE_LEN_LIMIT: usize = 16;
+/// Largest encoding cap worth accepting. A 形码 scheme needs 4, but a 全拼
+/// scheme's `max_code` is the length of one whole pinyin run, which the
+/// shipped table declares as 32 (the pinyin code cap, SPEC §8.2).
+pub const MAX_CODE_LEN_LIMIT: usize = 32;
 
 /// How encodings are read, from the `type` key of a scheme's `metadata.toml`
 /// (0 全拼 / 1 双拼 / 2 形码 / 3 形码整句). Crosses the FFI boundary as that
