@@ -25,8 +25,8 @@
 1. **命名固定**：在 `HimeInputController.swift` 中，使用 `@objc(HimeInputController)` 注解类，确保 Objective-C 运行时找得到类名（避免 Swift 模块名前缀导致 IMK 找不到 Controller）。
 2. **自绘候选窗**：`IMKCandidates` 没有候选窗内的输入码行、逐段差异颜色和尺寸过渡动画的接口，候选窗因此由 Shell 自绘：`CandidatesWindow.swift` 的全局 `HimeCandidatesWindow` 是透明无边框的 `.nonactivatingPanel`（`canBecomeKey = false`，层级 `CGShieldingWindowLevel`，可跨 Space 与全屏），内容全部来自 `EngineResponse`。
    - **内容**：竖排一列（序号 + 候选，右下角 `n/m` 页码），横排一行（序号 + 候选，行尾页码）。`code_in_window` 为 true 时顶部画 `code_line` 等宽码串和一条 1.5pt 光标；该串已按首选候选自动分词（如 `pms sdf gh ds kf je`）。候选的 `spans` 相对本页首选候选做差异标色：等长替换橙、净删红、净增绿，`equal` 用正常文字色（选中行内为白色）。
-   - **定位**：Shell 取组字区末尾（`markedRange` 末端，取不到时退回选区或组字区首字符）的全局矩形，窗口挂在其下 4pt；下方放不下翻到上方；上下都放不下贴屏幕底边；水平方向钳在光标所在屏幕内。拿不到矩形时以鼠标位置为锚点。
-   - **尺寸与动画**：`CandidatePanelMetrics` 按候选文字、序号、码串和页码算出内容尺寸。窗口已显示且尺寸变化时，用 0.15s easeOut 把窗框从当前尺寸动画到新尺寸，同时把换内容前的快照（幽灵层）钉在贴近光标的那一角淡出，形成「边缘收拢/展开 + 旧内容淡出」的交叉过渡；内容以同一角对齐，中间帧文字不滑动。尺寸不变时只做 0.12s 位移滑动；首次显示落位后 0.13s 渐入；隐藏时 0.12s 渐出再 `orderOut`。窗框动画带 token，旧动画的完成回调不会提前复位或把窗框拉回旧目标。
+   - **定位与实时跟随**：Shell 取组字区末尾（`markedRange` 末端，取不到时退回选区或组字区首字符）的全局矩形，窗口挂在其下 4pt；下方放不下翻到上方；上下都放不下贴屏幕底边；水平方向钳在光标所在屏幕内。拿不到矩形时以鼠标位置为锚点。窗口可见期间由一个 60Hz 跟踪定时器驱动：每两拍经 `CandidatePanelDelegate.candidatePanelCaret()` 重读一次光标矩形（30Hz），即使没有按键也重算挂点，滚动、拖动宿主窗口、焦点或输入框变化都会让面板跟过去；挂点变化用 0.12s easeOut 从当前窗框补间到新目标，连续更新时从画面当前位置继续，旧目标不会把窗框拉回。
+   - **尺寸与动画**：`CandidatePanelMetrics` 按候选文字、序号、码串和页码算出内容尺寸。窗口已显示且尺寸变化时，用 0.15s easeOut 把窗框从当前尺寸补间到新尺寸，同时把换内容前的快照（幽灵层）钉在贴近光标的那一角淡出，形成「边缘收拢/展开 + 旧内容淡出」的交叉过渡；内容以同一角对齐，挂点上下翻转时同步把内容改钉到新的光标侧，中间帧文字不滑动。窗框完全由 Shell 所有：`NSHostingView.sizingOptions` 置空，否则内容的固有尺寸约束会把增长中的窗框在第一步就钳到终值。尺寸不变时只做 0.12s 位移滑动；首次显示落位后 0.13s 渐入；隐藏时停止跟踪定时器、0.12s 渐出再 `orderOut`。所有补间每拍从实际窗框出发并由真实经过时间推进，连续重定向不会累积旧动画。
 3. **生命周期**：
    - `init!(server: Data!, delegate: Any!, client inputClient: Any!)` 中调用 `hime_create_session()`。
    - `deinit` 中关闭候选窗并调用 `hime_destroy_session(sessionId)`。
