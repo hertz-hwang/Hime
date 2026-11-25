@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 memmap2 = "0.9.12"
+miniz_oxide = "0.8"
 serde.workspace = true
 toml = "1.2.2"
 
