@@ -7,13 +7,17 @@
 //! Usage:
 //!   cargo run -p hime-cli -- [table.txt]
 //!   cargo run -p hime-cli -- --sentence [sentence_table.txt]
+//!   cargo run -p hime-cli -- --pinyin [py.hdict]
 //!
-//! Without `--sentence` the table is a 形码 word table and each encoding looks
-//! up words. With `--sentence` the encoding decodes to whole sentences (形码整句)
+//! Without a flag the table is a 形码 word table and each encoding looks up
+//! words. With `--sentence` the encoding decodes to whole sentences (形码整句)
 //! using the n-gram model; it needs the `.hng` model located the same way as
 //! everywhere else (see `ngram::find_model_path`: `HIME_SENTENCE_MODEL`, then
 //! the user folder `~/.config/hime/sentence-ngram.hng`, then the bundled
-//! `data/sentence-ngram.hng`).
+//! `data/sentence-ngram.hng`). With `--pinyin` the encoding is full pinyin
+//! (全拼) and candidates are pinyin words. In the 形码 and 形码整句 modes ` ``
+//! opens 反查: type full pinyin afterwards and each candidate shows the
+//! scheme's complete code.
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -35,7 +39,11 @@ use std::sync::Arc;
 
 use hime_core::ngram::find_model_path;
 use hime_core::sentence::SentenceEngine;
-use hime_core::{Config, Dictionary, Session, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_SPACE};
+use hime_core::pinyin::SharedPinyin;
+use hime_core::{
+    Config, Dictionary, PinyinLexicon, ReverseLookup, Session, KEY_BACKSPACE, KEY_ENTER,
+    KEY_ESCAPE, KEY_SPACE,
+};
 
 const HELP: &str = "type letters and punctuation to send one keystroke per char; commands: :space :bs :esc :enter :1-:9 :punct :afteralnum :selquote :help :quit";
 
@@ -71,24 +79,79 @@ fn sentence_table(explicit: Option<PathBuf>) -> PathBuf {
     ))
 }
 
-/// Split `argv` into the `--sentence` flag and the first positional table path.
-fn parse_args() -> (bool, Option<PathBuf>) {
-    let mut sentence = false;
+/// Which candidate source the tester runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// 形码 word table.
+    Table,
+    /// 形码整句 decoder.
+    Sentence,
+    /// 全拼 pinyin words.
+    Pinyin,
+}
+
+/// Split `argv` into the mode flag and the first positional table path.
+fn parse_args() -> (Mode, Option<PathBuf>) {
+    let mut mode = Mode::Table;
     let mut table: Option<PathBuf> = None;
     for arg in std::env::args().skip(1) {
         if arg == "--sentence" || arg == "-s" {
-            sentence = true;
+            mode = Mode::Sentence;
+        } else if arg == "--pinyin" || arg == "-p" {
+            mode = Mode::Pinyin;
         } else if table.is_none() && !arg.starts_with('-') {
             table = Some(PathBuf::from(arg));
         }
     }
-    (sentence, table)
+    (mode, table)
+}
+
+/// Pinyin-table path: CLI argument, else the shipped 全拼 scheme table.
+fn pinyin_table(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    let relative = PathBuf::from("data/schemes/pinyin/py.hdict");
+    if relative.is_file() {
+        return relative;
+    }
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/schemes/pinyin/py.hdict"
+    ))
 }
 
 fn main() -> ExitCode {
-    let (sentence, table_arg) = parse_args();
+    let (mode, table_arg) = parse_args();
+    // 反查 needs a pinyin table beside the active shape scheme. It is shared
+    // and read on first use, so a session created for the word-table modes
+    // does not pay for it until the first backtick.
+    let pinyin_path = pinyin_table(None);
+    let shared_pinyin = || Arc::new(SharedPinyin::new(&pinyin_path));
 
-    let mut session = if sentence {
+    if mode == Mode::Pinyin {
+        let path = match &table_arg {
+            Some(path) => path.clone(),
+            None => pinyin_path.clone(),
+        };
+        let lexicon = match PinyinLexicon::load(&path) {
+            Ok(lexicon) => Arc::new(lexicon),
+            Err(e) => {
+                eprintln!("hime-cli: failed to load pinyin table {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!(
+            "hime-cli: 全拼 mode — {} entries from {}",
+            lexicon.entry_count(),
+            path.display()
+        );
+        let mut session = Session::pinyin(lexicon, Config::default());
+        eprintln!("hime-cli: {HELP}");
+        return run(&mut session);
+    }
+
+    let mut session = if mode == Mode::Sentence {
         let Some(model) = find_model_path() else {
             eprintln!(
                 "hime-cli: --sentence needs a .hng model (set HIME_SENTENCE_MODEL, place ~/.config/hime/sentence-ngram.hng, or add data/sentence-ngram.hng)"
@@ -112,7 +175,9 @@ fn main() -> ExitCode {
             model.display(),
             table.display()
         );
-        Session::sentence(engine, Config::default())
+        Session::sentence(Arc::clone(&engine), Config::default()).with_reverse(Arc::new(
+            ReverseLookup::for_sentence(shared_pinyin(), engine),
+        ))
     } else {
         let path = word_table(table_arg);
         let dict = match Dictionary::load(&path) {
@@ -127,10 +192,18 @@ fn main() -> ExitCode {
             dict.entry_count(),
             path.display()
         );
-        Session::new(dict)
+        eprintln!("hime-cli: 反查 ready (backtick, then full pinyin)");
+        Session::new(Arc::clone(&dict))
+            .with_reverse(Arc::new(ReverseLookup::for_table(shared_pinyin(), dict)))
     };
     eprintln!("hime-cli: {HELP}");
+    run(&mut session)
+}
 
+/// The keystroke loop: one line in, one JSON line per key out. Returns whether
+/// the loop ended cleanly (`:quit` or EOF), so stdin failures still exit
+/// non-zero.
+fn run(session: &mut Session) -> ExitCode {
     let interactive = io::stdin().is_terminal();
     let mut line = String::new();
     loop {
@@ -152,13 +225,13 @@ fn main() -> ExitCode {
             continue;
         }
         if let Some(name) = command_name(input) {
-            if !handle_command(&mut session, name) {
+            if !handle_command(session, name) {
                 break;
             }
         } else {
             for ch in input.chars() {
                 if ch.is_ascii_graphic() || ch == ' ' {
-                    send_key(&mut session, ch as u32, &ch.to_string());
+                    send_key(session, ch as u32, &ch.to_string());
                 } else {
                     eprintln!("hime-cli: unknown character {ch:?} (ASCII only; commands start with ':')");
                 }
