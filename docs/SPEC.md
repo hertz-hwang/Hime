@@ -35,7 +35,7 @@ pub struct DiffSpan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Candidate {
     pub text: String,         // 候选词文字，如 "工"
-    pub comment: String,      // 编码提示（如后续编码补全提示），当前可为空字符串
+    pub comment: String,      // 候选注记：词表前缀匹配的剩余编码（`~d`），或反查里当前方案的完整编码（§8.3）；无注记时为空
     pub code: String,         // 整句候选背后的编码分段，如 "pms sdf gh ds"；词表候选为空
     pub spans: Vec<DiffSpan>, // 相对本页首选候选的差异片段；空表示整体用正常文字色
 }
@@ -69,7 +69,7 @@ pub struct EngineResponse {
 pub struct Config {
     pub page_size: usize,         // 每页候选数，也是选词数字键 1..=N 的数量（1..=9）；方案不定义它，切换方案时保留
     pub max_code_len: usize,      // 单条编码最长字母数（1..=16），即 metadata 的 max_code
-    pub code_type: CodeType,      // 编码类型，即 metadata 的 type：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，JSON 里就是这个数字；面板只读
+    pub code_type: CodeType,      // 编码类型，即 metadata 的 type：0 全拼 / 1 双拼 / 2 形码 / 3 形码整句，JSON 里就是这个数字；面板只读（全拼的按键模型见 §8.2）
     pub auto_commit: bool,        // 自动上屏开关：形码下=码长达 auto_commit_length 且候选唯一时提交；形码整句(type=3)下=概率/空码整句自动上屏开关（见 §7.6）
     pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效；形码整句下无效
     pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭；形码整句下无效
@@ -83,6 +83,7 @@ pub struct Config {
 
 - 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`、`vertical_candidates = false`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
+- `max_code_len` 的上限是 `MAX_CODE_LEN_LIMIT = 32`：形码方案是 4，而全拼的一条编码是一整串拼音字母，随包的 `pinyin` 方案声明 `max_code = 32`（§8.2）。
 - 形码整句（`code_type = 3`）下 `max_code_len`、`auto_commit_length`、`commit_next_code` 均为无效配置（整句不按词码长截断、不顶码提交，自动上屏走 §7.6 的整句算法而非唯一候选规则）；macOS 面板在 `type = 3` 时置灰这三行，`auto_commit` 保留可编辑。见 §7.4。
 - 反序列化按字段可选：缺失字段取默认值，未知字段忽略，允许外壳只更新其中一项。
 - `Config::sanitized()` 把越界值钳进合法区间（而不是报错拒绝），存坏的偏好只会退化、不会打断打字。
@@ -92,7 +93,7 @@ pub struct Config {
 - `vertical_candidates` 同时决定候选窗排版与按键模型的方向轴（§3）：它原本是纯 Shell 渲染参数，加入焦点候选后按键语义依赖排列，因此并入引擎配置；方案元数据不定义它，切换方案时保留。
 
 ## 3. 形码状态机逻辑 (`Session::process_key`)
-按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `SelectFocused` / `FocusPrevious` / `FocusNext` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）与焦点索引同样由 `Session` 持有，`Processor` 只读。翻页（page）与焦点移动由 `Processor` 发对应 `Action`、由 `Session` 维护页码与焦点，不动编码缓冲（详见 §3「翻页」「焦点候选与方向键」条）。
+按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum, reverse)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `SelectFocused` / `FocusPrevious` / `FocusNext` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）、焦点索引与反查开关同样由 `Session` 持有，`Processor` 只读；`reverse` 取 `Unsupported` / `Closed` / `Open` 三态，`Open` 时按键走 §8.3 的 `decide_reverse` 表。翻页（page）与焦点移动由 `Processor` 发对应 `Action`、由 `Session` 维护页码与焦点，不动编码缓冲（详见 §3「翻页」「焦点候选与方向键」条）。
 `candidate_count` 传入的是**当前页**渲染的候选数，因此数字键始终只选中当前页上的词，`-`/`=` 的「有候选」判据也只看当前页是否为空。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
@@ -100,6 +101,7 @@ pub struct Config {
    - 输入 `a`-`z`：追加到 `input_buffer`，查词库更新 `preedit` 和 `candidates`，返回 `handled: true`。
    - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：该键的映射文字直接进 `commit_text`，状态保持空闲，返回 `handled: true`（引号按开/闭交替，见 §3.1）。`english_punct_after_alnum = true` 且 `after_alnum` 为真时本条不适用——见 §3.1 的英文/数字后规则。
    - `english_punct_after_alnum = true`、中文标点、`after_alnum` 为真且输入表内键：该键按半角原样放行，返回 `handled: false`，同时 `after_alnum` 复位——英文/数字之后的**首个**表键标点归宿主（`12:30`），其后的标点照常走中文映射。
+   - 形码 / 形码整句方案（带反查）下输入 `` ` ``：打开反查，`handled: true`（§8.3）；全拼方案下 `` ` `` 是 §3.1 的表键，按上面两条处理。
    - 输入其他任何键（包括 Space, Backspace, Enter, 1-9，以及任何模式下的表外可打印符号）：输入法不拦截，返回 `handled: false`。
 
 2. **当 `input_buffer` 不为空时（编码输入状态）**：
@@ -136,7 +138,7 @@ pub struct Config {
 | `` ` `` | `` ` `` | `{` | `「` | `}` | `」` | `~` | `~` |
 | `'` | `‘` 与 `’` 交替 | `"` | `“` 与 `”` 交替 | | | | |
 
-- **半角映射是刻意的**：`/`、`` ` ``、`~` 三键映射到自身。它们在中文标点模式下仍被引擎认领——编码态按下会顶出第 1 候选并结束组字，与全角键同样处理。放行只由表外与否决定，输出宽窄不参与判断：编码态按 `/` 上屏「第 1 候选 + `/`」，按表外的 `*` 则放行、组字保持不动。
+- **半角映射是刻意的**：`/`、`` ` ``、`~` 三键映射到自身。它们在中文标点模式下仍被引擎认领——编码态按下会顶出第 1 候选并结束组字，与全角键同样处理。`` ` `` 在形码 / 形码整句方案的空闲态被反查接管（§8.3）；反查关闭的会话与全拼方案里它仍是本表键。放行只由表外与否决定，输出宽窄不参与判断：编码态按 `/` 上屏「第 1 候选 + `/`」，按表外的 `*` 则放行、组字保持不动。
 - **表外的可打印符号**共 10 个：`#`、`%`、`&`、`*`、`+`、`-`、`=`、`@`、`_`、`|`。其中 8 个在两种模式、两种状态下都交还宿主；`-`/`=` 是翻页键，编码态由 §3 的翻页条接管（无候选时吞掉），只在空闲态放行。
 - 每个映射都是固定字符串（`^` 出 `……`，各占两个码位），无需检索。`map` 取表内首个匹配，因此同一键在表里重复出现时后一条永远不可达——单元测试断言 `DIRECT` 无重复键，也断言认领集合恰等于本表。
 - **引号配对**：`'` 与 `"` 首次输出开引号，此后按开→闭→开交替，两种引号各自独立计数。配对状态由 `Session` 持有，提交与清空编码不重置它（中途放弃编码不会让下一枚引号退回开引号），会话销毁才复位：段首 `"` 出 `“`，提交候选后再按 `"` 出 `”`。
@@ -149,7 +151,7 @@ pub struct Config {
 | 角色 | 职责 | 当前实现 | 后续扩展 |
 | --- | --- | --- | --- |
 | `Processor` | 读按键 + 当前编码 + 当前候选数（当前页），决定追加编码、删码、选词、翻页、放弃、No-op 还是放行给系统 | `Processor::decide` → `Action`（含 `PageUp`/`PageDown`，见 §3） | 自定义翻页键 |
-| `Translator` | 把编码转换成候选词，按检索优先级上报，不做取舍 | `TableTranslator`（形码查表，包装 `Dictionary`） | `PinyinTranslator`（全拼/双拼，走音节图搜索） |
+| `Translator` | 把编码转换成候选词，按检索优先级上报，不做取舍 | `TableTranslator`（形码查表，包装 `Dictionary`）、`PinyinTranslator`（全拼查拼音词表，包装 `PinyinLexicon`，§8.2）、`SentenceTranslator`（形码整句） | 双拼、音节图搜索、反查以外的二次筛选 |
 | `Filter` | 对**所有 translator 合并后**的候选做删除、重排、注入 | `DedupFilter`（`LimitFilter` 留给自定义链） | 权重混排、简繁转换、Emoji 注入 |
 | `Pipeline` | 按注册顺序调用 translators，再依次跑 filters，交回整窗口（不切页） | `Pipeline::table(dict)` = Table → Dedup | `Pipeline::new(Vec<Box<dyn Translator>>, Vec<Box<dyn Filter>>)`，经 `Session::with_pipeline` 注入 |
 
@@ -189,7 +191,15 @@ pub struct Config {
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
 - `scan_schemes(dir)` 按文件夹名排序扫描，目录不可读返回空表；缺 `metadata.toml` 的普通子文件夹不算方案，单个文件夹坏了记 stderr 跳过，不拖累其余。`load_scheme(dir)` 读取单个文件夹。对外壳的接口见 §6。
 
-### 5.2 用户数据目录 (`paths`)
+### 5.2 `.hdict` 容器（`hdict`，§8.1）
+
+拼音词表以 `.hdict` 容器随包分发：64 字节小端头 + 单个负载块（raw deflate，负载是
+`候选\t连写全拼[\t词频]` 的 UTF-8 行流）。`hdict::load` 校验 magic（`HDCT`）、版本、
+codec、声明长度与头部 CRC 后解压；负载 CRC 只做全量扫描、不进载入路径。方案目录里
+`*.txt` 与 `*.hdict` 都被认作码表，同目录时 `*.txt` 优先（§5.1），`Dictionary::load`
+原样读文件，拼音词表由 `PinyinLexicon::load` 经 `hdict::load_table_text` 解压。
+
+### 5.3 用户数据目录 (`paths`)
 
 - 每个用户有自己的数据目录，**目录结构与仓库 `data/` 一致**：合法方案目录在
   `<数据目录>/schemes/<名字>`（与随应用打包的 `data/schemes/` 并列），整句 `.hng`
@@ -246,11 +256,11 @@ char* hime_scan_schemes(const char* dir);
 // 非法路径或加载失败返回 false，引擎保持不变
 bool hime_select_scheme(const char* scheme_dir);
 
-// 返回用户方案目录 <数据目录>/schemes（§5.2）的 NUL 结尾路径字符串（需调用方
+// 返回用户方案目录 <数据目录>/schemes（§5.3）的 NUL 结尾路径字符串（需调用方
 // 释放），无数据目录可解析时返回 NULL。纯路径查询，hime_init 前可用
 char* hime_schemes_dir(void);
 
-// 按需创建用户数据目录与 schemes 子目录（绝不创建模型文件，§5.2），返回是否
+// 按需创建用户数据目录与 schemes 子目录（绝不创建模型文件，§5.3），返回是否
 // 就绪；外壳启动与「重新载入」时调用
 bool hime_ensure_data_dir(void);
 
@@ -295,7 +305,7 @@ AGENTS.md §1）。`code_type` 随方案固定（§2.3、§5.1，面板只读）
 - `NgramModel::load` 仅做 open + mmap + 头校验即就绪（无逐进程反序列化拷贝），
   查表为直接索引；`Mmap` 是 `Send + Sync`，故 `Arc<NgramModel>` 可服务所有线程。
 - 模型文件 `data/sentence-ngram.hng` 约 191 MB，体积大、按路径加载、不入库，部署
-  时放在用户数据目录 `~/.config/hime/sentence-ngram.hng`（见 §5.2）。定位顺序封装
+  时放在用户数据目录 `~/.config/hime/sentence-ngram.hng`（见 §5.3）。定位顺序封装
   在 `ngram::find_model_path()`，引擎 / CLI / 测试共用，命中第一个可读文件：
   面板指定路径 `ngram::set_model_override(Some(path))`（进程级，权威、不再回退，
   经 `hime_set_model_path` 设置，见 §6）→ `HIME_SENTENCE_MODEL` 环境变量 →
@@ -398,3 +408,87 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
 片段（`context_text`）；候选展示管线仍用空上下文，二者差异由 ≥0.995 份额、闭合边界
 与 `prefix_belongs_to_visible` 约束兜住。参考实现的 supplement（加权词）通道延后，故
 `acceptedTop` 守卫恒成立，已并入上文。
+
+## 8. 全拼（`pinyin`）与反查（`reverse`）
+
+全拼是 `code_type = 0` 的方案，随包的 `data/schemes/pinyin` 已经就位：
+`metadata.toml` 声明 `type = 0`、`max_code = 32`，码表 `py.hdict` 是 §8.1 的
+`.hdict` 容器。它和形码一样完全落在 `hime-core` 里，外壳只转发按键、按
+`EngineResponse` 渲染；反查在此基础上复用同一份拼音词表。
+
+### 8.1 词表（`hdict` + `pinyin::lexicon`）
+
+- `py.hdict` 的负载是 `候选\t连写全拼\t词频`（UTF-8、`\n` 分隔、词频降序写盘，文件序
+  即同码重码的常用次序）。共约 99 万条，最长码 32 字母。
+- `hdict::load` 只校验 magic / 版本 / codec / 声明长度与头部 CRC；负载 CRC 是全文件
+  扫描，只有自检才跑，重新压缩过的表照样能载入。
+- `hdict::load_table_text` 按魔数判定：`.hdict` 解压，其它文件按 UTF-8 直读，所以
+  用户把明文 `py.txt` 丢进方案目录也能用。`Dictionary::load` 也走这条入口，形码
+  码表同样可以用 `.hdict` 打包。
+- `PinyinLexicon::parse` 把每行收成 `(词, 码, 词频, 行号, 最少音节数)`，按码排序后
+  摊平成一个向量：查询是两次二分（码前缀区间）加一个有界 top-K，载入是一次排序。
+  实测随包词表 release 载入约 0.4 s、debug 约 9 s，因此不放在会话创建路径上：
+  `pinyin::SharedPinyin` 把一份表包成「首次用到才读」，载入结果（含失败）被记住，
+  所有会话共享同一份 `Arc`（§8.4）。
+- 码归一化 `lue → lve`、`nue → nve`：词表里两种 ü 写法都有，查询两种写法都能命中。
+
+### 8.2 全拼会话（`Session::pinyin`）
+
+- 构造成 `Session::pinyin(lexicon, config)`：`code_type` 强制为 `Quanpin`，管线是
+  `Pipeline::pinyin`（`PinyinTranslator` + `DedupFilter`）。
+- 按键模型与形码共用 §3 的全部按键（空格、数字、`;`/`'`、翻页、方向键、标点、回车、
+  退格、Esc），差异只有编码长度：全拼一条编码是一整串拼音，`Processor` 在读
+  `code_type = 全拼` 时把上限换成 `PINYIN_MAX_CODE_LEN = 32`（§8.1 的码长上限），
+  既不按 `max_code_len` 截断、也不触发 `commit_next_code` 顶码提交。`max_code_len`、
+  `auto_commit_length`、`commit_next_code` 三个键在全拼下都不生效。
+- 自动上屏在全拼下不发火：拼音编码多数是更长词的前缀，唯一候选不代表用户想要的
+  就是它，选择权留给空格 / 数字。
+- 候选的 `code` 是首选音节切分（`ni hao`），`comment` 为空；`Session` 沿用 §2.2 的
+  `code_line` 规则，于是 `nihao` 的显示行自动变成 `ni hao`。音节切分用「最长音节
+  优先」的完整切法（`xian` → `xian`，不是 `xi an`），与 §8.1 建索引时的切法同源。
+- 排序（`RankKey`，越小越靠前）：词音节数与查询音节位置数之差 → 码是否完全相等 →
+  覆盖的查询字母数 → 词频 → 表内行号 → 词长 → 词面。第一条对应参考实现的
+  「音节数完全一致优先」：`n` 时「你」压过「你好」，`kaifa` 时「开发」压过
+  「开发者」。
+
+### 8.3 反查（`reverse`）
+
+在形码与形码整句方案下，`` ` `` 打开反查：其后输入的是全拼，候选是拼音词，每条候选
+的 `comment` 是**当前方案**给出的完整编码：
+
+- 触发条件：会话带 `ReverseLookup`（`Session::with_reverse`）。全拼会话不带，所以
+  `` ` `` 在全拼下仍是 §3.1 映射表里的标点键；没有拼音词表的形码会话同样不带，
+  `` ` `` 也保持标点语义。
+- 按键模型（`Processor::decide_reverse`）：
+  - 字母：追加到查询，上限同 §8.2（32 字母）；
+  - `` ` `` / Esc / Enter：关闭反查，不提交任何文字；
+  - 空格且查询为空：上屏半个角 `` ` ``（这是中文标点下唯一能打出反引号的途径）；
+  - 空格且有候选：提交焦点候选；有查询但没有候选：关闭反查、不提交；
+  - 数字 / `;` / `'` / 翻页 / 方向键：与 §3 完全一致，选中的是反查候选；
+  - 中文标点下的表键标点：先提交焦点候选再拼标点，与 §3 一致；
+  - 其它键：吞掉。
+- 状态：标记位 `reversing` 与查询串都归 `Session`，查询串就是 `input_buffer`（不含
+  `` ` ``）。于是检索、翻页、数字都与普通编码走同一套代码；`code_line` 在反查时
+  前缀一个 `` ` ``（`` `ni hao ``），外壳据此就能看出当前在反查。任何提交、Esc、
+  编码清空都会复位 `reversing`。
+- 完整编码的取法（`Dictionary::code_for` / `SentenceLexicon::code_for`）：同一个词
+  在方案表里常挂在多个码下（「你」有 `fl` / `fll` / `flll`），取**最长**的那条为
+  完整码，等长时取字典序最小的一条，结果稳定。词不在方案表里时 `comment` 为空，
+  候选照常列出（拼音词表远大于形码表）。
+- 关闭反查后会话回到原方案的管线，原编码不受影响；反查期间 `auto_commit` 不发火。
+
+### 8.4 接入（`hime-ffi` / `hime-cli` / 打包）
+
+- FFI（§6）：
+  - `hime_select_scheme` 按方案 `type` 选来源：`0` → `PinyinLexicon::load` 建全拼
+    会话；`3` → 整句引擎；其余 → 词表。任何方案都顺带记下拼音表位置：优先本方案
+    目录（`type = 0` 自己就是拼音表），否则同一 `schemes` 目录下的 `pinyin` 方案。
+  - 这份拼音表是 `SharedPinyin`：首次真正需要时（第一次反查或第一次敲全拼）才读，
+    之后所有会话共享同一份 `Arc<PinyinLexicon>`；切换方案时只有路径变了才换掉。
+    形码 / 形码整句的新会话据此装上 `ReverseLookup`，全拼会话不装；于是打字过程中
+    的按键路径只在第一次反查时承担一次载入。
+  - 找不到拼音表时反查不可用，`` ` `` 回到标点语义；方案选择本身不受影响。
+- CLI：`cargo run -p hime-cli -- --pinyin [py.hdict]` 进全拼模式；形码 / 形码整句模式下
+  自动装上反查，直接逐键验证 `` ` `` + 拼音。
+- 打包：`build.sh` 原样复制 `data/schemes`，`pinyin` 目录连同 `py.hdict` 一起进
+  `Resources/schemes`。
