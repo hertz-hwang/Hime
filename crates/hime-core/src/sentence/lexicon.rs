@@ -33,6 +33,9 @@ pub struct SentenceLexicon {
     proper_prefixes: HashSet<String>,
     max_code_length: usize,
     entry_count: usize,
+    /// `text → complete code`, for the 反查 window (SPEC §8.3): the longest
+    /// code a text carries, the smaller string among equals.
+    reverse: HashMap<String, String>,
 }
 
 impl SentenceLexicon {
@@ -126,13 +129,38 @@ impl SentenceLexicon {
         let mut lengths: Vec<usize> = length_values.into_iter().collect();
         lengths.sort_unstable();
 
+        // Reverse index for 反查: the same rule as a word table — the longest
+        // code is the complete one, ties take the smaller string.
+        let mut reverse: HashMap<String, String> = HashMap::new();
+        for (code, edges) in &codes {
+            for edge in edges {
+                match reverse.get(&edge.text) {
+                    Some(existing) if (code.len(), existing) > (existing.len(), code) => {
+                        reverse.insert(edge.text.clone(), code.clone());
+                    }
+                    Some(_) => {}
+                    None => {
+                        reverse.insert(edge.text.clone(), code.clone());
+                    }
+                }
+            }
+        }
+
         SentenceLexicon {
             codes,
             lengths,
             proper_prefixes,
             max_code_length,
             entry_count,
+            reverse,
         }
+    }
+
+    /// The complete code a text carries in this table (SPEC §8.3), or `None`
+    /// when the table has no such entry.
+    #[must_use]
+    pub fn code_for(&self, text: &str) -> Option<&str> {
+        self.reverse.get(text).map(String::as_str)
     }
 
     /// Edges for an exact code, ranked ascending, or `None` if the code is absent.
@@ -207,6 +235,19 @@ mod tests {
         assert!(!fd[0].optimal_single, "fd is longer than the shortest code f");
         assert!(lex.edges("hd").unwrap()[0].optimal_single);
         assert!(!lex.edges("hgd").unwrap()[0].optimal_single);
+    }
+
+    /// 反查 asks for the complete code: the longest a text carries, and the
+    /// smaller string when two equally long codes exist.
+    #[test]
+    fn code_for_reports_the_longest_code() {
+        let lex = SentenceLexicon::parse("你\tfl\n你\tflll\n好\tolgu\n好\tol\n");
+        assert_eq!(lex.code_for("你"), Some("flll"));
+        assert_eq!(lex.code_for("好"), Some("olgu"));
+        assert_eq!(lex.code_for("无"), None);
+
+        let tie = SentenceLexicon::parse("在\tbcd\n在\tacd\n");
+        assert_eq!(tie.code_for("在"), Some("acd"));
     }
 
     /// Two equally-short multi-key codes for one character: only the first seen

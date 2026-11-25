@@ -105,6 +105,13 @@ impl SentenceEngine {
         &self.lexicon
     }
 
+    /// The complete code a text carries in the sentence table, for 反查
+    /// (SPEC §8.3); `None` when the table has no such entry.
+    #[must_use]
+    pub fn code_for(&self, text: &str) -> Option<&str> {
+        self.lexicon.code_for(text)
+    }
+
     /// Whether the word graph is empty; an empty engine decodes to nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {

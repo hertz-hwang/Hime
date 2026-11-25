@@ -29,7 +29,6 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::Path;
 
 use crate::types::Candidate;
@@ -84,6 +83,10 @@ impl From<std::io::Error> for DictionaryError {
 #[derive(Debug, Clone)]
 pub struct Dictionary {
     by_code: BTreeMap<String, Vec<Entry>>,
+    /// `text → complete code`, used by the reverse lookup (SPEC §8.3). A word
+    /// may be listed under several codes; the reference shows the
+    /// lexicographically first one (`min(wbcode)`), so this keeps that code.
+    reverse: BTreeMap<String, String>,
     total_entries: usize,
     format: TableFormat,
 }
@@ -159,12 +162,35 @@ impl Dictionary {
                 .push(Entry { code: code.to_string(), text: text.to_string(), weight });
             total_entries += 1;
         }
-        Ok(Dictionary { by_code, total_entries, format })
+
+        // Reverse index: the complete code a word shows in a 反查 window. A
+        // scheme lists a word under its shortened codes too (`你` sits on
+        // `fl`, `fll` and `flll`), so the longest code is the full one; a tie
+        // keeps the lexicographically first so the answer is deterministic.
+        let mut reverse: BTreeMap<String, String> = BTreeMap::new();
+        for (code, group) in &by_code {
+            for entry in group {
+                reverse
+                    .entry(entry.text.clone())
+                    .and_modify(|existing| {
+                        if better_reverse_code(code, existing) {
+                            existing.clone_from(code);
+                        }
+                    })
+                    .or_insert_with(|| code.clone());
+            }
+        }
+        Ok(Dictionary { by_code, reverse, total_entries, format })
     }
 
-    /// Read and parse a lexicon file from disk.
+    /// Read and parse a lexicon file from disk. A `.hdict` container is
+    /// inflated first (SPEC §5.2), so a shape table may ship compressed the
+    /// same way the pinyin table does.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, DictionaryError> {
-        let content = fs::read_to_string(path)?;
+        let content = crate::hdict::load_table_text(path).map_err(|e| match e {
+            crate::hdict::HDictError::Io(error) => DictionaryError::Io(error),
+            other => DictionaryError::Format { line: 0, message: other.to_string() },
+        })?;
         Self::parse_str(&content)
     }
 
@@ -176,6 +202,15 @@ impl Dictionary {
     /// Number of valid entries loaded.
     pub fn entry_count(&self) -> usize {
         self.total_entries
+    }
+
+    /// The complete code a word carries in this table (SPEC §8.3): its
+    /// longest code, or the lexicographically first among equally long ones.
+    /// `None` when the word is not in the table — a candidate coming from a
+    /// different source has no code here.
+    #[must_use]
+    pub fn code_for(&self, text: &str) -> Option<&str> {
+        self.reverse.get(text).map(String::as_str)
     }
 
     /// Prefix-match lookup. Exact-code candidates come first, then
@@ -239,6 +274,12 @@ impl Dictionary {
         }
         out
     }
+}
+
+/// Whether `candidate` is the better reverse-lookup code than `current`:
+/// longer codes are fuller, and among equals the smaller string wins.
+fn better_reverse_code(candidate: &str, current: &str) -> bool {
+    (candidate.len(), current) > (current.len(), candidate)
 }
 
 /// Column count of the first data row decides the format.
@@ -453,6 +494,21 @@ mod tests {
     fn weighted_table_rejects_short_rows() {
         let err = Dictionary::parse_str("a\t工\t100\n在\ta\n").unwrap_err();
         assert!(matches!(err, DictionaryError::Format { .. }), "{err}");
+    }
+
+    /// The reverse index answers the longest code a word carries and prefers
+    /// the smaller string among equally long ones, so 反查 shows one stable
+    /// code per word.
+    #[test]
+    fn reverse_lookup_reports_the_longest_code() {
+        let d = Dictionary::parse_str("你\tfl\n你\tfll\n你\tflll\n好\tol\n好\tolgu\n好\tzzzz\n")
+            .unwrap();
+        assert_eq!(d.code_for("你"), Some("flll"));
+        assert_eq!(d.code_for("好"), Some("olgu"), "longest wins");
+        assert_eq!(d.code_for("无"), None);
+
+        let tie = Dictionary::parse_str("在\tbcd\n在\tacd\n").unwrap();
+        assert_eq!(tie.code_for("在"), Some("acd"), "ties take the smaller code");
     }
 
     /// The default scheme ships with the repository; this is the regression
