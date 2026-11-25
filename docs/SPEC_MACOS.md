@@ -34,7 +34,7 @@
    - `commitComposition(_:)` 同样以 `KEY_ENTER` 结束组字：系统要求立即结束组字会话（点开组字区外、切换输入源等）时，编码按原文上屏，而不是把 Marked Text 留在宿主里。
 4. **按键拦截与转换**：
    - 重写 `override func handle(_ event: NSEvent!, client sender: Any!) -> Bool`。
-   - 仅处理 `event.type == .keyDown`。
+   - 按键事件按 `recognizedEvents` 接收 `.keyDown` 与 `.flagsChanged`；一般按键只处理 `.keyDown`，中/英键两种都处理（见下条）。
    - 若包含 `.command` 或 `.control` 修饰键，直接返回 `false`。
    - **中/英文切换由系统完成，Shell 只兜底且不吞键**（§2 `TICapsLockLanguageSwitchCapable`）：系统设置开启后，短按中/英键由系统切换输入源 Hime ↔ ABC，**不翻大写灯**——ABC 侧小写键入，切回 Hime 恢复中文组字。中/英键的按下在系统切换开启时以 flags-changed（keyCode `57`）送达，系统切换关闭或事件先于输入源切换时则可能是 keyDown；因此 `recognizedEvents` 返回 `.keyDown + .flagsChanged`（默认掩码只有 keyDown），两种事件到达 `handle` 时都只做两件事：以 `KEY_ENTER` 经引擎结束当前组字——**有编码串时立即按原文提交上屏**、Marked Text 清空，空闲则无副作用——随后 `return false` 原样放行。系统的切换逻辑只作用于未被输入法消费的 Caps Lock 事件，吞键会杀死系统切换。若系统连 flagsChanged 也不送达（切换完全在输入法事件之外完成），`deactivateServer`/`commitComposition` 的结束组字兜底保证编码不会滞留：输入源切走时同样按原文上屏。长按进入全大写键入（留在 Hime，灯亮，敲大写），再长按灯灭。`handle` 对每个 Caps Lock 事件记一行 NSLog（事件类型与灯位标志）：macOS 在 HID 层过滤注入的 Caps Lock，该路径无法自动化测试，日志是唯一可回读的行为证据。此后凡 `modifierFlags` 含 `.capsLock` 的 keyDown 一律返回 `false` 交给宿主——全大写灯亮状态所有键归宿主，字母以原形进正文。
    - **中文模式下 Shift+字母敲大写经引擎放行**：`modifierFlags` 含 `.shift` 且键是字母（`charactersIgnoringModifiers` 首字符 A-Z/a-z）时，取 `characters` 首字符——最终字符——为大写 A-Z（65-90）就送引擎：引擎对大写一律返回 `handled: false`（SPEC §3），大写照旧落进宿主正文、不折小写、不进编码，组字与 Marked Text 不动；这一趟往返只为让引擎的英文/数字后状态看见大写（SPEC §3.1 的 `A:` 场景）。最终字符不是 A-Z（Option 组合、非美式键盘等）仍返回 `false` 交给宿主。上档符号（`?`、`!` 等）不在此列，照常按最终字符送引擎（SPEC §3.1）。
