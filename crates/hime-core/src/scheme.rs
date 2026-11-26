@@ -48,6 +48,10 @@ pub struct SchemeMetadata {
     /// Punctuation output (see [`Config::ascii_punct`]): `0` English
     /// punctuation, `1` Chinese punctuation.
     pub ascii_punct: u8,
+    /// Learn the user's committed text into the per-user n-gram model and
+    /// blend it with the default model when re-ranking (see
+    /// [`Config::user_ngram`]).
+    pub user_ngram: bool,
 }
 
 impl Default for SchemeMetadata {
@@ -62,6 +66,7 @@ impl Default for SchemeMetadata {
             auto_commit_length: MAX_CODE_LEN,
             commit_next_code: 0,
             ascii_punct: 0,
+            user_ngram: false,
         }
     }
 }
@@ -82,6 +87,7 @@ impl SchemeMetadata {
             auto_commit_length: self.auto_commit_length,
             commit_next_code: self.commit_next_code,
             ascii_punct: self.ascii_punct,
+            user_ngram: self.user_ngram,
             english_punct_after_alnum: base.english_punct_after_alnum,
             semicolon_quote_select: base.semicolon_quote_select,
             show_code_in_window: base.show_code_in_window,
@@ -250,6 +256,7 @@ mod tests {
         assert_eq!(info.metadata.auto_commit_length, 4);
         assert_eq!(info.metadata.commit_next_code, 5);
         assert_eq!(info.metadata.ascii_punct, 1, "琉璃v1 types Chinese punctuation");
+        assert!(!info.metadata.user_ngram, "琉璃v1 ranks with the default model alone");
         assert!(info.table.ends_with("liuli_table.txt"), "{}", info.table);
         assert!(Path::new(&info.table).is_file());
     }
@@ -272,11 +279,27 @@ mod tests {
         assert_eq!(info.dir, "pinyin");
         assert_eq!(info.metadata.name, "全拼");
         assert_eq!(info.metadata.code_type, CodeType::Quanpin);
+        assert!(info.metadata.user_ngram, "全拼 blends the user model into single characters");
         assert!(info.table.ends_with("py.hdict"), "{}", info.table);
         assert!(
             scan_schemes(&scheme_root()).iter().any(|s| s.dir == "pinyin"),
             "the scheme list includes 全拼"
         );
+    }
+
+    /// The shipped 形码整句 scheme turns the user model on; the word scheme
+    /// (琉璃v1) leaves it off.
+    #[test]
+    fn only_the_sentence_and_pinyin_schemes_enable_the_user_model() {
+        let sentence =
+            load_scheme(&scheme_root().join("liuli_v1_sentence")).expect("sentence scheme loads");
+        assert!(sentence.metadata.user_ngram, "形码整句 learns user n-grams");
+        assert!(
+            sentence.metadata.defaults_for(Config::default()).user_ngram,
+            "the engine config mirrors the metadata"
+        );
+        let word = load_scheme(&scheme_root().join("liuli_v1")).expect("word scheme loads");
+        assert!(!word.metadata.user_ngram, "the word table has no model to blend");
     }
 
     /// A `.txt` beside a `.hdict` wins: the readable table is what the user

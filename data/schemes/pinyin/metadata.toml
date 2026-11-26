@@ -8,3 +8,4 @@ auto_commit = false
 auto_commit_length = 4
 commit_next_code = 0
 ascii_punct = 1
+user_ngram = true

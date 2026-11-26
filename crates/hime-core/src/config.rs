@@ -100,6 +100,11 @@ pub struct Config {
     /// Punctuation output, the `metadata.toml` `ascii_punct` key: `0` English
     /// (ASCII) punctuation, `1` Chinese punctuation. A number, never a bool.
     pub ascii_punct: u8,
+    /// Learn the user's committed text into the per-user n-gram model and
+    /// blend that model with the default one when re-ranking candidates (the
+    /// `metadata.toml` `user_ngram` key). Scheme-defined, replaced on a scheme
+    /// switch, read-only in the panel.
+    pub user_ngram: bool,
     /// Release the first punctuation key after English letters or digits to
     /// the host as ASCII instead of mapping it to 中文标点 (the `12:30`
     /// case). Pressing that same key again right away corrects the released
@@ -133,6 +138,7 @@ impl Default for Config {
             auto_commit_length: MAX_CODE_LEN,
             commit_next_code: 0,
             ascii_punct: 0,
+            user_ngram: false,
             english_punct_after_alnum: false,
             semicolon_quote_select: false,
             show_code_in_window: false,
@@ -174,6 +180,7 @@ mod tests {
         assert_eq!(config.auto_commit_length, MAX_CODE_LEN);
         assert_eq!(config.commit_next_code, 0, "overflow commit is off by default");
         assert_eq!(config.ascii_punct, 0, "English punctuation is the default");
+        assert!(!config.user_ngram, "the user model is opt-in through a scheme");
         assert!(!config.english_punct_after_alnum, "the rule is opt-in");
         assert!(!config.semicolon_quote_select, "; and ' stay punctuation by default");
         assert!(!config.show_code_in_window, "the encoding is inline by default");
@@ -255,6 +262,19 @@ mod tests {
 
         let clamped = Config { ascii_punct: 7, ..Config::default() }.sanitized();
         assert_eq!(clamped.ascii_punct, 1, "unknown numbers clamp to 中文标点");
+    }
+
+    /// The scheme-defined user-model switch crosses JSON as a plain bool and
+    /// survives nothing: a scheme switch reloads it like the other metadata
+    /// keys.
+    #[test]
+    fn user_ngram_crosses_json_as_a_bool() {
+        let config: Config = serde_json::from_str(r#"{"user_ngram":true}"#).unwrap();
+        assert!(config.user_ngram);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""user_ngram":true"#), "{json}");
+
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().user_ngram);
     }
 
     #[test]
