@@ -1911,15 +1911,18 @@ private struct KeyboardView: View {
 private struct MacKeyboardHeatmap: View {
     let stats: KeyboardStats?
 
-    /// Design space; every length below is in these units and the whole
-    /// board scales to the available width.
-    private static let designWidth: CGFloat = 700
-    private static let designHeight: CGFloat = 208
-    private static let inset: CGFloat = 14
-    private static let key: CGFloat = 35.2
-    private static let gap: CGFloat = 3.9
-    private static let rowHeight: CGFloat = 27.4
-    private static let functionHeight: CGFloat = 16.2
+    /// A 15-unit ANSI block; every main row is stretched to end on
+    /// `mainRight`, so the board has one clean right edge.
+    private static let designWidth: CGFloat = 598
+    private static let designHeight: CGFloat = 206
+    private static let inset: CGFloat = 16
+    private static let key: CGFloat = 34
+    private static let gap: CGFloat = 4
+    private static let rowHeight: CGFloat = 27
+    private static let functionHeight: CGFloat = 16
+    private static let functionGap: CGFloat = 7
+    private static var mainWidth: CGFloat { 15 * key + 14 * gap }
+    private static var mainRight: CGFloat { inset + mainWidth }
 
     /// Five heat steps plus the untouched base.
     static let shades: [Color] = [
@@ -1954,6 +1957,9 @@ private struct MacKeyboardHeatmap: View {
         var width: CGFloat = 1
         /// Records key presses; modifier and function keys are decoration.
         var recorded = true
+        /// Absorbs the width left over by this row's key count, so all rows
+        /// start and end on the same edges.
+        var stretch = false
     }
 
     private var functionRow: [Cap] {
@@ -1967,7 +1973,7 @@ private struct MacKeyboardHeatmap: View {
             Cap(name: "PrevTrack", label: "◀◀", recorded: false),
             Cap(name: "PlayPause", label: "▶︎❙❙", recorded: false),
             Cap(name: "NextTrack", label: "▶▶", recorded: false),
-            Cap(name: "Mute", label: "🔇", recorded: false),
+            Cap(name: "Mute", label: "⊘", recorded: false),
             Cap(name: "VolumeDown", label: "−", recorded: false),
             Cap(name: "VolumeUp", label: "+", recorded: false),
             Cap(name: "Eject", label: "⏏", recorded: false),
@@ -1983,45 +1989,44 @@ private struct MacKeyboardHeatmap: View {
                 Cap(name: "6", label: "6"), Cap(name: "7", label: "7"),
                 Cap(name: "8", label: "8"), Cap(name: "9", label: "9"),
                 Cap(name: "0", label: "0"), Cap(name: "-", label: "-"),
-                Cap(name: "=", label: "="), Cap(name: "Backspace", label: "delete", width: 1.55),
+                Cap(name: "=", label: "="),
+                Cap(name: "Backspace", label: "delete", width: 2, stretch: true),
             ],
             [
-                Cap(name: "Tab", label: "⇥", width: 1.55), Cap(name: "q", label: "q"),
+                Cap(name: "Tab", label: "⇥", width: 1.5), Cap(name: "q", label: "q"),
                 Cap(name: "w", label: "w"), Cap(name: "e", label: "e"), Cap(name: "r", label: "r"),
                 Cap(name: "t", label: "t"), Cap(name: "y", label: "y"), Cap(name: "u", label: "u"),
                 Cap(name: "i", label: "i"), Cap(name: "o", label: "o"), Cap(name: "p", label: "p"),
-                Cap(name: "[", label: "["), Cap(name: "]", label: "]"), Cap(name: "\\", label: "\\"),
+                Cap(name: "[", label: "["), Cap(name: "]", label: "]"),
+                Cap(name: "\\", label: "\\", width: 1.5, stretch: true),
             ],
             [
-                Cap(name: "CapsLock", label: "⇪", width: 1.8, recorded: false),
+                Cap(name: "CapsLock", label: "⇪", width: 1.75, recorded: false),
                 Cap(name: "a", label: "a"), Cap(name: "s", label: "s"), Cap(name: "d", label: "d"),
                 Cap(name: "f", label: "f"), Cap(name: "g", label: "g"), Cap(name: "h", label: "h"),
                 Cap(name: "j", label: "j"), Cap(name: "k", label: "k"), Cap(name: "l", label: "l"),
                 Cap(name: ";", label: ";"), Cap(name: "'", label: "'"),
-                Cap(name: "Enter", label: "return", width: 1.95),
+                Cap(name: "Enter", label: "return", width: 2.25, stretch: true),
             ],
             [
-                Cap(name: "ShiftLeft", label: "⇧", width: 2.3, recorded: false),
+                Cap(name: "ShiftLeft", label: "⇧", width: 2.25, recorded: false),
                 Cap(name: "z", label: "z"), Cap(name: "x", label: "x"), Cap(name: "c", label: "c"),
                 Cap(name: "v", label: "v"), Cap(name: "b", label: "b"), Cap(name: "n", label: "n"),
                 Cap(name: "m", label: "m"), Cap(name: ",", label: ","), Cap(name: ".", label: "."),
                 Cap(name: "/", label: "/"),
-                Cap(name: "ShiftRight", label: "⇧", width: 2.35, recorded: false),
+                Cap(name: "ShiftRight", label: "⇧", width: 2.75, recorded: false,
+                    stretch: true),
             ],
             [
-                Cap(name: "fn", label: "fn", width: 1.2, recorded: false),
-                Cap(name: "Control", label: "⌃", width: 1.2, recorded: false),
-                Cap(name: "Option", label: "⌥", width: 1.2, recorded: false),
-                Cap(name: "Command", label: "⌘", width: 1.35, recorded: false),
-                Cap(name: "Space", label: "", width: 5.25),
-                Cap(name: "CommandRight", label: "⌘", width: 1.35, recorded: false),
-                Cap(name: "OptionRight", label: "⌥", width: 1.2, recorded: false),
+                Cap(name: "fn", label: "fn", recorded: false),
+                Cap(name: "Control", label: "⌃", recorded: false),
+                Cap(name: "Option", label: "⌥", recorded: false),
+                Cap(name: "Command", label: "⌘", width: 1.25, recorded: false),
+                Cap(name: "Space", label: "", width: 5.25, stretch: true),
+                Cap(name: "CommandRight", label: "⌘", width: 1.25, recorded: false),
+                Cap(name: "OptionRight", label: "⌥", recorded: false),
             ],
         ]
-    }
-
-    private var totalPresses: Int64 {
-        stats?.keys.values.reduce(0, +) ?? 0
     }
 
     var body: some View {
@@ -2037,97 +2042,114 @@ private struct MacKeyboardHeatmap: View {
     private func draw(_ context: inout GraphicsContext) {
         let board = CGRect(x: 0, y: 0, width: Self.designWidth, height: Self.designHeight)
         context.fill(
-            Path(roundedRect: board, cornerRadius: 10),
-            with: .color(Color.secondary.opacity(0.06))
+            Path(roundedRect: board, cornerRadius: 12),
+            with: .color(Color.secondary.opacity(0.055))
         )
         context.stroke(
-            Path(roundedRect: board.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 10),
+            Path(roundedRect: board.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 12),
             with: .color(Color.secondary.opacity(0.18)),
             lineWidth: 0.5
         )
 
-        // Function row: one cap per number-row column.
-        var x = Self.inset
-        let functionY = Self.inset
+        // Function row: thirteen decorative caps spread across the block.
+        let functionWidth =
+            (Self.mainWidth - CGFloat(functionRow.count - 1) * Self.gap)
+            / CGFloat(functionRow.count)
+        var functionX = Self.inset
         for cap in functionRow {
-            let rect = CGRect(x: x, y: functionY, width: Self.key * 0.9, height: Self.functionHeight)
+            let rect = CGRect(x: functionX, y: Self.inset,
+                              width: functionWidth, height: Self.functionHeight)
             drawKey(&context, rect: rect, fill: Color.secondary.opacity(0.07),
                     stroke: Color.secondary.opacity(0.14),
                     label: cap.label, labelColor: Color.secondary.opacity(0.6),
                     count: nil, fontSize: 7.5)
-            x += Self.key + Self.gap
+            functionX += functionWidth + Self.gap
         }
 
-        // Main block.
-        var y = Self.inset + Self.functionHeight + Self.gap * 2
-        for row in mainRows {
-            x = Self.inset
-            for cap in row {
-                let width = Self.key * cap.width + Self.gap * (cap.width - 1)
-                let rect = CGRect(x: x, y: y, width: width, height: Self.rowHeight)
-                let count = cap.recorded ? stats?.count(cap.name) ?? 0 : 0
-                drawKey(&context, rect: rect,
-                        fill: Self.shade(level: cap.recorded ? level(cap.name) : 0),
-                        stroke: Color.secondary.opacity(0.22),
-                        label: cap.label,
-                        labelColor: numberColor(cap.name).opacity(0.8),
-                        count: count > 0 ? Self.format(count) : nil,
-                        fontSize: 9)
-                x += width + Self.gap
-            }
-            y += Self.rowHeight + Self.gap
+        // Main block. The bottom row stops one gap before the arrow cluster.
+        let arrowWidth = Self.key * 0.9
+        let clusterWidth = arrowWidth * 3 + Self.gap * 2
+        let arrowLeft = Self.mainRight - clusterWidth
+        let mainY = Self.inset + Self.functionHeight + Self.functionGap
+        for (index, row) in mainRows.enumerated() {
+            let y = mainY + CGFloat(index) * (Self.rowHeight + Self.gap)
+            let limit = index == mainRows.count - 1 ? arrowLeft - Self.gap : Self.mainRight
+            drawRow(&context, row, y: y, limit: limit)
         }
 
-        // Arrow pad: the inverted-T cluster inside the bottom row, each key
-        // half height like on the Mac. Up sits above Down.
-        let arrow = Self.key * 0.80
-        let padX = Self.inset + 14.55 * Self.key + 13 * Self.gap + Self.gap * 3
-        let padTop = Self.inset + Self.functionHeight + Self.gap * 2
-            + 4 * (Self.rowHeight + Self.gap)
+        // Arrow pad: the inverted-T cluster, half height like on the Mac.
+        let padTop = mainY + 4 * (Self.rowHeight + Self.gap)
         let half = (Self.rowHeight - Self.gap) * 0.5
-        let column = { (index: Int) in padX + CGFloat(index) * (arrow + Self.gap) }
-        drawKey(&context,
-                rect: CGRect(x: column(1), y: padTop, width: arrow, height: half),
-                fill: Self.shade(level: level("Up")),
-                stroke: Color.secondary.opacity(0.22),
-                label: "▲", labelColor: numberColor("Up").opacity(0.8),
-                count: (stats?.count("Up") ?? 0) > 0 ? Self.format(stats?.count("Up") ?? 0) : nil,
-                fontSize: 8)
+        let column = { (index: Int) in arrowLeft + CGFloat(index) * (arrowWidth + Self.gap) }
+        drawArrow(&context, rect: CGRect(x: column(1), y: padTop,
+                                        width: arrowWidth, height: half),
+                  name: "Up", label: "▲")
         for (index, cap) in [Cap(name: "Left", label: "◀"), Cap(name: "Down", label: "▼"),
                              Cap(name: "Right", label: "▶")].enumerated() {
-            let rect = CGRect(x: column(index), y: padTop + half + Self.gap,
-                              width: arrow, height: half)
-            let count = stats?.count(cap.name) ?? 0
-            drawKey(&context, rect: rect, fill: Self.shade(level: level(cap.name)),
-                    stroke: Color.secondary.opacity(0.22), label: cap.label,
-                    labelColor: numberColor(cap.name).opacity(0.8),
-                    count: count > 0 ? Self.format(count) : nil, fontSize: 8)
+            drawArrow(&context,
+                      rect: CGRect(x: column(index), y: padTop + half + Self.gap,
+                                   width: arrowWidth, height: half),
+                      name: cap.name, label: cap.label)
         }
+    }
 
+    /// Lay out one main row: keys keep their unit widths and the stretch cap
+    /// absorbs the difference to `limit`, so every row ends on the same edge.
+    private func drawRow(_ context: inout GraphicsContext, _ caps: [Cap],
+                         y: CGFloat, limit: CGFloat) {
+        let base = caps.reduce(0) { $0 + $1.width * Self.key }
+        let gaps = CGFloat(caps.count - 1) * Self.gap
+        let extra = limit - Self.inset - base - gaps
+        let stretchUnits = caps.filter(\.stretch).reduce(0) { $0 + $1.width }
+        var x = Self.inset
+        for cap in caps {
+            let extraWidth = cap.stretch && stretchUnits > 0
+                ? extra * cap.width / stretchUnits : 0
+            let width = cap.width * Self.key + extraWidth
+            let rect = CGRect(x: x, y: y, width: width, height: Self.rowHeight)
+            let count = cap.recorded ? stats?.count(cap.name) ?? 0 : 0
+            drawKey(&context, rect: rect,
+                    fill: Self.shade(level: cap.recorded ? level(cap.name) : 0),
+                    stroke: Color.secondary.opacity(0.22),
+                    label: cap.label,
+                    labelColor: numberColor(cap.name).opacity(0.8),
+                    count: count > 0 ? Self.format(count) : nil,
+                    fontSize: 10)
+            x += width + Self.gap
+        }
+    }
+
+    private func drawArrow(_ context: inout GraphicsContext, rect: CGRect,
+                           name: String, label: String) {
+        drawKey(&context, rect: rect, fill: Self.shade(level: level(name)),
+                stroke: Color.secondary.opacity(0.22), label: label,
+                labelColor: numberColor(name).opacity(0.8),
+                count: nil, fontSize: 9, centered: true)
     }
 
     private func drawKey(_ context: inout GraphicsContext, rect: CGRect, fill: Color,
                          stroke: Color, label: String, labelColor: Color,
-                         count: String?, fontSize: CGFloat) {
+                         count: String?, fontSize: CGFloat, countSize: CGFloat = 8,
+                         centered: Bool = false) {
         let path = Path(roundedRect: rect, cornerRadius: 3.5)
         context.fill(path, with: .color(fill))
         context.stroke(path, with: .color(stroke), lineWidth: 0.5)
         if !label.isEmpty {
-            let size: CGFloat = label.count == 1 && !(label.first?.isLetter ?? false)
-                ? fontSize + 3 : fontSize
             let text = Text(label)
-                .font(.system(size: size, weight: .medium))
+                .font(.system(size: fontSize, weight: .medium))
                 .foregroundColor(labelColor)
             context.draw(text,
-                         at: CGPoint(x: rect.minX + 4, y: rect.minY + 3),
-                         anchor: .topLeading)
+                         at: centered
+                            ? CGPoint(x: rect.midX, y: rect.midY)
+                            : CGPoint(x: rect.minX + 4, y: rect.minY + 3),
+                         anchor: centered ? .center : .topLeading)
         }
         if let count {
             let text = Text(count)
-                .font(.system(size: 8, weight: .semibold).monospacedDigit())
+                .font(.system(size: countSize, weight: .semibold).monospacedDigit())
                 .foregroundColor(labelColor)
             context.draw(text,
-                         at: CGPoint(x: rect.maxX - 3, y: rect.maxY - 2),
+                         at: CGPoint(x: rect.maxX - 5, y: rect.maxY - 3),
                          anchor: .bottomTrailing)
         }
     }
