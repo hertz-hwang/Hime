@@ -31,6 +31,12 @@
 //! 形码整句 decoder strips it from `mass` so auto-commit confidence stays
 //! calibrated to the default model.
 //!
+//! What learning may reorder (SPEC §7.3): in 形码整句 only the sentence paths
+//! the user assembled from several table entries compete by score; a code the
+//! table itself answers (`f` → 一 / “ / 一定要) keeps the table's order. In
+//! 全拼 every character score goes through the blend, so a one-syllable query
+//! (a character choice) is re-ranked by both models together.
+//!
 //! Counting rules: one chain per committed fragment, seeded with the two
 //! characters committed earlier in the same session (BOS at the start), so a
 //! session's end is never linked to the next session's beginning. Texts
