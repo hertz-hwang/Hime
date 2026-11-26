@@ -554,6 +554,18 @@ impl UserNgram {
         }
     }
 
+    /// Save when anything changed, without the throttle. Called when a session
+    /// ends or the scheme changes so no learned text is left only in memory.
+    pub fn flush(&self) {
+        let dirty = self.lock().counts.dirty;
+        if !dirty {
+            return;
+        }
+        if let Err(e) = self.save() {
+            eprintln!("hime-core: user model save failed: {e}");
+        }
+    }
+
     // ---- management ----
 
     /// List entries of one table, sorted by count (descending) then key.
@@ -1012,10 +1024,12 @@ impl Counts {
             let offset = sect[0] + cp as usize * 2;
             put_u16(&mut out, offset, index as u16);
         }
-        // 2. unigram counts
+        // 2. unigram counts (a context-only character keeps 0, so a reload
+        // does not invent a usage it never had)
         for (index, &cp) in vocab.iter().enumerate() {
             let count = self.unigrams.get(&cp).copied().unwrap_or(0);
-            put_u16(&mut out, sect[1] + index * 2, encode_count(count.max(1)));
+            let bits = if count == 0 { 0 } else { f64_to_bf16(count as f64) };
+            put_u16(&mut out, sect[1] + index * 2, bits);
         }
         // 3. bigram row references
         for (index, reference) in bi_index.iter().enumerate() {

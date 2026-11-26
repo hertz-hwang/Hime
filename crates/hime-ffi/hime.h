@@ -91,8 +91,12 @@ char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifier
  * 2 形码 / 3 形码整句):
  * {"page_size":5,"max_code_len":4,"code_type":2,"auto_commit":false,
  *  "auto_commit_length":4,"commit_next_code":0,"ascii_punct":0,
- *  "english_punct_after_alnum":false,"semicolon_quote_select":false,
- *  "show_code_in_window":false,"vertical_candidates":false}.
+ *  "user_ngram":false,"english_punct_after_alnum":false,
+ *  "semicolon_quote_select":false,"show_code_in_window":false,
+ *  "vertical_candidates":false}.
+ * user_ngram is the scheme's metadata key: true while the selected scheme
+ * learns the user's commits and blends the learned model into ranking
+ * (SPEC §7.7).
  * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
  * english_punct_after_alnum releases the first punctuation right after
  * English letters/digits to the host (e.g. the ':' in 12:30); pressing that
@@ -115,7 +119,7 @@ bool hime_set_config(const char* json);
 /* List the schemes under dir (the data/schemes layout: one folder per
  * scheme with a metadata.toml and a *.txt table) as a JSON array, sorted by
  * folder name; each entry:
- * {"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…,"ascii_punct":…}.
+ * {"dir":…,"path":…,"table":…,"name":…,"describe":…,"author":…,"type":…,"max_code":…,"auto_commit":…,"auto_commit_length":…,"commit_next_code":…,"ascii_punct":…,"user_ngram":…}.
  * A plain filesystem read, valid before hime_init; unloadable folders are
  * skipped, an unreadable dir yields "[]". Returns NULL on an invalid path.
  * The caller must release the string with hime_free_string. */
@@ -175,9 +179,53 @@ bool hime_set_model_path(const char* path);
  * caller must release the string with hime_free_string. */
 char* hime_model_status(void);
 
+/* Describe the learned user n-gram model for the preferences 用户模型 page
+ * (SPEC §7.7) as JSON:
+ * {"active":bool,"path":…,"folder":…,"info":{…}|null}.
+ * active is true exactly while the selected scheme declares
+ * user_ngram = true, i.e. while commits are learned and blended; path is
+ * <data-dir>/userNgram/user.hng and folder its directory; info carries
+ * format, storage, exists, file_bytes, modified_secs, unigrams, bigrams,
+ * trigrams, vocab, unigram_total, built_unixtime and error (when the file
+ * could not be read). Valid before hime_init (then active is false). The
+ * caller must release the string with hime_free_string. */
+char* hime_user_ngram_status(void);
+
+/* Query one table of the learned user model. json is
+ * {"scope":"char"|"bigram"|"trigram","query":substring,"limit":n,
+ * "offset":n}; missing fields mean the character table, no filter, 100 rows
+ * and no offset. Returns
+ * {"scope":…,"total":matching rows,"entries":[{"scope","key","prev2",
+ * "prev","text","count","total"}],"info":{…}}, where each entry's total is
+ * its context's own total. Returns NULL on a null/invalid pointer, malformed
+ * JSON or a serialization failure. The caller must release the string with
+ * hime_free_string. */
+char* hime_user_ngram_query(const char* json);
+
+/* Apply one edit to the learned user model and save it: json is
+ * {"action":"add"|"set"|"delete"|"clear","scope":"char"|"bigram"|"trigram",
+ * "prev2":char,"prev":char,"text":char,"count":n}. add increments by count
+ * (0 means 1), set replaces the count (0 deletes), delete removes the entry,
+ * clear wipes the model (which also unblocks a file the loader rejected).
+ * Returns false on a null/invalid pointer, malformed JSON, a text that is not
+ * exactly one storable character, or an unreadable model file. */
+bool hime_user_ngram_edit(const char* json);
+
+/* Create the userNgram folder under the data directory and return the model
+ * path as a NUL-terminated string, or NULL when no data folder resolves. The
+ * model file appears on the first save. The caller must release the string
+ * with hime_free_string. */
+char* hime_user_ngram_ensure_dir(void);
+
+/* Save the learned user model now. Typing saves on a throttle; call this when
+ * a session ends or the app quits. Returns false when nothing could be
+ * written (an unreadable file needs a clear first). */
+bool hime_user_ngram_save(void);
+
 /* Release a string returned by hime_process_key, hime_get_config,
- * hime_scan_schemes, hime_schemes_dir or hime_model_status. NULL is a
- * no-op. */
+ * hime_scan_schemes, hime_schemes_dir, hime_model_status,
+ * hime_user_ngram_status, hime_user_ngram_query or
+ * hime_user_ngram_ensure_dir. NULL is a no-op. */
 void hime_free_string(char* ptr);
 
 #ifdef __cplusplus

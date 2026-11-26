@@ -11,4 +11,5 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 hime-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true

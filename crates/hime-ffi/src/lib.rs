@@ -17,9 +17,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use hime_core::ngram::{find_model_path, probe_model, set_model_override, NgramModel};
 use hime_core::sentence::SentenceEngine;
 use hime_core::pinyin::SharedPinyin;
+use hime_core::user_ngram::{UserNgram, UserNgramEdit, UserNgramQuery};
 use hime_core::{
-    ensure_config_layout, load_scheme, scan_schemes, schemes_dir, CodeType, Config, Dictionary,
-    PinyinLexicon, ReverseLookup, Session,
+    ensure_config_layout, ensure_user_ngram_dir, load_scheme, scan_schemes, schemes_dir,
+    user_ngram_path, CodeType, Config, Dictionary, PinyinLexicon, ReverseLookup, Session,
 };
 
 /// Where candidates come from: a 形码 word table, the whole-sentence engine a
@@ -49,6 +50,10 @@ struct Engine {
     /// for a word table. Reported by `hime_model_status` so the panel can
     /// show the file the engine actually uses.
     model_path: Option<PathBuf>,
+    /// The learned per-user model (SPEC §7.7), loaded when the selected
+    /// scheme declares `user_ngram = true`. Every session of that scheme
+    /// records into it, and the sources blend it into their score.
+    user_ngram: Option<Arc<UserNgram>>,
 }
 
 impl Engine {
@@ -60,6 +65,7 @@ impl Engine {
             next_session_id: 1,
             model_path: None,
             pinyin: pinyin_path.map(|path| Arc::new(SharedPinyin::new(path))),
+            user_ngram: None,
         }
     }
 
@@ -74,12 +80,16 @@ impl Engine {
             EngineSource::Table(dict) => Session::with_config(Arc::clone(dict), self.config),
             EngineSource::Sentence(engine) => Session::sentence(Arc::clone(engine), self.config),
             EngineSource::Pinyin { lexicon, model: None } => {
-                return Session::pinyin(Arc::clone(lexicon), self.config);
+                // Without the sentence model the word stage still serves the
+                // window; the learned model keeps recording commits there.
+                return Session::pinyin(Arc::clone(lexicon), self.config)
+                    .with_user_ngram(self.user_ngram.clone());
             }
             EngineSource::Pinyin { lexicon, model: Some(model) } => {
                 return Session::pinyin_sentence(
                     Arc::clone(lexicon),
                     Arc::clone(model),
+                    self.user_ngram.clone(),
                     self.config,
                 );
             }
@@ -425,6 +435,9 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     // scheme is a word table. Building the engine here lets a bad model or
     // table fail the call without touching the live engine.
     let mut pinyin = pinyin_table_near(Path::new(path));
+    // The learned user model is per user, not per scheme: the scheme only
+    // decides whether it is used (SPEC §7.7).
+    let user = if info.metadata.user_ngram { load_user_ngram() } else { None };
     let (source, loaded_model) = match info.metadata.code_type {
         CodeType::XingmaSentence => {
             let Some(model) = find_model_path() else {
@@ -434,7 +447,10 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
                 return false;
             };
             match SentenceEngine::load(&model, &info.table) {
-                Ok(engine) => (EngineSource::Sentence(Arc::new(engine)), Some(model)),
+                Ok(engine) => {
+                    let engine = engine.with_user_ngram(user.clone());
+                    (EngineSource::Sentence(Arc::new(engine)), Some(model))
+                }
                 Err(e) => {
                     eprintln!("hime-ffi: failed to load sentence engine for {path:?}: {e}");
                     return false;
@@ -483,6 +499,7 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             let mut engine = Engine::new(source, pinyin);
             engine.config = info.metadata.defaults_for(engine.config);
             engine.model_path = loaded_model;
+            engine.user_ngram = user;
             *slot = Some(engine);
             true
         }
@@ -490,6 +507,12 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             engine.config = info.metadata.defaults_for(engine.config);
             engine.source = source;
             engine.model_path = loaded_model;
+            // Learned counts still in memory are written before the handle
+            // they belong to is replaced.
+            if let Some(previous) = engine.user_ngram.take() {
+                previous.flush();
+            }
+            engine.user_ngram = user;
             // A different pinyin table (or a different folder) replaces the
             // shared one; an unchanged path keeps the loaded table and every
             // running session keeps reading it.
@@ -505,6 +528,14 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             true
         }
     })
+}
+
+/// Load the shared user model when the data folder resolves. A file the
+/// loader rejects still yields a handle: it reports the error and blocks
+/// writes, so the panel can offer a clear instead of silently overwriting.
+fn load_user_ngram() -> Option<Arc<UserNgram>> {
+    let path = user_ngram_path()?;
+    Some(Arc::new(UserNgram::load(path)))
 }
 
 /// Path of the user's scheme folder `<data-dir>/schemes` (SPEC §5.2), where
@@ -630,14 +661,194 @@ pub extern "C" fn hime_model_status() -> *mut c_char {
     }
 }
 
-/// Free a string returned by [`hime_process_key`], [`hime_get_config`],
-/// [`hime_scan_schemes`], [`hime_schemes_dir`] or [`hime_model_status`].
-/// Null is a no-op.
+/// Describe the learned user n-gram model for the preferences 用户模型 page
+/// (SPEC §7.7), as a NUL-terminated JSON string owned by the caller (release
+/// it with [`hime_free_string`]). The shape is
+/// `{"active":<bool>,"path":…,"folder":…,"info":{…}}`:
+///
+/// - `active` is true exactly while the selected scheme declares
+///   `user_ngram = true`, i.e. while commits are learned and blended;
+/// - `path` is `<data-dir>/userNgram/user.hng` (the folder is reported
+///   beside it for the "open folder" action);
+/// - `info` carries the model's statistics (`format`, `storage`, `exists`,
+///   `file_bytes`, `modified_secs`, `unigrams`, `bigrams`, `trigrams`,
+///   `vocab`, `unigram_total`, `built_unixtime`) and `error` when the file
+///   could not be read. It is null only when no data folder resolves.
+///
+/// Works before [`hime_init`] (then `active` is false). Returns null only on
+/// a serialization failure.
+#[no_mangle]
+pub extern "C" fn hime_user_ngram_status() -> *mut c_char {
+    let (active, model) = with_engine("hime_user_ngram_status", |slot| match slot.as_ref() {
+        Some(engine) => (
+            engine.config.user_ngram && engine.user_ngram.is_some(),
+            engine.user_ngram.clone(),
+        ),
+        None => (false, None),
+    });
+    let model = model.or_else(|| load_user_ngram());
+    let (path, folder) = match user_ngram_path() {
+        Some(path) => (
+            path.display().to_string(),
+            path.parent().map(|dir| dir.display().to_string()),
+        ),
+        None => (String::new(), None),
+    };
+    let value = serde_json::json!({
+        "active": active,
+        "path": path,
+        "folder": folder,
+        "info": model.as_deref().map(UserNgram::info),
+    });
+    match CString::new(value.to_string()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => {
+            eprintln!("hime-ffi: user model status contains an interior NUL");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Query one table of the learned user model (SPEC §7.7). `json` is a
+/// NUL-terminated object `{"scope":"char"|"bigram"|"trigram",
+/// "query":<substring>,"limit":<n>,"offset":<n>}`; missing fields default to
+/// the character table, no filter, 100 rows and no offset. Returns
+/// `{"scope":…,"total":<matching rows>,"entries":[{"scope","key","prev2",
+/// "prev","text","count","total"}],"info":{…}}` — `total` on each entry is
+/// the context's own total, so a row can render `count / total`.
+///
+/// Returns null on a null/invalid pointer, malformed JSON or a serialization
+/// failure; an unusable request yields `"total":0` instead.
 ///
 /// # Safety
-/// `ptr` must be null or a value returned by [`hime_process_key`],
-/// [`hime_get_config`], [`hime_scan_schemes`], [`hime_schemes_dir`] or
-/// [`hime_model_status`] in this process and not yet freed.
+/// `json` must be null or point to a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn hime_user_ngram_query(json: *const c_char) -> *mut c_char {
+    let Some(request) = (unsafe { parse_json_arg::<UserNgramQuery>("hime_user_ngram_query", json) })
+    else {
+        return ptr::null_mut();
+    };
+    let model = user_ngram_handle();
+    let result = match model {
+        Some(model) => model.query(&request),
+        None => return ptr::null_mut(),
+    };
+    match serde_json::to_string(&result).ok().and_then(|json| CString::new(json).ok()) {
+        Some(s) => s.into_raw(),
+        None => {
+            eprintln!("hime-ffi: failed to serialize the user model query");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Apply one edit to the learned user model and save it immediately (SPEC
+/// §7.7). `json` is a NUL-terminated object `{"action":"add"|"set"|"delete"|
+/// "clear","scope":"char"|"bigram"|"trigram","prev2":<char>,"prev":<char>,
+/// "text":<char>,"count":<n>}`. `add` increments by `count` (0 means 1),
+/// `set` replaces the count (0 deletes), `delete` removes the entry, and
+/// `clear` wipes the whole model, which also unblocks a file the loader
+/// rejected. Returns false on a null/invalid pointer, malformed JSON, a text
+/// that is not exactly one storable character, or a model whose file is
+/// unreadable (clear it first); the running engine sees the change on the
+/// next query.
+///
+/// # Safety
+/// `json` must be null or point to a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn hime_user_ngram_edit(json: *const c_char) -> bool {
+    let Some(edit) = (unsafe { parse_json_arg::<UserNgramEdit>("hime_user_ngram_edit", json) })
+    else {
+        return false;
+    };
+    let Some(model) = user_ngram_handle() else { return false };
+    match model.edit(&edit) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("hime-ffi: hime_user_ngram_edit failed: {e}");
+            false
+        }
+    }
+}
+
+/// Create the `userNgram` folder under the data directory (SPEC §7.7) and
+/// return the model path as a NUL-terminated string owned by the caller
+/// (release it with [`hime_free_string`]). The model file itself appears on
+/// the first save. Returns null when no data folder resolves.
+#[no_mangle]
+pub extern "C" fn hime_user_ngram_ensure_dir() -> *mut c_char {
+    match ensure_user_ngram_dir() {
+        Ok(path) => match CString::new(path.as_os_str().to_string_lossy().into_owned()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(e) => {
+            eprintln!("hime-ffi: hime_user_ngram_ensure_dir failed: {e}");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Save the learned user model now (throttled saves happen while typing; a
+/// session end or an app quit should call this). Returns false when nothing
+/// could be written because the file is unreadable.
+#[no_mangle]
+pub extern "C" fn hime_user_ngram_save() -> bool {
+    match user_ngram_handle() {
+        Some(model) => match model.save() {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("hime-ffi: hime_user_ngram_save failed: {e}");
+                false
+            }
+        },
+        None => false,
+    }
+}
+
+/// The model the management calls act on: the engine's live handle when the
+/// selected scheme learned anything, or a fresh load of the same file, so the
+/// panel can read and edit before any scheme is selected.
+fn user_ngram_handle() -> Option<Arc<UserNgram>> {
+    let live = with_engine("user_ngram_handle", |slot| {
+        slot.as_ref().and_then(|engine| engine.user_ngram.clone())
+    });
+    live.or_else(load_user_ngram)
+}
+
+/// Parse a JSON argument for a management call, reporting the reason.
+unsafe fn parse_json_arg<T: serde::de::DeserializeOwned>(
+    what: &str,
+    json: *const c_char,
+) -> Option<T> {
+    if json.is_null() {
+        eprintln!("hime-ffi: {what} called with a null json");
+        return None;
+    }
+    let text = match unsafe { CStr::from_ptr(json) }.to_str() {
+        Ok(text) => text,
+        Err(_) => {
+            eprintln!("hime-ffi: {what} json is not valid UTF-8");
+            return None;
+        }
+    };
+    match serde_json::from_str::<T>(text) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            eprintln!("hime-ffi: failed to parse {what} json {text:?}: {e}");
+            None
+        }
+    }
+}
+
+/// Free a string returned by [`hime_process_key`], [`hime_get_config`],
+/// [`hime_scan_schemes`], [`hime_schemes_dir`], [`hime_model_status`],
+/// [`hime_user_ngram_status`], [`hime_user_ngram_query`] or
+/// [`hime_user_ngram_ensure_dir`]. Null is a no-op.
+///
+/// # Safety
+/// `ptr` must be null or a value returned by one of those functions in this
+/// process and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn hime_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
