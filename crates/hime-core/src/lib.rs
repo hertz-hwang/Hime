@@ -36,6 +36,7 @@ pub mod sentence;
 pub mod session;
 pub mod translator;
 pub mod types;
+pub mod typing;
 pub mod user_ngram;
 
 pub use config::{CodeType, Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
@@ -45,8 +46,9 @@ pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use hdict::HDict;
 pub use ngram::NgramModel;
 pub use paths::{
-    config_dir, ensure_config_layout, ensure_user_ngram_dir, model_path, schemes_dir,
-    user_ngram_dir, user_ngram_path,
+    config_dir, ensure_config_layout, ensure_statistics_dir, ensure_user_ngram_dir,
+    model_path, schemes_dir, statistics_dir, typing_stats_path, user_ngram_dir,
+    user_ngram_path,
 };
 pub use pipeline::Pipeline;
 pub use pinyin::{PinyinLexicon, PinyinMatch, PinyinTranslator};
@@ -55,6 +57,11 @@ pub use processor::{Action, Processor};
 pub use scheme::{load_scheme, scan_schemes, SchemeError, SchemeInfo, SchemeMetadata};
 pub use session::Session;
 pub use translator::{TableTranslator, Translator};
+pub use typing::{
+    CharTotals, Counters, Date, DayChars, Finger, FingerShare, FirstChoiceStats, KeyboardStats,
+    RunMeter, SpeedStats, TypingStats, TypingStatsInfo, HEATMAP_DAYS, KEY_GAP_CAP, RUN_IDLE_GAP,
+    RUN_MIN_CHARS,
+};
 pub use types::{Candidate, DiffKind, DiffSpan, EngineResponse};
 pub use user_ngram::{
     UserNgram, UserNgramAction, UserNgramEdit, UserNgramEntry, UserNgramInfo, UserNgramQuery,

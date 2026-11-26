@@ -25,10 +25,14 @@ const APP_DIR_NAME: &str = "hime";
 const SCHEMES_DIR_NAME: &str = "schemes";
 /// Subfolder of the data folder that holds the learned user n-gram model.
 const USER_NGRAM_DIR_NAME: &str = "userNgram";
+/// Subfolder of the data folder that holds the typing statistics.
+const STATISTICS_DIR_NAME: &str = "statistics";
 /// File name of the whole-sentence model inside the data folder.
 pub const MODEL_FILE_NAME: &str = "sentence-ngram.hng";
 /// File name of the learned user model inside [`USER_NGRAM_DIR_NAME`].
 pub const USER_NGRAM_FILE_NAME: &str = "user.hng";
+/// File name of the typing statistics inside [`STATISTICS_DIR_NAME`].
+pub const TYPING_STATS_FILE_NAME: &str = "typing.json";
 
 /// Treat an environment value as set only when it is present and non-empty.
 fn present(value: Option<&OsStr>) -> Option<&OsStr> {
@@ -96,6 +100,20 @@ pub fn user_ngram_path() -> Option<PathBuf> {
     user_ngram_dir().map(|dir| dir.join(USER_NGRAM_FILE_NAME))
 }
 
+/// `<config_dir>/statistics`, where the typing statistics live.
+#[must_use]
+pub fn statistics_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(STATISTICS_DIR_NAME))
+}
+
+/// `<config_dir>/statistics/typing.json`, the JSON image of the daily
+/// character counts and per-scheme key histograms. The path is returned
+/// whether or not the file exists.
+#[must_use]
+pub fn typing_stats_path() -> Option<PathBuf> {
+    statistics_dir().map(|dir| dir.join(TYPING_STATS_FILE_NAME))
+}
+
 /// Create the data folder and its `schemes` subfolder if absent, returning the
 /// data folder. It never creates or touches a model file. Returns an error
 /// (kind `NotFound`) when no location can be resolved, or an I/O error from the
@@ -115,6 +133,21 @@ pub fn ensure_config_layout() -> std::io::Result<PathBuf> {
 /// model file itself is created by the first save, not here.
 pub fn ensure_user_ngram_dir() -> std::io::Result<PathBuf> {
     let path = user_ngram_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "cannot resolve a Hime data folder (set HIME_CONFIG_HOME or HOME)",
+        )
+    })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(path)
+}
+
+/// Create the `statistics` folder when absent, returning the statistics file
+/// path. The file itself is created by the first save.
+pub fn ensure_statistics_dir() -> std::io::Result<PathBuf> {
+    let path = typing_stats_path().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "cannot resolve a Hime data folder (set HIME_CONFIG_HOME or HOME)",
@@ -229,6 +262,14 @@ mod tests {
             assert_eq!(
                 user_ngram_path().as_deref(),
                 Some(root.join("userNgram").join(USER_NGRAM_FILE_NAME).as_path())
+            );
+            assert_eq!(
+                statistics_dir().as_deref(),
+                Some(root.join("statistics").as_path())
+            );
+            assert_eq!(
+                typing_stats_path().as_deref(),
+                Some(root.join("statistics").join(TYPING_STATS_FILE_NAME).as_path())
             );
         });
     }

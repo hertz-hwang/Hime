@@ -8,6 +8,7 @@
 
 use std::mem;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::config::{CodeType, Config};
 use crate::pinyin::PinyinLexicon;
@@ -20,6 +21,7 @@ use crate::reverse::ReverseLookup;
 use crate::sentence::auto_commit::SentenceAutoCommit;
 use crate::sentence::SentenceEngine;
 use crate::types::{Candidate, EngineResponse};
+use crate::typing::{RunMeter, TypingStats};
 use crate::user_ngram::UserNgram;
 
 /// Marker that opens 反查 (SPEC §8.3). The session keeps it out of the
@@ -101,6 +103,16 @@ pub struct Session {
     /// session starts empty (BOS), so one session's end never chains into the
     /// next session's beginning.
     commit_context: String,
+    /// Where the typing statistics collect (SPEC §9); `None` for a session
+    /// created without them (tests, tools).
+    stats: Option<Arc<TypingStats>>,
+    /// Timing and character counters of the stretch being typed right now,
+    /// folded into [`Self::stats`] when it ends.
+    run: RunMeter,
+    /// Whether the commit this response carries took the first candidate;
+    /// `None` while the response commits no candidate (raw text, punctuation).
+    /// Set by the selection paths just before they build the response.
+    pending_choice: Option<bool>,
 }
 
 impl Session {
@@ -132,6 +144,9 @@ impl Session {
             reversing: false,
             user_ngram: None,
             commit_context: String::new(),
+            stats: None,
+            run: RunMeter::new(Instant::now()),
+            pending_choice: None,
         }
     }
 
@@ -155,6 +170,9 @@ impl Session {
             reversing: false,
             user_ngram: None,
             commit_context: String::new(),
+            stats: None,
+            run: RunMeter::new(Instant::now()),
+            pending_choice: None,
         }
     }
 
@@ -190,6 +208,9 @@ impl Session {
             reversing: false,
             user_ngram,
             commit_context: String::new(),
+            stats: None,
+            run: RunMeter::new(Instant::now()),
+            pending_choice: None,
         }
     }
 
@@ -243,6 +264,9 @@ impl Session {
             reversing: false,
             user_ngram: None,
             commit_context: String::new(),
+            stats: None,
+            run: RunMeter::new(Instant::now()),
+            pending_choice: None,
         }
     }
 
@@ -278,6 +302,31 @@ impl Session {
     #[must_use]
     pub fn commit_context(&self) -> &str {
         &self.commit_context
+    }
+
+    /// Attach the typing statistics this session records into (SPEC §9). The
+    /// engine hands the same shared handle to every session, so the daily
+    /// counters and the per-scheme key histograms survive session churn.
+    #[must_use]
+    pub fn with_stats(mut self, stats: Arc<TypingStats>) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+
+    /// The statistics this session records into, if any.
+    #[must_use]
+    pub fn stats(&self) -> Option<&Arc<TypingStats>> {
+        self.stats.as_ref()
+    }
+
+    /// Close the current typing stretch: fold it into the statistics when it
+    /// carries enough characters, and reset the meter. Called when a session
+    /// ends or the scheme changes, so a long pause never merges two runs.
+    pub fn end_run(&mut self) {
+        if let Some(stats) = self.stats.clone() {
+            stats.record_run(self.run);
+        }
+        self.run = RunMeter::new(Instant::now());
     }
 
     /// The configuration this session applies to keys and pages.
@@ -320,6 +369,12 @@ impl Session {
     /// page and are always consumed, so the digits keep selecting inside
     /// whichever page is currently rendered.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
+        // A typed stretch ends on its own after a thinking pause: fold the
+        // finished run and start a fresh one before this key joins it.
+        let now = Instant::now();
+        if self.run.idle_for(now) {
+            self.end_run();
+        }
         // The correction window lasts exactly one key: if this key is not the
         // released punctuation pressed again, the release no longer stands at
         // the caret (or something else happened to it), so drop it.
@@ -341,11 +396,9 @@ impl Session {
                 // The full encoding's best candidate (or the letters
                 // themselves) is committed; the pressing letter starts the
                 // next encoding and stays visible in the preedit.
-                let commit = self
-                    .candidates
-                    .first()
-                    .map(|candidate| candidate.text.clone())
-                    .or_else(|| Some(mem::take(&mut self.input_buffer)));
+                let candidate = self.candidates.first().map(|candidate| candidate.text.clone());
+                self.pending_choice = candidate.is_some().then_some(true);
+                let commit = candidate.or_else(|| Some(mem::take(&mut self.input_buffer)));
                 self.clear();
                 self.push_letter(byte, commit)
             }
@@ -404,10 +457,16 @@ impl Session {
                 };
                 // Same commit choice as Space: the focused candidate, or the
                 // letters themselves when nothing matches.
-                let mut commit = self
-                    .candidates
-                    .get(self.focus)
-                    .or_else(|| self.candidates.first())
+                let chosen_index = if self.candidates.get(self.focus).is_some() {
+                    Some(self.focus)
+                } else if self.candidates.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
+                self.pending_choice = chosen_index.map(|index| index == 0);
+                let chosen = self.candidates.get(self.focus).or_else(|| self.candidates.first());
+                let mut commit = chosen
                     .map(|candidate| candidate.text.clone())
                     .or_else(|| Some(mem::take(&mut self.input_buffer)))
                     .unwrap_or_default();
@@ -443,7 +502,38 @@ impl Session {
             }
         };
         self.track_after_alnum(key, &response);
+        self.record_typing(key, &response);
         response
+    }
+
+    /// Record one key press and whatever text it put at the host's caret
+    /// (SPEC §9): committed characters, a released printable key's character,
+    /// and the candidate choice behind a commit. A corrected punctuation mark
+    /// replaces the ASCII one already counted, so it adds no character.
+    fn record_typing(&mut self, key: u32, response: &EngineResponse) {
+        let Some(stats) = self.stats.clone() else { return };
+        stats.press_key(key);
+        self.run.press(Instant::now());
+        let committed = response
+            .commit_text
+            .as_deref()
+            .map(|text| text.chars().filter(|ch| !ch.is_whitespace()).count())
+            .unwrap_or(0) as u64;
+        let released = if !response.handled && response.commit_text.is_none() {
+            u8::try_from(key)
+                .ok()
+                .filter(|byte| (33..=126).contains(byte))
+                .map_or(0, |_| 1)
+        } else {
+            0
+        };
+        let chars = if response.replace_text.is_some() { 0 } else { committed + released };
+        if chars > 0 {
+            stats.record_commit(chars, self.pending_choice.take());
+            self.run.add_chars(chars);
+        } else {
+            self.pending_choice = None;
+        }
     }
 
     /// Records whether the text now sitting at the host's caret ends in an
@@ -498,6 +588,8 @@ impl Session {
             && self.input_buffer.len() >= self.config.auto_commit_length
             && self.candidates.len() == 1
         {
+            // The only candidate is by definition the first one.
+            self.pending_choice = Some(true);
             let text = self.candidates[0].text.clone();
             self.clear();
             let commit = match pending {
@@ -555,6 +647,7 @@ impl Session {
     fn commit_candidate(&mut self, index: usize) -> EngineResponse {
         match self.candidates.get(index) {
             Some(candidate) => {
+                self.pending_choice = Some(index == 0);
                 let commit = candidate.text.clone();
                 self.clear();
                 self.response(true, Some(commit))
@@ -1793,6 +1886,71 @@ pub(crate) mod tests {
 
     /// A commit teaches the user model: the text arrives with the session's
     /// own earlier commits as context, and the model reports it once saved.
+    /// SPEC §9: every key press lands in the scheme's histogram, every
+    /// committed character in the daily count, and only the selections that
+    /// took the first candidate count as preferred.
+    #[test]
+    fn typing_statistics_follow_the_commits_and_selections() {
+        let stats = Arc::new(TypingStats::in_memory());
+        stats.set_scheme("sample");
+        let mut s = session().with_stats(Arc::clone(&stats));
+        // a (composition key), Right (focus 2), Space -> 戈.
+        s.process_key(KEY_A);
+        assert!(s.process_key(KEY_ARROW_RIGHT).commit_text.is_none());
+        assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("戈"));
+        // a then Space -> 工, the first candidate.
+        s.process_key(KEY_A);
+        assert_eq!(s.process_key(KEY_SPACE).commit_text.as_deref(), Some("工"));
+        // A second-choice digit and a punctuation commit add no preferred.
+        s.process_key(KEY_A);
+        assert_eq!(s.process_key(KEY_2).commit_text.as_deref(), Some("戈"));
+
+        let info = stats.info();
+        assert_eq!(info.chars.total, 3, "one character per commit");
+        assert_eq!(info.first_choice.selections, 3);
+        assert_eq!(info.first_choice.preferred, 1, "only the Space on 工");
+        let keys = &info.keyboard.keys;
+        assert_eq!(keys["a"], 3);
+        assert_eq!(keys["Space"], 2, "digit selection keys are not recorded here");
+        assert_eq!(keys["2"], 1);
+        assert_eq!(keys["Right"], 1);
+        assert_eq!(info.keyboard.scheme, "sample");
+
+        // A released punctuation mark is a character but not a candidate.
+        let mut idle = session().with_stats(Arc::clone(&stats));
+        let punctuation = idle.process_key(u32::from(b','));
+        assert!(!punctuation.handled);
+        assert_eq!(stats.info().chars.total, 4);
+        assert_eq!(stats.info().first_choice.selections, 3);
+    }
+
+    #[test]
+    fn ending_a_run_folds_only_qualifying_stretches() {
+        let stats = Arc::new(TypingStats::in_memory());
+        let mut s = session().with_stats(Arc::clone(&stats));
+        // A single character is below the threshold.
+        s.process_key(KEY_A);
+        s.process_key(KEY_SPACE);
+        s.end_run();
+        assert_eq!(stats.info().speed.runs, 0);
+
+        // Sixteen characters over four commits qualify.
+        for _ in 0..4 {
+            for key in [KEY_A, KEY_A, KEY_A, KEY_A] {
+                s.process_key(key);
+            }
+            s.process_key(KEY_SPACE);
+        }
+        s.end_run();
+        let info = stats.info();
+        assert_eq!(info.speed.runs, 1);
+        assert_eq!(info.speed.chars, 16);
+        assert!(info.speed.code_length > 0.0);
+        // Ending again folds nothing: the meter was reset.
+        s.end_run();
+        assert_eq!(stats.info().speed.runs, 1);
+    }
+
     #[test]
     fn commits_are_recorded_into_the_user_model() {
         let path = std::env::temp_dir().join(format!(
