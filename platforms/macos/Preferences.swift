@@ -33,6 +33,9 @@ private struct EngineConfig: Codable, Equatable {
     var autoCommitLength: Int
     var commitNextCode: Int
     var asciiPunct: Int
+    /// The scheme's `metadata.toml` switch: true while commits are learned
+    /// and the learned model is blended into ranking (SPEC §7.7).
+    var userNgram: Bool
     var englishPunctAfterAlnum: Bool
     var semicolonQuoteSelect: Bool
     var showCodeInWindow: Bool
@@ -46,6 +49,7 @@ private struct EngineConfig: Codable, Equatable {
         case autoCommitLength = "auto_commit_length"
         case commitNextCode = "commit_next_code"
         case asciiPunct = "ascii_punct"
+        case userNgram = "user_ngram"
         case englishPunctAfterAlnum = "english_punct_after_alnum"
         case semicolonQuoteSelect = "semicolon_quote_select"
         case showCodeInWindow = "show_code_in_window"
@@ -130,6 +134,84 @@ struct NgramModelInfo: Codable, Equatable {
     }
 }
 
+/// The `info` object of `hime_user_ngram_status` / `hime_user_ngram_query`
+/// (SPEC §7.7): the learned model's statistics and the file's on-disk state.
+struct UserNgramInfo: Codable, Equatable {
+    let format: String
+    /// What the row masses mean (`counts`).
+    let storage: String
+    let path: String
+    let exists: Bool
+    let fileBytes: Int64
+    let modifiedSecs: Int64?
+    let unigrams: Int
+    let bigrams: Int
+    let trigrams: Int
+    let vocab: Int
+    let unigramTotal: Int64
+    let builtUnixtime: Int64
+    /// Why the file could not be read; writes stay blocked until a clear.
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case format
+        case storage
+        case path
+        case exists
+        case fileBytes = "file_bytes"
+        case modifiedSecs = "modified_secs"
+        case unigrams
+        case bigrams
+        case trigrams
+        case vocab
+        case unigramTotal = "unigram_total"
+        case builtUnixtime = "built_unixtime"
+        case error
+    }
+}
+
+/// Mirror of `hime_user_ngram_status` (SPEC §7.7).
+struct UserNgramStatus: Codable, Equatable {
+    /// The selected scheme learns and blends the model.
+    let active: Bool
+    let path: String
+    let folder: String?
+    let info: UserNgramInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case active
+        case path
+        case folder
+        case info
+    }
+}
+
+/// One row of `hime_user_ngram_query` (SPEC §7.7). `total` is the context's
+/// own count, so a row can render `count / total`.
+struct UserNgramEntry: Codable, Equatable, Identifiable {
+    let scope: String
+    let key: String
+    let prev2: String
+    let prev: String
+    let text: String
+    let count: Int64
+    let total: Int64
+
+    var id: String { key }
+
+    /// The n-gram as typed: context characters then the counted one.
+    var phrase: String { prev2 + prev + text }
+}
+
+/// The answer to a `hime_user_ngram_query`, with the model's statistics so
+/// one round trip refreshes both the rows and the status block.
+struct UserNgramQueryResult: Codable, Equatable {
+    let scope: String
+    let total: Int
+    let entries: [UserNgramEntry]
+    let info: UserNgramInfo
+}
+
 /// The persisted preferences. Reading them is the shell's job only; the
 /// engine keeps its own clamped copy (SPEC_MACOS §5).
 final class PreferencesModel: ObservableObject {
@@ -146,6 +228,11 @@ final class PreferencesModel: ObservableObject {
     /// 编码类型: 0 全拼 / 1 双拼 / 2 形码 / 3 形码整句 (`type`). Owned by the
     /// scheme metadata; the panel only mirrors the engine's value.
     @Published private(set) var codeType: Int
+
+    /// The scheme's `user_ngram` switch (SPEC §7.7): true while the selected
+    /// scheme learns commits and blends the learned model into ranking.
+    /// Scheme metadata, so it is mirrored and read-only here.
+    @Published private(set) var userNgram: Bool
 
     /// Panel label for `codeType`.
     var codeTypeName: String {
@@ -192,6 +279,10 @@ final class PreferencesModel: ObservableObject {
     /// at startup, on scheme switches, on reload and when the page appears.
     @Published private(set) var modelStatus: ModelStatus?
 
+    /// `hime_user_ngram_status` mirror for 高级 → 用户模型 (SPEC §7.7);
+    /// refreshed wherever the model page is, plus after every edit.
+    @Published private(set) var userModelStatus: UserNgramStatus?
+
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
     /// `max_code_len` in the engine. A 全拼 scheme declares 32 (one code is
@@ -234,6 +325,7 @@ final class PreferencesModel: ObservableObject {
         pageSize = 5
         maxCodeLen = 4
         codeType = 2
+        userNgram = false
         autoCommit = false
         autoCommitLength = 4
         commitNextCode = 0
@@ -377,6 +469,7 @@ final class PreferencesModel: ObservableObject {
         maxCodeLen = value(Self.maxCodeLenKey, config.maxCodeLen)
         // 编码类型 is scheme metadata: the engine value always wins.
         codeType = config.codeType
+        userNgram = config.userNgram
         autoCommit = value(Self.autoCommitKey, config.autoCommit)
         autoCommitLength = value(Self.autoCommitLengthKey, config.autoCommitLength)
         commitNextCode = value(Self.commitNextCodeKey, config.commitNextCode)
@@ -403,6 +496,7 @@ final class PreferencesModel: ObservableObject {
                                   autoCommitLength: autoCommitLength,
                                   commitNextCode: commitNextCode,
                                   asciiPunct: asciiPunct,
+                                  userNgram: userNgram,
                                   englishPunctAfterAlnum: englishPunctAfterAlnum,
                                   semicolonQuoteSelect: semicolonQuoteSelect,
                                   showCodeInWindow: showCodeInWindow,
@@ -473,10 +567,95 @@ final class PreferencesModel: ObservableObject {
 
     /// hime_model_status as structured data.
     fileprivate func refreshModelStatus() {
+        refreshUserModelStatus()
         guard let ptr = hime_model_status() else { return }
         defer { hime_free_string(ptr) }
         guard let data = String(cString: ptr).data(using: .utf8) else { return }
         modelStatus = try? JSONDecoder().decode(ModelStatus.self, from: data)
+    }
+
+    /// hime_user_ngram_status as structured data (SPEC §7.7).
+    func refreshUserModelStatus() {
+        guard let ptr = hime_user_ngram_status() else { return }
+        defer { hime_free_string(ptr) }
+        guard let data = String(cString: ptr).data(using: .utf8) else { return }
+        userModelStatus = try? JSONDecoder().decode(UserNgramStatus.self, from: data)
+    }
+
+    /// Query one table of the learned model (`hime_user_ngram_query`).
+    func queryUserModel(scope: String, query: String, limit: Int, offset: Int) -> UserNgramQueryResult? {
+        let request: [String: Any] = [
+            "scope": scope,
+            "query": query,
+            "limit": limit,
+            "offset": offset,
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: request),
+              let json = String(data: body, encoding: .utf8),
+              let cString = json.cString(using: .utf8),
+              let ptr = hime_user_ngram_query(cString)
+        else { return nil }
+        defer { hime_free_string(ptr) }
+        guard let data = String(cString: ptr).data(using: .utf8) else { return nil }
+        let result = try? JSONDecoder().decode(UserNgramQueryResult.self, from: data)
+        if let info = result?.info {
+            userModelStatus = UserNgramStatus(
+                active: userModelStatus?.active ?? false,
+                path: info.path,
+                folder: userModelStatus?.folder,
+                info: info
+            )
+        }
+        return result
+    }
+
+    /// Apply one edit (`hime_user_ngram_edit`) and refresh the status. The
+    /// returned flag is the engine's answer; the panel reports it.
+    @discardableResult
+    func editUserModel(action: String,
+                       scope: String,
+                       prev2: String = "",
+                       prev: String = "",
+                       text: String = "",
+                       count: Int = 0) -> Bool {
+        let request: [String: Any] = [
+            "action": action,
+            "scope": scope,
+            "prev2": prev2,
+            "prev": prev,
+            "text": text,
+            "count": count,
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: request),
+              let json = String(data: body, encoding: .utf8),
+              let cString = json.cString(using: .utf8),
+              hime_user_ngram_edit(cString)
+        else {
+            refreshUserModelStatus()
+            return false
+        }
+        refreshUserModelStatus()
+        return true
+    }
+
+    /// Save the learned model now (`hime_user_ngram_save`).
+    @discardableResult
+    func saveUserModel() -> Bool {
+        hime_user_ngram_save()
+    }
+
+    /// Create the `userNgram` folder (`hime_user_ngram_ensure_dir`) and
+    /// refresh the status.
+    func ensureUserModelFolder() {
+        if let ptr = hime_user_ngram_ensure_dir() {
+            hime_free_string(ptr)
+        }
+        refreshUserModelStatus()
+    }
+
+    /// Where the learned model lives, for Finder.
+    var userModelFolderPath: String? {
+        userModelStatus?.folder
     }
 
     /// hime_get_config as structured data.
@@ -504,10 +683,20 @@ final class PreferencesModel: ObservableObject {
                 .environmentObject(PanelSelection())
             let window = NSWindow(contentViewController: NSHostingController(rootView: root))
             window.title = "Hime 首选项"
-            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.isReleasedWhenClosed = false
-            window.setContentSize(NSSize(width: 720, height: 500))
+            // Wide enough for the 用户模型 rows (context, character, counts,
+            // share) beside the sidebar; the minimum keeps every page usable
+            // when the user drags it smaller.
+            window.contentMinSize = NSSize(width: 900, height: 620)
+            window.setContentSize(NSSize(width: 1080, height: 720))
             window.setFrameAutosaveName("HimePreferencesWindow")
+            // An autosaved frame from an older build can be smaller than the
+            // new minimum; the window would silently restore it.
+            if window.frame.width < 900 || window.frame.height < 620 {
+                window.setContentSize(NSSize(width: 1080, height: 720))
+            }
+            window.center()
             window.delegate = self
             self.window = window
         }
@@ -534,6 +723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 private enum PanelSection: String, CaseIterable, Identifiable {
     case basic = "基本"
     case model = "模型"
+    case userModel = "用户模型"
     case about = "关于"
 
     var id: String { rawValue }
@@ -569,6 +759,7 @@ private struct PreferencesRootView: View {
                     }
                     Section("高级") {
                         sidebarRow(.model, symbol: "cpu", color: .orange)
+                        sidebarRow(.userModel, symbol: "person.crop.circle.badge.checkmark", color: .teal)
                     }
                     Section("应用") {
                         sidebarRow(.about, symbol: "info.circle", color: .purple)
@@ -580,6 +771,7 @@ private struct PreferencesRootView: View {
             switch selection.section {
             case .about: AboutView()
             case .model: ModelView()
+            case .userModel: UserModelView()
             default: BasicView()
             }
         }
@@ -636,6 +828,10 @@ private struct BasicView: View {
                     infoRow(title: "编码类型", value: model.codeTypeName)
                     infoRow(title: "方案说明", value: model.selectedScheme?.describe ?? "—")
                     infoRow(title: "作者", value: model.selectedScheme?.author ?? "—")
+                    infoRow(title: "用户模型",
+                            value: model.userNgram
+                                ? "学习并参与重排"
+                                : "不学习，仅用默认模型")
                 }
                 Section("编码") {
                     stepperRow(title: "最大码长",
@@ -860,6 +1056,109 @@ private struct ModelView: View {
 
     /// Read-only value row; values are paths, numbers or build JSON, so the
     /// text stays selectable and middle-truncated.
+    private func infoRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
+        }
+    }
+
+    private static func grouped(_ value: Int) -> String {
+        value.formatted()
+    }
+
+    private static func fileSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func timestamp(_ secs: Int64?) -> String {
+        guard let secs, secs > 0 else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(secs)))
+    }
+}
+
+/// 高级 → 用户模型: the learned n-gram page (SPEC §7.7). The 状态 group
+/// mirrors `hime_user_ngram_status` — whether the selected scheme learns,
+/// what the file holds, and why it could not be read. The 路径 group shows
+/// where `userNgram/user.hng` lives and opens the folder; 管理 opens the
+/// CRUD window that edits the same file through `hime_user_ngram_edit`.
+private struct UserModelView: View {
+    @EnvironmentObject private var model: PreferencesModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SectionHeading(title: "用户模型")
+            Form {
+                Section("状态") {
+                    LabeledContent("学习状态") {
+                        if let status = model.userModelStatus {
+                            Text(status.active ? "学习中" : "未启用")
+                                .fontWeight(.medium)
+                                .foregroundStyle(status.active ? Color.green : Color.secondary)
+                        } else {
+                            Text("—").foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(model.userNgram
+                         ? "当前方案把已上屏文字学进用户模型，并在排序时与默认模型混合。"
+                         : "当前方案不学习用户输入；切到形码整句或全拼方案后生效。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let info = model.userModelStatus?.info {
+                        if let error = info.error {
+                            infoRow(title: "诊断", value: error)
+                        }
+                        infoRow(title: "格式", value: "\(info.format) · \(info.storage)")
+                        infoRow(title: "字符条目", value: "\(info.unigrams) / 总计 \(info.unigramTotal) 次")
+                        infoRow(title: "二元条目", value: Self.grouped(info.bigrams) + " 条")
+                        infoRow(title: "三元条目", value: Self.grouped(info.trigrams) + " 条")
+                        infoRow(title: "词表规模", value: Self.grouped(info.vocab))
+                        infoRow(title: "文件大小", value: Self.fileSize(info.fileBytes))
+                        infoRow(title: "修改时间", value: Self.timestamp(info.modifiedSecs))
+                        infoRow(title: "构建时间", value: Self.timestamp(Int64(info.builtUnixtime)))
+                    } else {
+                        infoRow(title: "文件", value: "尚未创建")
+                    }
+                }
+                Section("模型路径") {
+                    infoRow(title: "模型文件", value: model.userModelStatus?.path ?? "—")
+                    infoRow(title: "所在目录", value: model.userModelStatus?.folder ?? "—")
+                    LabeledContent("管理") {
+                        HStack(spacing: 8) {
+                            Button("用户模型管理…") {
+                                UserModelWindowController.shared.show(nil)
+                            }
+                            Button("打开目录") { openFolder() }
+                            Button("立即保存") { model.saveUserModel() }
+                                .disabled(model.userModelStatus?.info?.exists != true)
+                        }
+                    }
+                    Text("用户模型按用户保存，跨方案共用同一份文件；清空或修改后，下一次候选即按新数据排序。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .onAppear {
+            model.ensureUserModelFolder()
+            model.refreshUserModelStatus()
+        }
+    }
+
+    private func openFolder() {
+        guard let path = model.userModelFolderPath else { return }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+    }
+
     private func infoRow(title: String, value: String) -> some View {
         LabeledContent(title) {
             Text(value)

@@ -44,6 +44,7 @@ swiftc \
     "${SCRIPT_DIR}/CandidatesWindow.swift" \
     "${SCRIPT_DIR}/HimeInputController.swift" \
     "${SCRIPT_DIR}/Preferences.swift" \
+    "${SCRIPT_DIR}/UserModelWindow.swift" \
     -framework Cocoa \
     -framework InputMethodKit \
     "${RUST_LIB}"
