@@ -163,7 +163,7 @@ fn main() -> ExitCode {
             }
         });
         let mut session = match model {
-            Some(model) => Session::pinyin_sentence(lexicon, model, Config::default()),
+            Some(model) => Session::pinyin_sentence(lexicon, model, None, Config::default()),
             None => Session::pinyin(lexicon, Config::default()),
         };
         eprintln!("hime-cli: {HELP}");
