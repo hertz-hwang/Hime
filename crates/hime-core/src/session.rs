@@ -20,6 +20,7 @@ use crate::reverse::ReverseLookup;
 use crate::sentence::auto_commit::SentenceAutoCommit;
 use crate::sentence::SentenceEngine;
 use crate::types::{Candidate, EngineResponse};
+use crate::user_ngram::UserNgram;
 
 /// Marker that opens 反查 (SPEC §8.3). The session keeps it out of the
 /// encoding itself: `input_buffer` only ever holds the pinyin query, so the
@@ -91,6 +92,15 @@ pub struct Session {
     /// `input_buffer`, so the query alone reaches the pipeline and the
     /// encoding grows exactly like a 全拼 one.
     reversing: bool,
+    /// The learned per-user n-gram model, when the scheme declares
+    /// `user_ngram = true` (SPEC §7.7). Committed text is recorded here and
+    /// the sources behind the pipeline blend it into their score.
+    user_ngram: Option<Arc<UserNgram>>,
+    /// The tail (at most two characters) of what this session committed, used
+    /// as model history for ranking and as the learning chain's seed. A new
+    /// session starts empty (BOS), so one session's end never chains into the
+    /// next session's beginning.
+    commit_context: String,
 }
 
 impl Session {
@@ -120,6 +130,8 @@ impl Session {
             sentence: None,
             reverse: None,
             reversing: false,
+            user_ngram: None,
+            commit_context: String::new(),
         }
     }
 
@@ -141,6 +153,8 @@ impl Session {
             sentence: None,
             reverse: None,
             reversing: false,
+            user_ngram: None,
+            commit_context: String::new(),
         }
     }
 
@@ -155,6 +169,7 @@ impl Session {
     pub fn sentence(engine: Arc<SentenceEngine>, config: Config) -> Self {
         let config = Config { code_type: CodeType::XingmaSentence, ..config }.sanitized();
         let pipeline = Pipeline::sentence(Arc::clone(&engine));
+        let user_ngram = engine.user_ngram().cloned();
         Self {
             dict: None,
             config,
@@ -173,6 +188,8 @@ impl Session {
             }),
             reverse: None,
             reversing: false,
+            user_ngram,
+            commit_context: String::new(),
         }
     }
 
@@ -192,13 +209,19 @@ impl Session {
     /// not contain still becomes a candidate when `model` scores the
     /// character chain well (`huangzhao` → 皇朝 / 黄照). The sentence
     /// candidates head the window; table words, 简拼 and prefix words follow.
+    /// `user` is the learned n-gram model the scheme's `user_ngram` key
+    /// enables; both it and the default model re-rank single characters.
     pub fn pinyin_sentence(
         lexicon: Arc<PinyinLexicon>,
         model: Arc<crate::ngram::NgramModel>,
+        user: Option<Arc<UserNgram>>,
         config: Config,
     ) -> Self {
-        let pipeline = Pipeline::pinyin_sentence(Arc::clone(&lexicon), model);
-        Self::pinyin_with(pipeline, config)
+        let pipeline =
+            Pipeline::pinyin_sentence(Arc::clone(&lexicon), model, user.clone());
+        let mut session = Self::pinyin_with(pipeline, config);
+        session.user_ngram = user;
+        session
     }
 
     fn pinyin_with(pipeline: Pipeline, config: Config) -> Self {
@@ -218,6 +241,8 @@ impl Session {
             sentence: None,
             reverse: None,
             reversing: false,
+            user_ngram: None,
+            commit_context: String::new(),
         }
     }
 
@@ -230,6 +255,29 @@ impl Session {
     pub fn with_reverse(mut self, lookup: Arc<ReverseLookup>) -> Self {
         self.reverse = Some(lookup);
         self
+    }
+
+    /// Attach the learned user model (SPEC §7.7). The pipeline sources must
+    /// already share it — [`Session::sentence`] and
+    /// [`Session::pinyin_sentence`] take it directly; this setter serves a
+    /// session whose sources read the model through their own handle.
+    #[must_use]
+    pub fn with_user_ngram(mut self, model: Option<Arc<UserNgram>>) -> Self {
+        self.user_ngram = model;
+        self
+    }
+
+    /// The user model this session records into, if any.
+    #[must_use]
+    pub fn user_ngram(&self) -> Option<&Arc<UserNgram>> {
+        self.user_ngram.as_ref()
+    }
+
+    /// The text this session committed last, at most two characters — the
+    /// model history for ranking and the seed of the next learned chain.
+    #[must_use]
+    pub fn commit_context(&self) -> &str {
+        &self.commit_context
     }
 
     /// The configuration this session applies to keys and pages.
@@ -476,11 +524,13 @@ impl Session {
                 .sentence
                 .as_mut()
                 .expect("sentence session owns the auto-commit state");
+            let context = self.commit_context.clone();
             composer.auto_commit.key_pressed(
                 composer.engine.as_ref(),
                 &self.input_buffer,
                 true,
                 self.config.auto_commit,
+                &context,
             )
         };
         match commit {
@@ -553,9 +603,10 @@ impl Session {
         self.window = if self.input_buffer.is_empty() {
             Vec::new()
         } else if self.reversing {
-            self.reverse_pipeline().retrieve(&self.input_buffer)
+            self.reverse_pipeline().retrieve(&self.input_buffer, "")
         } else {
-            self.pipeline.retrieve(&self.input_buffer)
+            let context = self.commit_context.clone();
+            self.pipeline.retrieve(&self.input_buffer, &context)
         };
         self.page = 0;
         self.focus = 0;
@@ -613,6 +664,32 @@ impl Session {
         }
     }
 
+    /// Teach the learned model what the user just committed (SPEC §7.7) and
+    /// move the session's context to the committed text's tail. The chain is
+    /// seeded with the session's own earlier commits (BOS at the start of the
+    /// session), so a new session never links to the previous one's end.
+    fn learn(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.config.user_ngram {
+            // The scheme switched the model off, or never turned it on.
+            return;
+        }
+        if let Some(model) = self.user_ngram.as_deref() {
+            model.record(text, &self.commit_context);
+            model.save_if_due();
+        }
+        // The context is the two characters left of the caret: the previous
+        // tail plus this commit's own characters.
+        self.commit_context.push_str(text);
+        let chars: Vec<char> = self.commit_context.chars().collect();
+        if chars.len() > 2 {
+            self.commit_context = chars[chars.len() - 2..].iter().collect();
+        }
+    }
+
+
     /// The encoding to display: the first candidate's word-separated code
     /// split when it covers the raw encoding, otherwise the raw letters. The
     /// split covers the whole code for a whole-sentence or pinyin candidate,
@@ -653,7 +730,13 @@ impl Session {
     }
 
     /// Bundle current session state into the response a shell renders as-is.
-    fn response(&self, handled: bool, commit_text: Option<String>) -> EngineResponse {
+    /// Sending text is also the one moment the session learns: the learned
+    /// model takes the committed text, and its tail becomes the session's
+    /// context.
+    fn response(&mut self, handled: bool, commit_text: Option<String>) -> EngineResponse {
+        if let Some(text) = commit_text.as_deref() {
+            self.learn(text);
+        }
         EngineResponse {
             handled,
             commit_text,
@@ -670,12 +753,26 @@ impl Session {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         KEY_ARROW_DOWN, KEY_ARROW_LEFT, KEY_ARROW_RIGHT, KEY_ARROW_UP, KEY_BACKSPACE, KEY_ENTER,
         KEY_ESCAPE, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_SPACE, MAX_CODE_LEN, MAX_CANDIDATES,
     };
+    use crate::user_ngram::{UserNgramQuery, UserNgramScope};
+
+    /// The shipped whole-sentence model, when this machine has it; the pinyin
+    /// sentence tests skip without it, exactly like the 形码整句 ones.
+    pub(crate) fn shipped_model() -> Option<Arc<crate::ngram::NgramModel>> {
+        let path = crate::ngram::find_model_path()?;
+        match crate::ngram::NgramModel::load(path) {
+            Ok(model) => Some(Arc::new(model)),
+            Err(e) => {
+                eprintln!("session test: skipped ({e})");
+                None
+            }
+        }
+    }
 
     const SAMPLE: &str = "a\t工\t100\n\
                           a\t戈\t90\n\
@@ -1695,6 +1792,101 @@ mod tests {
 
     // --- 全拼 (SPEC §8.2) ---
 
+    /// A commit teaches the user model: the text arrives with the session's
+    /// own earlier commits as context, and the model reports it once saved.
+    #[test]
+    fn commits_are_recorded_into_the_user_model() {
+        let path = std::env::temp_dir().join(format!(
+            "hime-session-learn-{}.hng",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let model = Arc::new(UserNgram::empty(&path));
+        let lexicon = Arc::new(PinyinLexicon::parse("你好\tnihao\t200\n你\tni\t100\n"));
+        let config = Config { user_ngram: true, ..Config::default() };
+        let mut s = Session::pinyin_sentence(lexicon, shipped_model().expect("model present"), Some(Arc::clone(&model)), config);
+        for byte in "nihao".bytes() {
+            s.process_key(u32::from(byte));
+        }
+        let r = s.process_key(KEY_SPACE);
+        assert_eq!(r.commit_text.as_deref(), Some("你好"));
+        assert_eq!(s.commit_context(), "你好", "the session keeps the committed tail");
+
+        assert!(model.has_data(), "the commit reached the model");
+        let info = model.query(&UserNgramQuery {
+            scope: UserNgramScope::Bigram,
+            query: "你好".into(),
+            limit: 10,
+            offset: 0,
+        });
+        assert_eq!(info.total, 1, "{:?}", info.entries);
+        assert_eq!(info.entries[0].prev, "你");
+        assert_eq!(info.entries[0].count, 1);
+
+        // A second commit chains onto the first inside one session.
+        let _ = s.process_key(KEY_ESCAPE);
+        for _ in 0..2 {
+            for byte in "ni".bytes() {
+                s.process_key(u32::from(byte));
+            }
+            s.process_key(KEY_SPACE);
+        }
+        assert_eq!(s.commit_context(), "你你");
+        let chained = model.query(&UserNgramQuery {
+            scope: UserNgramScope::Trigram,
+            query: "你好你".into(),
+            limit: 10,
+            offset: 0,
+        });
+        assert_eq!(chained.total, 1, "好 你 你: {:?}", chained.entries);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A new session starts at BOS: the previous session's last characters are
+    /// never the context of the next session's first ones.
+    #[test]
+    fn a_new_session_does_not_chain_onto_the_previous_one() {
+        let path = std::env::temp_dir().join(format!(
+            "hime-session-fresh-{}.hng",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let model = Arc::new(UserNgram::empty(&path));
+        let lexicon = Arc::new(PinyinLexicon::parse("你好\tnihao\t200\n你\tni\t100\n"));
+        let config = Config { user_ngram: true, ..Config::default() };
+
+        let mut first = Session::pinyin_sentence(Arc::clone(&lexicon), shipped_model().expect("model present"), Some(Arc::clone(&model)), config);
+        for byte in "nihao".bytes() {
+            first.process_key(u32::from(byte));
+        }
+        first.process_key(KEY_SPACE);
+        assert_eq!(first.commit_context(), "你好");
+
+        let mut second = Session::pinyin_sentence(lexicon, shipped_model().expect("model present"), Some(Arc::clone(&model)), config);
+        assert_eq!(second.commit_context(), "", "a fresh session has no history");
+        for byte in "nihao".bytes() {
+            second.process_key(u32::from(byte));
+        }
+        second.process_key(KEY_SPACE);
+
+        let chained = model.query(&UserNgramQuery {
+            scope: UserNgramScope::Trigram,
+            query: "好你好".into(),
+            limit: 10,
+            offset: 0,
+        });
+        assert_eq!(chained.total, 0, "the sessions stay apart: {:?}", chained.entries);
+        let fresh = model.query(&UserNgramQuery {
+            scope: UserNgramScope::Bigram,
+            query: "你好".into(),
+            limit: 10,
+            offset: 0,
+        });
+        assert_eq!(fresh.total, 1);
+        assert_eq!(fresh.entries[0].total, 2, "two 你 → 好, both from BOS");
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn pinyin_lexicon() -> Arc<crate::PinyinLexicon> {
         Arc::new(crate::PinyinLexicon::parse(
             "你好\tnihao\t200\n\
@@ -1786,7 +1978,7 @@ mod tests {
         };
         let lexicon = Arc::new(PinyinLexicon::parse("黄\thuang\t5843\n照\tzhao\t100\n"));
         let conf = Config { ascii_punct: 1, ..Config::default() };
-        let mut s = Session::pinyin_sentence(lexicon, Arc::new(model), conf);
+        let mut s = Session::pinyin_sentence(lexicon, Arc::new(model), None, conf);
         for key in b"huangzhao" {
             s.process_key(u32::from(*key));
         }

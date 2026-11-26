@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::ngram::NgramModel;
 use crate::translator::Translator;
 use crate::types::Candidate;
+use crate::user_ngram::UserNgram;
 
 use super::decoder;
 use super::lexicon::PinyinLexicon;
@@ -38,6 +39,10 @@ const SENTENCE_HEAD: usize = 5;
 pub struct PinyinTranslator {
     lexicon: Arc<PinyinLexicon>,
     model: Option<Arc<NgramModel>>,
+    /// The learned user model, when the scheme declares `user_ngram = true`.
+    /// It blends into the sentence score and into the single-character word
+    /// rows, so a one-syllable query is re-ranked by both models (SPEC §7.7).
+    user: Option<Arc<UserNgram>>,
 }
 
 impl std::fmt::Debug for PinyinTranslator {
@@ -45,6 +50,7 @@ impl std::fmt::Debug for PinyinTranslator {
         f.debug_struct("PinyinTranslator")
             .field("lexicon", &self.lexicon)
             .field("model", &self.model.is_some())
+            .field("user_ngram", &self.user.is_some())
             .finish()
     }
 }
@@ -53,19 +59,63 @@ impl PinyinTranslator {
     /// Word-only source. 简拼 and prefix words work; out-of-table sentences
     /// keep to the single characters the table lists.
     pub fn new(lexicon: Arc<PinyinLexicon>) -> Self {
-        Self { lexicon, model: None }
+        Self { lexicon, model: None, user: None }
     }
 
     /// Word source plus whole-sentence decoding through `model`.
     #[must_use]
     pub fn with_model(lexicon: Arc<PinyinLexicon>, model: Arc<NgramModel>) -> Self {
-        Self { lexicon, model: Some(model) }
+        Self { lexicon, model: Some(model), user: None }
+    }
+
+    /// Attach the learned user model (or drop it with `None`).
+    #[must_use]
+    pub fn with_user_ngram(mut self, user: Option<Arc<UserNgram>>) -> Self {
+        self.user = user;
+        self
     }
 
     /// The lexicon this source reads.
     #[must_use]
     pub fn lexicon(&self) -> &Arc<PinyinLexicon> {
         &self.lexicon
+    }
+
+    /// Re-rank the single-character rows of the word window with both models.
+    /// In 全拼 a one-syllable query is a character choice, so the default
+    /// n-gram and the learned user n-gram order those candidates together
+    /// (SPEC §7.7); multi-character words keep their positions.
+    fn rerank_characters(&self, window: &mut Vec<Candidate>, context: &str) {
+        let Some(model) = self.model.as_deref() else { return };
+        let (prev2, prev1) = decoder::context_tail(context);
+        let mut slots: Vec<usize> = Vec::new();
+        let mut scored: Vec<(Candidate, f64)> = Vec::new();
+        for (index, candidate) in window.iter().enumerate() {
+            let mut chars = candidate.text.chars();
+            let (Some(ch), None) = (chars.next(), chars.next()) else { continue };
+            let cp = ch as u32;
+            let base = model.logp(prev2, prev1, cp);
+            let score = match self.user.as_deref() {
+                Some(user) => {
+                    user.blended_logp(base, prev2, prev1, cp, model.unigram(cp)).unwrap_or(base)
+                }
+                None => base,
+            };
+            slots.push(index);
+            scored.push((candidate.clone(), score));
+        }
+        if scored.len() < 2 {
+            return;
+        }
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (slot, (candidate, _)) in slots.into_iter().zip(scored) {
+            window[slot] = candidate;
+        }
     }
 
     /// Whole-sentence candidates for `input`, best first.
@@ -110,7 +160,14 @@ impl PinyinTranslator {
             if form[..form.len() - 1].iter().any(|pattern| !pattern.complete) {
                 continue;
             }
-            merged.extend(decoder::decode(model, &self.lexicon, &form, context, SENTENCE_HEAD));
+            merged.extend(decoder::decode_with_user(
+                model,
+                &self.lexicon,
+                self.user.as_deref(),
+                &form,
+                context,
+                SENTENCE_HEAD,
+            ));
         }
         merged.sort_by(|left, right| {
             right
@@ -136,10 +193,19 @@ impl PinyinTranslator {
 
 impl Translator for PinyinTranslator {
     fn translate(&self, input: &str, limit: usize) -> Vec<Candidate> {
+        self.translate_with_context(input, "", limit)
+    }
+
+    fn translate_with_context(
+        &self,
+        input: &str,
+        context: &str,
+        limit: usize,
+    ) -> Vec<Candidate> {
         if input.is_empty() || limit == 0 {
             return Vec::new();
         }
-        let sentences = self.sentences(input, "");
+        let sentences = self.sentences(input, context);
         let taken: std::collections::HashSet<String> =
             sentences.iter().map(|candidate| candidate.text.clone()).collect();
         let budget = limit.saturating_sub(sentences.len());
@@ -157,6 +223,7 @@ impl Translator for PinyinTranslator {
                 })
                 .take(budget),
         );
+        self.rerank_characters(&mut window, context);
         window
     }
 }
@@ -164,6 +231,7 @@ impl Translator for PinyinTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_ngram::UserNgram;
 
     fn translator() -> PinyinTranslator {
         PinyinTranslator::new(Arc::new(PinyinLexicon::parse(
@@ -173,6 +241,39 @@ mod tests {
 
     fn texts(list: &[Candidate]) -> Vec<&str> {
         list.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// In 全拼 the two models re-rank single characters together: the default
+    /// model orders them by the left context, and the learned model lifts a
+    /// character the user actually types after that context.
+    #[test]
+    fn both_models_re_rank_single_characters_with_the_left_context() {
+        let Some(model) = crate::session::tests::shipped_model() else { return };
+        let path = std::env::temp_dir().join(format!(
+            "hime-pinyin-single-{}.hng",
+            std::process::id()
+        ));
+        let user = std::sync::Arc::new(UserNgram::empty(&path));
+        // The context the query carries is 我, so that is the transition the
+        // user has to have typed for the learned model to speak up.
+        for _ in 0..400 {
+            user.record("我你", "");
+        }
+        let lexicon = std::sync::Arc::new(PinyinLexicon::parse(
+            "泥\tni\t100\n你\tni\t90\n呢\tni\t80\n",
+        ));
+        let plain = PinyinTranslator::with_model(
+            std::sync::Arc::clone(&lexicon),
+            std::sync::Arc::clone(&model),
+        )
+        .translate_with_context("ni", "我", 5);
+        assert_ne!(plain[0].text, "泥", "the default model already orders them: {plain:?}");
+
+        let learned = PinyinTranslator::with_model(lexicon, model)
+            .with_user_ngram(Some(std::sync::Arc::clone(&user)))
+            .translate_with_context("ni", "我", 5);
+        assert_eq!(learned[0].text, "你", "the learned character wins: {learned:?}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

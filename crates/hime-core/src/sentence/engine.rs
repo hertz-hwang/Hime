@@ -21,6 +21,7 @@ use super::lexicon::SentenceLexicon;
 use crate::ngram::NgramModel;
 use crate::translator::Translator;
 use crate::types::Candidate;
+use crate::user_ngram::UserNgram;
 
 /// Why a sentence engine could not be built from its two files.
 #[derive(Debug)]
@@ -59,12 +60,30 @@ impl From<std::io::Error> for SentenceModelError {
 pub struct SentenceEngine {
     model: NgramModel,
     lexicon: SentenceLexicon,
+    /// The learned per-user model, when the scheme declares
+    /// `user_ngram = true`. Its counts only re-rank generated sentence paths;
+    /// dictionary entries keep table order (SPEC §7.7).
+    user: Option<Arc<UserNgram>>,
 }
 
 impl SentenceEngine {
     /// Assemble from already-loaded parts.
     pub fn new(model: NgramModel, lexicon: SentenceLexicon) -> Self {
-        Self { model, lexicon }
+        Self { model, lexicon, user: None }
+    }
+
+    /// Attach the learned user model (or drop it with `None`). Shared, so one
+    /// loaded model serves every session.
+    #[must_use]
+    pub fn with_user_ngram(mut self, user: Option<Arc<UserNgram>>) -> Self {
+        self.user = user;
+        self
+    }
+
+    /// The attached user model, if any.
+    #[must_use]
+    pub fn user_ngram(&self) -> Option<&Arc<UserNgram>> {
+        self.user.as_ref()
     }
 
     /// Load the `.hng` model and the sentence table (the same `候选\t编码`
@@ -75,7 +94,7 @@ impl SentenceEngine {
     ) -> Result<Self, SentenceModelError> {
         let model = NgramModel::load(model_path)?;
         let lexicon = SentenceLexicon::load(table_path)?;
-        Ok(Self { model, lexicon })
+        Ok(Self { model, lexicon, user: None })
     }
 
     /// Whole-sentence candidates for `code`, best first. `context` is the text
@@ -83,7 +102,14 @@ impl SentenceEngine {
     /// 单字重码组句 (`allow_duplicate_single` on).
     #[must_use]
     pub fn decode(&self, code: &str, context: &str) -> Vec<SentenceCandidate> {
-        SentenceDecoder::decode(&self.model, &self.lexicon, code, context, true)
+        SentenceDecoder::decode_with_user(
+            &self.model,
+            &self.lexicon,
+            self.user.as_deref(),
+            code,
+            context,
+            true,
+        )
     }
 
     /// Whole-sentence candidates for `code` plus the early-commit evidence the
@@ -95,7 +121,14 @@ impl SentenceEngine {
         code: &str,
         context: &str,
     ) -> super::decoder::SentenceDecode {
-        SentenceDecoder::decode_with_evidence(&self.model, &self.lexicon, code, context, true)
+        SentenceDecoder::decode_with_evidence(
+            &self.model,
+            &self.lexicon,
+            self.user.as_deref(),
+            code,
+            context,
+            true,
+        )
     }
 
     /// The word graph, for the auto-commit's "can the keys still be covered
@@ -138,8 +171,17 @@ impl SentenceTranslator {
 
 impl Translator for SentenceTranslator {
     fn translate(&self, input: &str, limit: usize) -> Vec<Candidate> {
+        self.translate_with_context(input, "", limit)
+    }
+
+    fn translate_with_context(
+        &self,
+        input: &str,
+        context: &str,
+        limit: usize,
+    ) -> Vec<Candidate> {
         self.engine
-            .decode(input, "")
+            .decode(input, context)
             .into_iter()
             .take(limit)
             .map(|sentence| Candidate {
@@ -190,6 +232,30 @@ mod tests {
         assert!(list.iter().all(|c| !c.text.is_empty()), "every candidate has text");
         assert!(list.len() <= 5, "the budget is honored");
         assert!(translator.translate("jintiantianqi", 0).is_empty(), "a zero budget is empty");
+    }
+
+    /// The left context reaches the 形码整句 translator: it is model history,
+    /// so the same encoding keeps its ranking and only the scored path can
+    /// move.
+    #[test]
+    fn translator_passes_the_left_context_through() {
+        let Some(model) = crate::ngram::find_model_path().and_then(|path| {
+            crate::ngram::NgramModel::load(path).ok()
+        }) else {
+            return;
+        };
+        let table = sentence_table();
+        if !table.is_file() {
+            return;
+        }
+        let lexicon = SentenceLexicon::load(&table).expect("table loads");
+        let engine = SentenceEngine::new(model, lexicon);
+        let translator = SentenceTranslator::new(std::sync::Arc::new(engine));
+        let bare = translator.translate_with_context("jintiantianqi", "", 5);
+        let with_context =
+            translator.translate_with_context("jintiantianqi", "昨天", 5);
+        assert!(!bare.is_empty() && !with_context.is_empty());
+        assert_eq!(bare[0].text, with_context[0].text, "the context is history, not a re-rank");
     }
 
     /// An encoding a sentence code cannot be (no letters / a stray character)

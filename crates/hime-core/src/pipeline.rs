@@ -73,13 +73,18 @@ impl Pipeline {
     /// the n-gram model, so a combination the table lacks still reaches the
     /// window (`huangzhao` → 皇朝 / 黄照). The translator places sentence
     /// candidates at the head and drops their texts from the word list, so the
-    /// de-dup stage has nothing to do for them.
+    /// de-dup stage has nothing to do for them. `user` is the learned model
+    /// the scheme enables (SPEC §7.7).
     pub fn pinyin_sentence(
         lexicon: Arc<crate::pinyin::PinyinLexicon>,
         model: Arc<crate::ngram::NgramModel>,
+        user: Option<Arc<crate::user_ngram::UserNgram>>,
     ) -> Self {
         Self::new(
-            vec![Box::new(crate::pinyin::PinyinTranslator::with_model(lexicon, model))],
+            vec![Box::new(
+                crate::pinyin::PinyinTranslator::with_model(lexicon, model)
+                    .with_user_ngram(user),
+            )],
             vec![Box::new(DedupFilter)],
         )
     }
@@ -91,12 +96,14 @@ impl Pipeline {
     }
 
     /// The full candidate window for `code`, best first: every match the
-    /// translators report after the filters run, wider than one page.
-    pub fn retrieve(&self, code: &str) -> Vec<Candidate> {
+    /// translators report after the filters run, wider than one page. `context`
+    /// is the text left of the cursor, handed to sources that score with a
+    /// language model.
+    pub fn retrieve(&self, code: &str, context: &str) -> Vec<Candidate> {
         let merged: Vec<Candidate> = self
             .translators
             .iter()
-            .flat_map(|translator| translator.translate(code, FETCH_CANDIDATES))
+            .flat_map(|translator| translator.translate_with_context(code, context, FETCH_CANDIDATES))
             .collect();
         self.filters
             .iter()
@@ -168,7 +175,7 @@ mod tests {
             "aaaa\t㠭\t80\n",
             "ad\t匿\t100\n",
         )));
-        let window = pipeline.retrieve("a");
+        let window = pipeline.retrieve("a", "");
         assert_eq!(texts(&window), vec!["工", "戈", "式", "匿", "㠭"]);
         assert!(window.len() <= FETCH_CANDIDATES);
     }
@@ -180,7 +187,7 @@ mod tests {
         let rows: String = (0..12)
             .map(|i| format!("a\t字{i}\t{}\n", 100 - i))
             .collect();
-        let window = Pipeline::table(dict(&rows)).retrieve("a");
+        let window = Pipeline::table(dict(&rows)).retrieve("a", "");
         assert_eq!(window.len(), 12, "every distinct match survives to the caller");
         assert!(window.len() > MAX_CANDIDATES, "wider than one page");
     }
@@ -194,11 +201,11 @@ mod tests {
             ],
             vec![Box::new(PrependFilter), Box::new(DedupFilter)],
         );
-        assert_eq!(texts(&pipeline.retrieve("x")), vec!["★", "甲", "乙", "丙"]);
+        assert_eq!(texts(&pipeline.retrieve("x", "")), vec!["★", "甲", "乙", "丙"]);
     }
 
     #[test]
     fn empty_encoding_retrieves_nothing() {
-        assert!(Pipeline::table(dict("a\t工\t100\n")).retrieve("").is_empty());
+        assert!(Pipeline::table(dict("a\t工\t100\n")).retrieve("", "").is_empty());
     }
 }

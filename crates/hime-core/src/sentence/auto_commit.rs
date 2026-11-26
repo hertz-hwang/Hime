@@ -90,7 +90,6 @@ pub(crate) struct SentenceAutoCommit {
     /// Set after an empty-code commit; reserved for future continuation rules,
     /// carried for parity with the reference implementation.
     continuation: bool,
-    context_segments: Vec<String>,
     session_key_count: usize,
 }
 
@@ -105,6 +104,7 @@ impl SentenceAutoCommit {
         raw: &str,
         appended_letter: bool,
         auto_commit: bool,
+        context: &str,
     ) -> Option<SentenceAutoCommitOutcome> {
         self.session_key_count += 1;
 
@@ -121,7 +121,7 @@ impl SentenceAutoCommit {
         }
 
         if appended_letter && !self.suspended {
-            if let Some(commit) = self.try_empty_code_commit(engine, raw) {
+            if let Some(commit) = self.try_empty_code_commit(engine, raw, context) {
                 return Some(commit);
             }
         } else {
@@ -129,7 +129,7 @@ impl SentenceAutoCommit {
         }
 
         if !self.suspended {
-            return self.try_early_commit(engine, raw);
+            return self.try_early_commit(engine, raw, context);
         }
         self.reset_evidence();
         None
@@ -154,9 +154,8 @@ impl SentenceAutoCommit {
     }
 
     /// The whole code was consumed (Space / digit) or the composition was
-    /// dropped: clear all auto-commit state except the committed-text context,
-    /// which deliberately survives so the next sentence keeps left context
-    /// (the reference `resetAll`).
+    /// dropped: clear all auto-commit state. The left context survives on the
+    /// session, which owns it (the reference `resetAll`).
     pub(crate) fn reset(&mut self) {
         self.trackers.clear();
         self.last_seen_raw.clear();
@@ -172,25 +171,6 @@ impl SentenceAutoCommit {
         self.last_seen_raw.clear();
     }
 
-    /// Left context for decoding: the most recent committed fragments (≤ 2),
-    /// used as model history only. The cursor context the reference reads from the host
-    /// is a shell concern; until that is wired the committed-fragment fallback
-    /// keeps cross-commit context working (the reference `contextText`).
-    fn context_text(&self) -> String {
-        self.context_segments.iter().rev().take(2).rev().map(String::as_str).collect()
-    }
-
-    fn record_context(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.context_segments.push(text.to_string());
-        if self.context_segments.len() > 2 {
-            let excess = self.context_segments.len() - 2;
-            self.context_segments.drain(..excess);
-        }
-    }
-
     /// The reference `try_early_commit`: build the evidence, gate on the first-keys
     /// immunity and truncation, then accumulate per-prefix maturity and try to
     /// commit.
@@ -198,14 +178,14 @@ impl SentenceAutoCommit {
         &mut self,
         engine: &SentenceEngine,
         raw: &str,
+        context: &str,
     ) -> Option<SentenceAutoCommitOutcome> {
         if self.session_key_count <= FIRST_KEYS_IMMUNITY {
             self.reset_evidence();
             return None;
         }
 
-        let context = self.context_text();
-        let decode = engine.decode_with_evidence(raw, &context);
+        let decode = engine.decode_with_evidence(raw, context);
         let evidence = &decode.evidence;
         let near_cap = raw.len() >= AUTO_COMMIT_MAX_RAW_LENGTH - NEAR_CAP_COMMIT_GENERATIONS;
         // A truncated posterior voids the evidence, except near the cap where we
@@ -378,16 +358,11 @@ impl SentenceAutoCommit {
         consumed: usize,
     ) -> SentenceAutoCommitOutcome {
         let retained_raw = raw[consumed..].to_string();
-        self.committed_append(&text);
         self.last_auto_commit_raw_length = consumed;
         self.continuation = false;
         self.reset_evidence();
         self.empty_pending = None;
         SentenceAutoCommitOutcome { text, retained_raw }
-    }
-
-    fn committed_append(&mut self, text: &str) {
-        self.record_context(text);
     }
 
     // MARK: - Empty-code commit (reference capture_empty_code_candidate /
@@ -397,6 +372,7 @@ impl SentenceAutoCommit {
         &mut self,
         engine: &SentenceEngine,
         raw: &str,
+        context: &str,
     ) -> Option<SentenceAutoCommitOutcome> {
         if raw.len() < 2 {
             return None;
@@ -404,7 +380,7 @@ impl SentenceAutoCommit {
         let full_before = &raw[..raw.len() - 1];
         let pending = match self.empty_pending.clone() {
             Some(pending) => pending,
-            None => self.capture_empty_code_candidate(engine, full_before)?,
+            None => self.capture_empty_code_candidate(engine, full_before, context)?,
         };
         self.empty_pending = Some(pending.clone());
 
@@ -430,7 +406,6 @@ impl SentenceAutoCommit {
 
         let commit = pending.candidate_text;
         let retained_raw = raw[pending.base_raw_length..].to_string();
-        self.record_context(&commit);
         self.last_auto_commit_raw_length = pending.base_raw_length;
         self.trackers.clear();
         self.last_seen_raw.clear();
@@ -448,9 +423,9 @@ impl SentenceAutoCommit {
         &self,
         engine: &SentenceEngine,
         full_before: &str,
+        context: &str,
     ) -> Option<EmptyPending> {
-        let context = self.context_text();
-        let decoded = engine.decode_with_evidence(full_before, &context);
+        let decoded = engine.decode_with_evidence(full_before, context);
         let visible_top = decoded.candidates.first()?;
         let restrict = !has_selection_suffix(full_before.as_bytes());
         let first = decoded
@@ -726,18 +701,13 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_suspension_but_keeps_committed_context() {
+    fn reset_clears_suspension_and_evidence() {
         let mut ac = SentenceAutoCommit::default();
-        ac.record_context("甲");
-        ac.record_context("乙");
-        ac.record_context("丙");
-        assert_eq!(ac.context_text(), "乙丙", "only the most recent two fragments are context");
-        assert_eq!(ac.context_segments.len(), 2);
-
         ac.suspend();
+        assert!(ac.suspended);
         ac.reset();
         assert!(!ac.suspended, "a whole-code commit clears the suspension");
-        assert_eq!(ac.context_text(), "乙丙", "committed text survives: the next sentence keeps left context");
+        assert!(ac.trackers.is_empty() && ac.last_seen_raw.is_empty());
     }
 
     fn tracker_with_text(text: &str) -> Tracker {

@@ -25,6 +25,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crate::ngram::{NgramModel, CP_BOS, CP_EOS};
+use crate::user_ngram::UserNgram;
 
 use super::lexicon::PinyinLexicon;
 use super::syllables::{Pattern, MAX_WORD_SYLLABLES};
@@ -125,11 +126,27 @@ pub fn decode(
     context: &str,
     limit: usize,
 ) -> Vec<PinyinCandidate> {
+    decode_with_user(model, lexicon, None, patterns, context, limit)
+}
+
+/// [`decode`] with the per-user model blended into every character score,
+/// single characters included: in 全拼 a one-syllable query is a character
+/// choice, so both models re-rank those candidates together (SPEC §7.7).
+#[must_use]
+pub fn decode_with_user(
+    model: &NgramModel,
+    lexicon: &PinyinLexicon,
+    user: Option<&UserNgram>,
+    patterns: &[Pattern],
+    context: &str,
+    limit: usize,
+) -> Vec<PinyinCandidate> {
     let length = patterns.len();
     if length == 0 || limit == 0 {
         return Vec::new();
     }
 
+    let scorer = Scorer { model, user };
     let (prev2, prev1) = context_tail(context);
     let mut nodes: Vec<Vec<Node>> = (0..=length).map(|_| Vec::new()).collect();
     nodes[0].push(Node { prev2, prev1, score: 0.0, start: 0, back: 0, word: None });
@@ -142,7 +159,7 @@ pub fn decode(
         let furthest = length.min(start + MAX_WORD_SYLLABLES);
         let mut covered = false;
         for end in start + 1..=furthest {
-            let hits = span_words(model, lexicon, &patterns[start..end]);
+            let hits = span_words(&scorer, lexicon, &patterns[start..end]);
             if hits.is_empty() {
                 continue;
             }
@@ -154,8 +171,8 @@ pub fn decode(
                 let mut best = f64::NEG_INFINITY;
                 let mut best_index = 0;
                 for (index, previous) in nodes[start].iter().enumerate() {
-                    let total =
-                        previous.score + transition(model, previous.prev2, previous.prev1, hit);
+                    let total = previous.score
+                        + transition(&scorer, previous.prev2, previous.prev1, hit);
                     if total > best {
                         best = total;
                         best_index = index;
@@ -214,7 +231,7 @@ pub fn decode(
             segmented: words.iter().map(|word| word.split.as_str()).collect::<Vec<_>>().join(" "),
             // The EOS transition is what makes "the sentence ends here" part
             // of the score, the same convention as 形码整句.
-            score: node.score + model.logp(node.prev2, node.prev1, CP_EOS),
+            score: node.score + scorer.logp(node.prev2, node.prev1, CP_EOS),
             word_count: words.len(),
             syllable_count: length,
         });
@@ -230,9 +247,34 @@ pub fn decode(
     paths
 }
 
+/// The two models a pinyin path is scored with: the default whole-sentence
+/// n-gram and (when the scheme enables it) the learned user n-gram. Every
+/// character score goes through [`Self::logp`], single characters included,
+/// so both models re-rank a one-syllable query the same way (SPEC §7.7).
+struct Scorer<'a> {
+    model: &'a NgramModel,
+    user: Option<&'a UserNgram>,
+}
+
+impl Scorer<'_> {
+    /// The default model's log-probability for `target` after `(prev2, prev1)`,
+    /// blended with the user model in probability space. An unseen context
+    /// keeps the default score exactly.
+    #[inline]
+    fn logp(&self, prev2: u32, prev1: u32, target: u32) -> f64 {
+        let base = self.model.logp(prev2, prev1, target);
+        match self.user {
+            Some(user) => user
+                .blended_logp(base, prev2, prev1, target, self.model.unigram(target))
+                .unwrap_or(base),
+            None => base,
+        }
+    }
+}
+
 /// The word candidates inside one span, best prior first.
 fn span_words(
-    model: &NgramModel,
+    scorer: &Scorer<'_>,
     lexicon: &PinyinLexicon,
     span: &[Pattern],
 ) -> Vec<SpanWord> {
@@ -241,8 +283,8 @@ fn span_words(
     let mut scored: Vec<SpanWord> = Vec::with_capacity(matches.len());
     for hit in matches {
         let scalars: Vec<u32> = hit.text.chars().map(|c| c as u32).collect();
-        let tail = tail_score(model, &scalars);
-        let head = head_score(model, &scalars);
+        let tail = tail_score(scorer, &scalars);
+        let head = head_score(scorer, &scalars);
         scored.push(SpanWord {
             prior: head + tail
                 - f64::from(hit.ordinal.saturating_sub(1) as u32) * RANK_PENALTY,
@@ -307,30 +349,30 @@ fn backtrack(nodes: &[Vec<Node>], position: usize, index: usize) -> Vec<Word> {
 
 /// Score of a word's third character onward: only the first two characters
 /// consume the path context.
-fn tail_score(model: &NgramModel, scalars: &[u32]) -> f64 {
+fn tail_score(scorer: &Scorer<'_>, scalars: &[u32]) -> f64 {
     scalars
         .windows(3)
-        .map(|window| model.logp(window[0], window[1], window[2]))
+        .map(|window| scorer.logp(window[0], window[1], window[2]))
         .sum()
 }
 
 /// Score of appending `word` after `(prev2, prev1)`: its first two characters
 /// consume the path context, the rest is context-free.
-fn transition(model: &NgramModel, prev2: u32, prev1: u32, word: &SpanWord) -> f64 {
-    head_score_with(model, prev2, prev1, &word.scalars) + word.tail
+fn transition(scorer: &Scorer<'_>, prev2: u32, prev1: u32, word: &SpanWord) -> f64 {
+    head_score_with(scorer, prev2, prev1, &word.scalars) + word.tail
 }
 
 /// The unigram chain of a word from `(prev2, prev1)`, first two characters
 /// only. With `(CP_BOS, CP_BOS)` this is the word's context-free prior.
-fn head_score(model: &NgramModel, scalars: &[u32]) -> f64 {
-    head_score_with(model, CP_BOS, CP_BOS, scalars)
+fn head_score(scorer: &Scorer<'_>, scalars: &[u32]) -> f64 {
+    head_score_with(scorer, CP_BOS, CP_BOS, scalars)
 }
 
-fn head_score_with(model: &NgramModel, prev2: u32, prev1: u32, scalars: &[u32]) -> f64 {
+fn head_score_with(scorer: &Scorer<'_>, prev2: u32, prev1: u32, scalars: &[u32]) -> f64 {
     let Some(&first) = scalars.first() else { return 0.0 };
-    let mut total = model.logp(prev2, prev1, first);
+    let mut total = scorer.logp(prev2, prev1, first);
     if let Some(&second) = scalars.get(1) {
-        total += model.logp(prev1, first, second);
+        total += scorer.logp(prev1, first, second);
     }
     total
 }
@@ -346,7 +388,7 @@ fn tail_context(scalars: &[u32], fallback: u32) -> (u32, u32) {
 }
 
 /// The `(prev2, prev1)` history a left context seeds the model with.
-fn context_tail(context: &str) -> (u32, u32) {
+pub(crate) fn context_tail(context: &str) -> (u32, u32) {
     let scalars: Vec<u32> = context.chars().map(|c| c as u32).collect();
     let mut prev2 = CP_BOS;
     let mut prev1 = CP_BOS;

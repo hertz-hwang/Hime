@@ -24,6 +24,21 @@ pub trait Translator: Send + Sync {
     /// [`crate::MAX_CANDIDATES`] because filters drop and add entries
     /// afterwards and the page is cut at the very end.
     fn translate(&self, input: &str, limit: usize) -> Vec<Candidate>;
+
+    /// Candidates for `input` with the text left of the cursor as model
+    /// history. Sources that never read history keep the default forwarding
+    /// to [`Self::translate`]; the 形码整句 / 全拼 sources use it so the
+    /// n-gram (and the learned user n-gram blended with it) scores the chain
+    /// in context.
+    fn translate_with_context(
+        &self,
+        input: &str,
+        context: &str,
+        limit: usize,
+    ) -> Vec<Candidate> {
+        let _ = context;
+        self.translate(input, limit)
+    }
 }
 
 /// Looks the encoding up in a [`Dictionary`] table (形码查表).

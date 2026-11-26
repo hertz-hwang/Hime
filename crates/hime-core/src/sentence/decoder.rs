@@ -13,8 +13,10 @@
 //!   score, then fewer edges;
 //! - each position is de-duplicated and truncated to the beam width before it
 //!   is expanded;
-//! - a whole-input single edge (the key stream is exactly one lexicon entry)
-//!   keeps lexicon order; only multi-word segmentations are re-ranked by score;
+//! - a whole-input edge (the key stream is exactly one lexicon entry, however
+//!   many characters it has: `f` → 一, 一定要) keeps lexicon order, and no
+//!   learned model re-ranks it; the whole-input rule survives a missing user
+//!   model, while multi-word segmentations compete by score as always;
 //! - candidates are scored to the end with an EOS transition.
 //!
 //! Deferred, exactly as gated off in the reference when there is no user data (each is
@@ -34,6 +36,7 @@ use std::rc::Rc;
 use super::config::*;
 use super::lexicon::{SentenceEdge, SentenceLexicon};
 use crate::ngram::{NgramModel, CP_BOS, CP_EOS};
+use crate::user_ngram::UserNgram;
 
 /// One whole-sentence candidate. `segmented` is the ␣-joined code split of the
 /// winning path (used for display and, later, learning); `confidence` is the
@@ -445,13 +448,30 @@ pub(crate) fn eligible_edges(
 }
 
 /// A decode needs a model and a graph; this bundles the two borrows so the
-/// recursive-free helpers do not thread them separately.
+/// recursive-free helpers do not thread them separately. `user` is the learned
+/// per-user model, present only when the scheme enables it and it holds data.
 struct Decoder<'a> {
     model: &'a NgramModel,
     lexicon: &'a SentenceLexicon,
+    user: Option<&'a UserNgram>,
 }
 
 impl<'a> Decoder<'a> {
+    /// The default model's log-probability for `target` after `(prev2, prev1)`,
+    /// blended with the user model in probability space when there is one.
+    /// `None` from the model means the context was never observed, so the
+    /// default score stands unchanged.
+    #[inline]
+    fn scored_logp(&self, prev2: u32, prev1: u32, target: u32) -> f64 {
+        let base = self.model.logp(prev2, prev1, target);
+        match self.user {
+            Some(user) => user
+                .blended_logp(base, prev2, prev1, target, self.model.unigram(target))
+                .unwrap_or(base),
+            None => base,
+        }
+    }
+
     fn expand(
         &self,
         raw: &[u8],
@@ -527,9 +547,18 @@ impl<'a> Decoder<'a> {
         let mut prev2 = item.prev2;
         let mut prev1 = item.prev1;
         let mut char_count = 0usize;
+        let mut learned = 0.0;
         for ch in edge.text.chars() {
             let target = ch as u32;
-            score += self.model.logp(prev2, prev1, target);
+            let base = self.model.logp(prev2, prev1, target);
+            let scored = match self.user {
+                Some(user) => user
+                    .blended_logp(base, prev2, prev1, target, self.model.unigram(target))
+                    .unwrap_or(base),
+                None => base,
+            };
+            learned += scored - base;
+            score += scored;
             score += EMITTED_CHARACTER_REWARD;
             prev2 = prev1;
             prev1 = target;
@@ -541,11 +570,12 @@ impl<'a> Decoder<'a> {
             score -= RANK_PENALTY * f64::from(u32::from(edge.rank)).ln();
         }
         // `mass` tracks probability: it keeps the rank penalty but drops the
-        // whole-code single-character reward, so it stays a calibrated score.
-        let mut mass_delta = score - item.score;
+        // whole-code single-character reward and the learned adjustment, so it
+        // stays a calibrated score of the default model.
+        let mut mass_delta = score - item.score - learned;
         if whole_input_edge && selected_rank == 0 && edge.optimal_single && char_count == 1 {
             score += WHOLE_INPUT_SINGLE_CHARACTER_REWARD;
-            mass_delta = score - WHOLE_INPUT_SINGLE_CHARACTER_REWARD - item.score;
+            mass_delta = score - WHOLE_INPUT_SINGLE_CHARACTER_REWARD - item.score - learned;
         }
         Rc::new(SentenceState {
             score,
@@ -620,19 +650,20 @@ impl<'a> Decoder<'a> {
             all.push(candidate);
         }
 
-        // A whole-input single edge is ordered by the table (the lexicon owns
-        // "code → first choice"); only when a single-character-homophone path
-        // could also read the keys as a multi-word sentence do the candidates
-        // compete by score.
-        let has_segmented_path = all.iter().any(|c| c.segmented_path);
-        let use_score = allow_duplicate_single && has_segmented_path;
+        // A dictionary entry is a whole-input edge: the key stream is one table
+        // code, so the table owns the answer (`f` → 一 / “ / 一定要) and no
+        // model re-ranks those entries among themselves. Only paths the user
+        // built out of several entries compete by score, and they follow the
+        // table entries — that is the score the two models may improve.
         let mut result = all;
-        if use_score {
-            if result.len() > CANDIDATE_LIMIT {
-                result = select_exact_top(result, CANDIDATE_LIMIT, &completed_better_score_first);
-            } else {
-                sort_by_better(&mut result, &completed_better_score_first);
-            }
+        if allow_duplicate_single {
+            let (mut dictionary, mut generated): (Vec<Completed>, Vec<Completed>) =
+                result.into_iter().partition(|candidate| !candidate.segmented_path);
+            sort_by_better(&mut dictionary, &completed_better_rank_first);
+            sort_by_better(&mut generated, &completed_better_score_first);
+            dictionary.extend(generated);
+            dictionary.truncate(CANDIDATE_LIMIT);
+            result = dictionary;
         } else if result.len() > CANDIDATE_LIMIT {
             result = select_exact_top(result, CANDIDATE_LIMIT, &completed_better_rank_first);
         } else {
@@ -645,11 +676,14 @@ impl<'a> Decoder<'a> {
     /// Turn one beam state into a sentence candidate scored to the end with an
     /// EOS transition (port of `evaluateState`). Used for both the end-bucket
     /// candidates and the incomplete-tail states merged into the evidence pool;
-    /// `segmented` is filled only for the visible candidates.
+    /// `segmented` is filled only for the visible candidates. The EOS
+    /// transition alone is what the user model may re-rank: `confidence`
+    /// keeps the default model's value so auto-commit stays calibrated.
     fn evaluate_state(&self, state: &Rc<SentenceState>) -> Completed {
         let ending = self.model.logp(state.prev2, state.prev1, CP_EOS);
+        let scored = self.scored_logp(state.prev2, state.prev1, CP_EOS);
         Completed {
-            score: state.score + ending,
+            score: state.score + scored,
             confidence: state.mass.get() + ending,
             text: state.text.clone(),
             max_rank: state.max_rank.max(1),
@@ -909,6 +943,27 @@ impl SentenceDecoder {
         context: &str,
         allow_duplicate_single: bool,
     ) -> Vec<SentenceCandidate> {
+        Self::decode_with_user(
+            model,
+            lexicon,
+            None,
+            raw_code,
+            context,
+            allow_duplicate_single,
+        )
+    }
+
+    /// [`Self::decode`] with the per-user model blended into the score of the
+    /// generated (multi-entry) sentence paths. Table entries keep table order.
+    #[must_use]
+    pub fn decode_with_user(
+        model: &NgramModel,
+        lexicon: &SentenceLexicon,
+        user: Option<&UserNgram>,
+        raw_code: &str,
+        context: &str,
+        allow_duplicate_single: bool,
+    ) -> Vec<SentenceCandidate> {
         let Some(raw) = normalize(raw_code) else {
             return Vec::new();
         };
@@ -916,7 +971,7 @@ impl SentenceDecoder {
             return Vec::new();
         }
         let length = raw.len();
-        let decoder = Decoder { model, lexicon };
+        let decoder = Decoder { model, lexicon, user };
         let mut buckets = decoder.build_buckets(&raw, allow_duplicate_single, context);
         let (completed, _pool_truncated) =
             decoder.emit(&raw, &mut buckets, length, allow_duplicate_single);
@@ -926,12 +981,13 @@ impl SentenceDecoder {
     /// Decode `raw_code` and also return the early-commit evidence the
     /// probabilistic auto-commit consumes (port of the reference `decode(...,
     /// includeEarlyCommit: true)`). The candidate list is identical to
-    /// [`Self::decode`]; only the evidence is extra. Returns empty candidates
-    /// and default evidence for an unusable input.
+    /// [`Self::decode_with_user`]; only the evidence is extra. Returns empty
+    /// candidates and default evidence for an unusable input.
     #[must_use]
     pub(crate) fn decode_with_evidence(
         model: &NgramModel,
         lexicon: &SentenceLexicon,
+        user: Option<&UserNgram>,
         raw_code: &str,
         context: &str,
         allow_duplicate_single: bool,
@@ -945,7 +1001,7 @@ impl SentenceDecoder {
             return unusable();
         }
         let length = raw.len();
-        let decoder = Decoder { model, lexicon };
+        let decoder = Decoder { model, lexicon, user };
         let mut buckets = decoder.build_buckets(&raw, allow_duplicate_single, context);
         let (completed, pool_truncated) =
             decoder.emit(&raw, &mut buckets, length, allow_duplicate_single);
@@ -978,6 +1034,90 @@ mod tests {
 
     fn edge(text: &str, rank: u16) -> SentenceEdge {
         SentenceEdge { text: text.into(), rank, optimal_single: false }
+    }
+
+    /// Among generated (multi-entry) paths the user model re-ranks: a chain the
+    /// user actually types beats one they do not, an empty model leaves the
+    /// default order untouched, and a dictionary entry for the whole input
+    /// still leads.
+    #[test]
+    fn the_user_model_re_ranks_generated_paths_only() {
+        let Some(base) = crate::ngram::find_model_path().and_then(|path| {
+            crate::ngram::NgramModel::load(path).ok()
+        }) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "hime-sentence-blend-{}.hng",
+            std::process::id()
+        ));
+        let lexicon =
+            SentenceLexicon::parse("甲乙\tab\n甲\tab\n乙\tab\n丙\tcd\n丁\tcd\n");
+        let plain = SentenceDecoder::decode(&base, &lexicon, "abcd", "", true);
+        assert!(plain.len() > 2, "{plain:?}");
+
+        let user = crate::user_ngram::UserNgram::empty(&path);
+        for _ in 0..400 {
+            user.record("乙丁", "");
+        }
+        let learned =
+            SentenceDecoder::decode_with_user(&base, &lexicon, Some(&user), "abcd", "", true);
+        assert_eq!(learned[0].text, "乙丁", "{:?}", learned);
+
+        // An empty model leaves the default ranking untouched.
+        let empty = crate::user_ngram::UserNgram::empty(std::env::temp_dir().join("unused.hng"));
+        let same =
+            SentenceDecoder::decode_with_user(&base, &lexicon, Some(&empty), "abcd", "", true);
+        let order = |list: &[SentenceCandidate]| -> Vec<String> {
+            list.iter().map(|c| c.text.clone()).collect()
+        };
+        assert_eq!(order(&same), order(&plain), "no data, no change");
+
+        // A dictionary entry covering the whole input leads the generated path
+        // the user types most.
+        let with_entry =
+            SentenceLexicon::parse("甲乙\tab\n甲\tab\n乙\tab\n丙\tcd\n丁\tcd\n改\tabcd\n");
+        let list =
+            SentenceDecoder::decode_with_user(&base, &with_entry, Some(&user), "abcd", "", true);
+        assert_eq!(list[0].text, "改", "the table entry keeps its place: {list:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A dictionary entry keeps table order whatever the models say: the whole
+    /// input is one table code, so `f` → 一 / “ / 一定要 stays exactly as the
+    /// table lists it — no model re-ranks one entry against another.
+    #[test]
+    fn dictionary_entries_keep_table_order_with_a_user_model() {
+        let Some(base) = crate::ngram::find_model_path().and_then(|path| {
+            crate::ngram::NgramModel::load(path).ok()
+        }) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "hime-sentence-order-{}.hng",
+            std::process::id()
+        ));
+        let user = crate::user_ngram::UserNgram::empty(&path);
+        // Teach the model that 一定要 follows f far more often than 一 does.
+        for _ in 0..50 {
+            user.record("一定要", "");
+        }
+        let lexicon = SentenceLexicon::parse("一\tf\n“\tf\n一定要\tf\n");
+        let list = SentenceDecoder::decode_with_user(
+            &base,
+            &lexicon,
+            Some(&user),
+            "f",
+            "",
+            true,
+        );
+        let texts: Vec<&str> = list.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["一", "“", "一定要"],
+            "the table decides, the models stay out of it: {texts:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
