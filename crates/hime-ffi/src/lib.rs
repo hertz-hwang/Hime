@@ -17,10 +17,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use hime_core::ngram::{find_model_path, probe_model, set_model_override, NgramModel};
 use hime_core::sentence::SentenceEngine;
 use hime_core::pinyin::SharedPinyin;
+use hime_core::typing::{TypingStats, TypingStatsInfo};
 use hime_core::user_ngram::{UserNgram, UserNgramEdit, UserNgramQuery};
 use hime_core::{
-    ensure_config_layout, ensure_user_ngram_dir, load_scheme, scan_schemes, schemes_dir,
-    user_ngram_path, CodeType, Config, Dictionary, PinyinLexicon, ReverseLookup, Session,
+    ensure_config_layout, ensure_statistics_dir, ensure_user_ngram_dir, load_scheme,
+    scan_schemes, schemes_dir, typing_stats_path, user_ngram_path, CodeType, Config, Dictionary,
+    PinyinLexicon, ReverseLookup, Session,
 };
 
 /// Where candidates come from: a 形码 word table, the whole-sentence engine a
@@ -54,6 +56,10 @@ struct Engine {
     /// scheme declares `user_ngram = true`. Every session of that scheme
     /// records into it, and the sources blend it into their score.
     user_ngram: Option<Arc<UserNgram>>,
+    /// Daily character counts, first-choice counters and the per-scheme key
+    /// histograms (SPEC §9). Loaded once per process and shared by every
+    /// session; a scheme switch only redirects the histogram.
+    typing: Arc<TypingStats>,
 }
 
 impl Engine {
@@ -66,13 +72,19 @@ impl Engine {
             model_path: None,
             pinyin: pinyin_path.map(|path| Arc::new(SharedPinyin::new(path))),
             user_ngram: None,
+            typing: Arc::new(TypingStats::load(typing_stats_path())),
         }
     }
 
     /// Build a fresh session for the current source and config. A 形码整句
     /// source builds a sentence session (long codes decode whole sentences);
-    /// a table source builds the word-lookup session.
+    /// a table source builds the word-lookup session. Every session records
+    /// into the shared typing statistics (SPEC §9).
     fn build_session(&self) -> Session {
+        self.build_source_session().with_stats(Arc::clone(&self.typing))
+    }
+
+    fn build_source_session(&self) -> Session {
         // 反查 shares one pinyin table across schemes; a scheme whose table is
         // missing simply keeps `` ` `` as punctuation. A 全拼 session has no
         // lookup at all — that scheme *is* the pinyin side (SPEC §8.3).
@@ -112,6 +124,9 @@ impl Engine {
     fn rebuild_sessions(&mut self) {
         let ids: Vec<u64> = self.sessions.keys().copied().collect();
         for id in ids {
+            if let Some(previous) = self.sessions.get_mut(&id) {
+                previous.end_run();
+            }
             let session = self.build_session();
             self.sessions.insert(id, session);
         }
@@ -184,8 +199,23 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
         Ok(dict) => {
             let dict = Arc::new(dict);
             let pinyin = pinyin_table_near(Path::new(path));
+            // The legacy entry point has no scheme folder; attribute its key
+            // presses to the table's own folder when there is one.
+            let scheme = Path::new(path)
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             with_engine("hime_init", |slot| {
-                *slot = Some(Engine::new(EngineSource::Table(dict), pinyin));
+                if let Some(previous) = slot.take() {
+                    previous.typing.flush();
+                    if let Some(user) = previous.user_ngram {
+                        user.flush();
+                    }
+                }
+                let engine = Engine::new(EngineSource::Table(dict), pinyin);
+                engine.typing.set_scheme(&scheme);
+                *slot = Some(engine);
             });
             true
         }
@@ -215,12 +245,17 @@ pub extern "C" fn hime_create_session() -> u64 {
     })
 }
 
-/// Destroy a session. Unknown ids are ignored.
+/// Destroy a session. Unknown ids are ignored. The session's typing stretch
+/// is closed into the statistics first, and the counters are flushed, so an
+/// app switch or a quit does not lose the last run.
 #[no_mangle]
 pub extern "C" fn hime_destroy_session(session_id: u64) {
     with_engine("hime_destroy_session", |slot| {
         if let Some(engine) = slot.as_mut() {
-            engine.sessions.remove(&session_id);
+            if let Some(mut session) = engine.sessions.remove(&session_id) {
+                session.end_run();
+            }
+            engine.typing.flush();
         }
     });
 }
@@ -494,12 +529,16 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             }
         },
     };
-    with_engine("hime_select_scheme", |slot| match slot.as_mut() {
+    // The key histogram follows the scheme the user typed with (SPEC §9);
+    // presses recorded before any scheme loads stay unattributed.
+    let scheme_dir = info.dir.clone();
+    let switched = with_engine("hime_select_scheme", |slot| match slot.as_mut() {
         None => {
             let mut engine = Engine::new(source, pinyin);
             engine.config = info.metadata.defaults_for(engine.config);
             engine.model_path = loaded_model;
             engine.user_ngram = user;
+            engine.typing.set_scheme(&scheme_dir);
             *slot = Some(engine);
             true
         }
@@ -524,10 +563,13 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
             if !same_path {
                 engine.pinyin = pinyin.map(|path| Arc::new(SharedPinyin::new(path)));
             }
+            engine.typing.set_scheme(&scheme_dir);
             engine.rebuild_sessions();
+            engine.typing.flush();
             true
         }
-    })
+    });
+    switched
 }
 
 /// Load the shared user model when the data folder resolves. A file the
@@ -816,6 +858,93 @@ fn user_ngram_handle() -> Option<Arc<UserNgram>> {
     live.or_else(load_user_ngram)
 }
 
+/// Describe the typing statistics for the preferences 数据指标 and 键盘用指
+/// pages (SPEC §9), as a NUL-terminated JSON string owned by the caller
+/// (release it with [`hime_free_string`]). The shape is
+/// `{"path":…,"exists":…,"file_bytes":…,"modified_secs":…,"active_scheme":…,
+/// "error":…,"first_day":…,"chars":{"total","today","week","month","year"},
+/// "speed":{"runs","chars","keys","millis","chars_per_min","keys_per_sec",
+/// "code_length"},"first_choice":{"selections","preferred","rate"},
+/// "keyboard":{…},"keyboards":[…],"days":[{"date":…,"chars":…}]}`.
+///
+/// - `chars` counts every committed or released character (punctuation,
+///   letters and digits included); `today` / `week` / `month` / `year` follow
+///   the local calendar;
+/// - `speed` averages the runs that carried more than
+///   [`hime_core::typing::RUN_MIN_CHARS`] characters: characters per minute,
+///   keystrokes per second and keystrokes per character;
+/// - `first_choice.rate` is the share of candidate selections that took the
+///   first entry, in percent;
+/// - `keyboard` is the selected scheme's heat map (`keys`: canonical key
+///   name → presses) with its left/right/two-thumb totals, `balance`
+///   (`100 - |left - right| / (left + right) * 100`) and per-finger shares;
+///   `keyboards` carries one such block per scheme with recorded presses;
+/// - `days` lists the last [`hime_core::typing::HEATMAP_DAYS`] days, oldest
+///   first, for the activity grid.
+///
+/// Works before any scheme is selected and without a data folder (then the
+/// counters are zero and `path` is empty). Reads the live engine's counters,
+/// so it reflects typing that has not been saved yet. Returns null only on a
+/// serialization failure.
+#[no_mangle]
+pub extern "C" fn hime_typing_stats() -> *mut c_char {
+    let info: Option<TypingStatsInfo> =
+        with_engine("hime_typing_stats", |slot| match slot.as_ref() {
+            Some(engine) => Some(engine.typing.info()),
+            None => Some(TypingStats::load(typing_stats_path()).info()),
+        });
+    let Some(info) = info else {
+        eprintln!("hime-ffi: hime_typing_stats panicked while collecting");
+        return ptr::null_mut();
+    };
+    match serde_json::to_string(&info).ok().and_then(|json| CString::new(json).ok()) {
+        Some(s) => s.into_raw(),
+        None => {
+            eprintln!("hime-ffi: failed to serialize the typing statistics");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Create the `statistics` folder under the data directory and return the
+/// statistics file path as a NUL-terminated string owned by the caller
+/// (release it with [`hime_free_string`]). The file itself appears on the
+/// first save. Returns null when no data folder resolves.
+#[no_mangle]
+pub extern "C" fn hime_typing_ensure_dir() -> *mut c_char {
+    match ensure_statistics_dir() {
+        Ok(path) => match CString::new(path.as_os_str().to_string_lossy().into_owned()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => ptr::null_mut(),
+        },
+        Err(e) => {
+            eprintln!("hime-ffi: hime_typing_ensure_dir failed: {e}");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Save the typing statistics now. Typing saves them on a throttle; call
+/// this when the preferences window closes or the app quits. Returns true
+/// when everything is on disk (a missing data folder is nothing to save).
+#[no_mangle]
+pub extern "C" fn hime_typing_save() -> bool {
+    let live = with_engine("hime_typing_save", |slot| {
+        slot.as_ref().map(|engine| Arc::clone(&engine.typing))
+    });
+    let stats = match live {
+        Some(stats) => stats,
+        None => Arc::new(TypingStats::load(typing_stats_path())),
+    };
+    match stats.save() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("hime-ffi: hime_typing_save failed: {e}");
+            false
+        }
+    }
+}
+
 /// Parse a JSON argument for a management call, reporting the reason.
 unsafe fn parse_json_arg<T: serde::de::DeserializeOwned>(
     what: &str,
@@ -843,8 +972,9 @@ unsafe fn parse_json_arg<T: serde::de::DeserializeOwned>(
 
 /// Free a string returned by [`hime_process_key`], [`hime_get_config`],
 /// [`hime_scan_schemes`], [`hime_schemes_dir`], [`hime_model_status`],
-/// [`hime_user_ngram_status`], [`hime_user_ngram_query`] or
-/// [`hime_user_ngram_ensure_dir`]. Null is a no-op.
+/// [`hime_user_ngram_status`], [`hime_user_ngram_query`],
+/// [`hime_user_ngram_ensure_dir`], [`hime_typing_stats`] or
+/// [`hime_typing_ensure_dir`]. Null is a no-op.
 ///
 /// # Safety
 /// `ptr` must be null or a value returned by one of those functions in this

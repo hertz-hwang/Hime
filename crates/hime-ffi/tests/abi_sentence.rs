@@ -42,10 +42,18 @@ fn get_config() -> serde_json::Value {
 
 #[test]
 fn sentence_scheme_decodes_whole_sentences_through_the_abi() {
-    if find_model_path().is_none() {
+    let Some(model) = find_model_path() else {
         eprintln!("skip: no .hng model (set HIME_SENTENCE_MODEL or add data/sentence-ngram.hng)");
         return;
-    }
+    };
+
+    // Selecting a scheme flushes typing statistics (SPEC §9); keep them in a
+    // scratch folder instead of the real user data. The model was resolved
+    // before the data folder moved, so pin it explicitly.
+    let root = std::env::temp_dir().join(format!("hime-abi-sentence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::env::set_var("HIME_CONFIG_HOME", &root);
+    std::env::set_var("HIME_SENTENCE_MODEL", &model);
 
     let dir = sentence_scheme_dir();
     assert!(

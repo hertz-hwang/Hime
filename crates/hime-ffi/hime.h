@@ -222,10 +222,49 @@ char* hime_user_ngram_ensure_dir(void);
  * written (an unreadable file needs a clear first). */
 bool hime_user_ngram_save(void);
 
+/* Describe the typing statistics for the preferences 数据指标 and 键盘用指
+ * pages (docs/SPEC.md §9), as JSON:
+ * {"path":…,"exists":bool,"file_bytes":…,"modified_secs":…,"active_scheme":…,
+ *  "error":…,"first_day":…,
+ *  "chars":{"total","today","week","month","year"},
+ *  "speed":{"runs","chars","keys","millis","chars_per_min","keys_per_sec",
+ *           "code_length"},
+ *  "first_choice":{"selections","preferred","rate"},
+ *  "keyboard":{"scheme","total","left","right","thumb","balance","keys":{…},
+ *              "fingers":[{"id","name","hand","count"}]},
+ *  "keyboards":[… same shape, one per scheme …],
+ *  "days":[{"date":"YYYY-MM-DD","chars":n}]}.
+ *
+ * chars counts every committed or released character, punctuation, letters
+ * and digits included. today/week/month/year follow the local calendar.
+ * speed averages only runs longer than 15 characters: characters per minute,
+ * keystrokes per second and keystrokes per character (the average code
+ * length). first_choice.rate is the percentage of candidate selections that
+ * took the first entry. keyboard is the selected scheme's heat map keyed by
+ * canonical key name, with left/right/two-thumb totals, balance
+ * (100 - |left - right| / (left + right) * 100) and per-finger shares; a key
+ * outside the main block (arrows, function keys) stays in keys but joins no
+ * hand or finger total. days lists the last 371 days, oldest first, for the
+ * activity grid. Reads live counters, so unsaved typing is included. Works
+ * without a data folder (path is empty, counters are zero). The caller must
+ * release the string with hime_free_string. */
+char* hime_typing_stats(void);
+
+/* Create the statistics folder under the data directory and return the
+ * statistics file path as a NUL-terminated string, or NULL when no data
+ * folder resolves. The file appears on the first save. The caller must
+ * release the string with hime_free_string. */
+char* hime_typing_ensure_dir(void);
+
+/* Save the typing statistics now. Typing saves on a 15-second throttle; call
+ * this when the preferences window closes or the app quits. Returns true when
+ * everything is on disk. */
+bool hime_typing_save(void);
+
 /* Release a string returned by hime_process_key, hime_get_config,
  * hime_scan_schemes, hime_schemes_dir, hime_model_status,
- * hime_user_ngram_status, hime_user_ngram_query or
- * hime_user_ngram_ensure_dir. NULL is a no-op. */
+ * hime_user_ngram_status, hime_user_ngram_query, hime_user_ngram_ensure_dir,
+ * hime_typing_stats or hime_typing_ensure_dir. NULL is a no-op. */
 void hime_free_string(char* ptr);
 
 #ifdef __cplusplus

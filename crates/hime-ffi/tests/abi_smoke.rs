@@ -5,7 +5,8 @@ use std::ffi::{CStr, CString};
 
 use hime_ffi::{
     hime_create_session, hime_destroy_session, hime_free_string, hime_get_config, hime_init,
-    hime_process_key, hime_scan_schemes, hime_select_scheme, hime_set_config,
+    hime_process_key, hime_scan_schemes, hime_select_scheme, hime_set_config, hime_typing_save,
+    hime_typing_stats,
 };
 
 const KEY_A: u32 = 97;
@@ -61,6 +62,14 @@ fn select_scheme(path: &str) -> bool {
     unsafe { hime_select_scheme(c.as_ptr()) }
 }
 
+/// Call a JSON-returning ABI function, take ownership of its string, free it.
+fn take_json(ptr: *mut std::os::raw::c_char, what: &str) -> serde_json::Value {
+    assert!(!ptr.is_null(), "{what} returned null");
+    let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+    unsafe { hime_free_string(ptr) };
+    serde_json::from_str(&json).unwrap_or_else(|e| panic!("{what} returned invalid JSON: {e}"))
+}
+
 /// Call hime_set_config with a JSON object, returning the status.
 fn set_config(json: &str) -> bool {
     let c = CString::new(json).unwrap();
@@ -69,6 +78,13 @@ fn set_config(json: &str) -> bool {
 
 #[test]
 fn full_flow_through_c_abi() {
+    // Pin the data folder to a scratch directory: the sessions below record
+    // typing statistics (SPEC §9) and must not touch the real user data.
+    let root = std::env::temp_dir().join(format!("hime-abi-smoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::env::set_var("HIME_CONFIG_HOME", &root);
+    std::fs::create_dir_all(root.join("statistics")).ok();
+
     // Bad init arguments are rejected without poisoning the engine.
     assert!(!unsafe { hime_init(std::ptr::null()) });
     let missing = CString::new("/nonexistent/hime-dict.tsv").unwrap();
@@ -385,4 +401,23 @@ fn full_flow_through_c_abi() {
     assert!(r["commit_text"].is_null());
     assert_eq!(r["preedit"], "");
     hime_destroy_session(reverse);
+
+    // --- 打字统计 (SPEC §9): the session keys and commits above were
+    // recorded under the schemes that were selected at the time ---
+    let stats = take_json(hime_typing_stats(), "hime_typing_stats");
+    assert!(stats["chars"]["total"].as_u64().unwrap() > 0, "{stats}");
+    assert!(stats["first_choice"]["selections"].as_u64().unwrap() > 0);
+    assert_eq!(stats["keyboard"]["scheme"], "liuli_v1", "the last selected scheme");
+    assert!(stats["keyboard"]["keys"]["a"].as_u64().unwrap() >= 1);
+    let schemes: Vec<&str> = stats["keyboards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["scheme"].as_str())
+        .collect();
+    assert!(schemes.contains(&"pinyin"), "{schemes:?}");
+    assert!(schemes.contains(&"liuli_v1"), "{schemes:?}");
+    assert_eq!(stats["days"].as_array().unwrap().len(), 371);
+    assert!(hime_typing_save(), "the counters save to the pinned folder");
+    assert!(root.join("statistics").join("typing.json").is_file());
 }
