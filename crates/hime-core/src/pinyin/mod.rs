@@ -9,19 +9,29 @@
 //! Space, digits, Backspace, paging and punctuation mean exactly what they
 //! mean for 形码.
 //!
+//! Two candidate sources make up a 全拼 answer:
+//!
+//! - [`lexicon`] ranks table words, including 简拼 (`kf` → 开发) and words
+//!   covering a syllable prefix of the input (`开` while typing `kaifa`);
+//! - [`decoder`] walks a word graph over the syllable positions and scores
+//!   whole sentences with the character n-gram, which reaches combinations
+//!   the table has no row for (`huangzhao` → 黄照).
+//!
 //! The lexicon is also the reverse-lookup source: a 形码 or 形码整句 session
 //! prefixes the query with `` ` `` and the candidates carry the current
 //! scheme's complete code in their comment (see
 //! [`Session`](crate::session::Session)).
 //!
-//! Scope: word lookup only. The reference implementation's fuzzy spellings,
-//! typo correction and pinyin whole-sentence decoder are not ported; the
-//! table's words and syllable-prefix matching are.
+//! Scope: word and sentence retrieval from the table plus the shared n-gram
+//! model. The reference implementation's fuzzy spellings, typo correction and
+//! learning channels stay deferred.
 
+pub mod decoder;
 pub mod lexicon;
 pub mod syllables;
 pub mod translator;
 
+pub use decoder::PinyinCandidate;
 pub use lexicon::{PinyinLexicon, PinyinMatch, SharedPinyin};
 pub use syllables::MAX_CODE_LEN;
 pub use translator::PinyinTranslator;

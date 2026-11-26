@@ -140,6 +140,11 @@ impl Eq for SharedPinyin {}
 struct Row {
     text: String,
     code: String,
+    /// The code's fewest-syllable reading, packed. This is what the candidate
+    /// bar displays: the query may match a row through a finer reading
+    /// (`ni ha o xi ang` for `你好像`), but the word reads the way the table
+    /// spells it.
+    reading: u128,
     /// Fewest syllables `code` can be read as; 0 when it cannot be read at
     /// all (kept at the end of the ranking).
     syllables: usize,
@@ -163,7 +168,6 @@ struct KeySpan {
 #[derive(Debug, Clone, Copy)]
 struct Scored<'a> {
     row: &'a Row,
-    packed: u128,
     exact: bool,
     syllable_gap: usize,
     coverage: usize,
@@ -300,9 +304,18 @@ impl PinyinLexicon {
             if !seen.insert((text.to_owned(), code.clone())) {
                 continue;
             }
+            let fewest = syllables::min_syllables(&code).unwrap_or(0);
+            let reading = syllables::syllabifications(&code, 1)
+                .first()
+                .map(|form| {
+                    let parts: Vec<&str> = form.iter().map(String::as_str).collect();
+                    syllables::pack_ids(&parts)
+                })
+                .unwrap_or(0);
             rows.push(Row {
                 text: text.to_owned(),
-                syllables: syllables::min_syllables(&code).unwrap_or(0),
+                syllables: fewest,
+                reading,
                 code,
                 weight,
                 rank: index + 1,
@@ -390,6 +403,24 @@ impl PinyinLexicon {
         self.rows.is_empty()
     }
 
+    /// Whether the table already spells the whole query as one word, reading
+    /// every position as a complete syllable (`nihao` → 你好). A query the
+    /// table answers this way needs no sentence decoding; one it does not is
+    /// exactly the case whole-sentence decoding exists for (`huangzhao`).
+    #[must_use]
+    pub fn spells_in_full_pinyin(&self, input: &str) -> bool {
+        if input.is_empty()
+            || input.len() > MAX_CODE_LEN
+            || !input.bytes().all(|b| b.is_ascii_lowercase())
+        {
+            return false;
+        }
+        syllables::segmentations(input, MAX_QUERY_SEGMENTATIONS)
+            .iter()
+            .filter(|form| form.iter().all(|pattern| pattern.complete))
+            .any(|form| !self.exact_matches(form, 1).is_empty())
+    }
+
     /// Word candidates for a typed pinyin string, best first, at most
     /// `limit`.
     ///
@@ -431,10 +462,9 @@ impl PinyinLexicon {
                 0,
                 0..self.keys.len(),
                 false,
-                &mut |packed, key_syllables, row, ordinal| {
+                &mut |_packed, key_syllables, row, ordinal| {
                     top.offer(Scored {
                         row,
-                        packed,
                         exact: row.code == whole_code,
                         syllable_gap: row.syllables.abs_diff(form.len()),
                         coverage: letters,
@@ -462,10 +492,9 @@ impl PinyinLexicon {
                     prefix_patterns,
                     0,
                     0..self.keys.len(),
-                    &mut |packed, key_syllables, row, ordinal| {
+                    &mut |_packed, key_syllables, row, ordinal| {
                         top.offer(Scored {
                             row,
-                            packed,
                             exact: false,
                             syllable_gap: 0,
                             coverage: prefix_letters,
@@ -507,10 +536,9 @@ impl PinyinLexicon {
         // Within one span the table's own order (weight, then rank) is the
         // pre-selection key, so the ranking tuple is used with every
         // structural field tied.
-        self.collect_exact(&ids, 0, 0..self.keys.len(), &mut |packed, key_syllables, row, ordinal| {
+        self.collect_exact(&ids, 0, 0..self.keys.len(), &mut |_packed, key_syllables, row, ordinal| {
             top.offer(Scored {
                 row,
-                packed,
                 exact: true,
                 syllable_gap: 0,
                 coverage: 0,
@@ -626,7 +654,7 @@ const PREFIX_LOOKBEHIND: usize = 6;
 fn materialize(item: Scored<'_>) -> PinyinMatch {
     PinyinMatch {
         text: item.row.text.clone(),
-        key: split_of(item.packed),
+        key: split_of(item.row.reading),
         code: item.row.code.clone(),
         exact: item.exact,
         syllable_gap: item.syllable_gap,
