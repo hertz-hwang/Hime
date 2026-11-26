@@ -31,11 +31,11 @@ use memmap2::Mmap;
 use serde::Serialize;
 
 /// HFNGMF v1 magic (ASCII `HFNGMF01`).
-const MAGIC: &[u8; 8] = b"HFNGMF01";
+pub(crate) const MAGIC: &[u8; 8] = b"HFNGMF01";
 /// Header is exactly 256 bytes (4 cache lines).
-const HEADER_SIZE: usize = 256;
+pub(crate) const HEADER_SIZE: usize = 256;
 /// Every section start is a multiple of this.
-const ALIGN: usize = 64;
+pub(crate) const ALIGN: usize = 64;
 /// Reserved id meaning "no id" in `cpmap`.
 const INVALID_ID: u16 = 0xFFFF;
 /// Reserved ids and code points (spec §4).
@@ -96,6 +96,28 @@ impl From<std::io::Error> for LoadError {
 #[inline]
 fn bf16_to_f64(h: u16) -> f64 {
     f32::from_bits((h as u32) << 16) as f64
+}
+
+/// Probability → the bf16 bit pattern that encodes it, rounding to nearest and
+/// flushing values below the smallest normal bf16 to zero. The writer below
+/// uses it; the reader mirrors the same value space.
+pub(crate) fn f64_to_bf16(value: f64) -> u16 {
+    if !(value > 0.0) {
+        return 0;
+    }
+    let bits = (value as f32).to_bits();
+    // Round to nearest even on the low 16 bits (the standard f32 → bf16
+    // narrowing), then saturate an all-ones exponent to the largest finite
+    // bf16 so an overflow reads back as a big probability rather than inf.
+    let mut narrowed = bits >> 16;
+    let remainder = bits & 0xFFFF;
+    if remainder > 0x8000 || (remainder == 0x8000 && narrowed & 1 == 1) {
+        narrowed += 1;
+    }
+    if narrowed >= 0x7F80 {
+        return 0x7F7F;
+    }
+    narrowed as u16
 }
 
 /// A loaded `.hng` model. Owns the mapping and the decoded quantization table.
@@ -243,6 +265,11 @@ impl NgramModel {
         } else {
             String::new()
         };
+        // The learned user model is the same container with counts in the row
+        // masses; reading it as a probability model would score nonsense.
+        if meta.contains(crate::user_ngram::USER_NGRAM_MARKER) {
+            return bad("this is a Hime user n-gram model, not a whole-sentence model".into());
+        }
         let build_id_end = data[232..248]
             .iter()
             .position(|&b| b == 0)

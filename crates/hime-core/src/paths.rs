@@ -23,8 +23,12 @@ use std::path::PathBuf;
 const APP_DIR_NAME: &str = "hime";
 /// Subfolder of the data folder that holds user scheme folders.
 const SCHEMES_DIR_NAME: &str = "schemes";
+/// Subfolder of the data folder that holds the learned user n-gram model.
+const USER_NGRAM_DIR_NAME: &str = "userNgram";
 /// File name of the whole-sentence model inside the data folder.
 pub const MODEL_FILE_NAME: &str = "sentence-ngram.hng";
+/// File name of the learned user model inside [`USER_NGRAM_DIR_NAME`].
+pub const USER_NGRAM_FILE_NAME: &str = "user.hng";
 
 /// Treat an environment value as set only when it is present and non-empty.
 fn present(value: Option<&OsStr>) -> Option<&OsStr> {
@@ -78,6 +82,20 @@ pub fn model_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(MODEL_FILE_NAME))
 }
 
+/// `<config_dir>/userNgram`, where the learned user n-gram model lives. The
+/// folder is returned whether or not it exists.
+#[must_use]
+pub fn user_ngram_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(USER_NGRAM_DIR_NAME))
+}
+
+/// `<config_dir>/userNgram/user.hng`, the HFNGMF v1 image of the user's
+/// typing history. The path is returned whether or not the file exists.
+#[must_use]
+pub fn user_ngram_path() -> Option<PathBuf> {
+    user_ngram_dir().map(|dir| dir.join(USER_NGRAM_FILE_NAME))
+}
+
 /// Create the data folder and its `schemes` subfolder if absent, returning the
 /// data folder. It never creates or touches a model file. Returns an error
 /// (kind `NotFound`) when no location can be resolved, or an I/O error from the
@@ -91,6 +109,21 @@ pub fn ensure_config_layout() -> std::io::Result<PathBuf> {
     })?;
     std::fs::create_dir_all(dir.join(SCHEMES_DIR_NAME))?;
     Ok(dir)
+}
+
+/// Create the `userNgram` folder when absent, returning the model path. The
+/// model file itself is created by the first save, not here.
+pub fn ensure_user_ngram_dir() -> std::io::Result<PathBuf> {
+    let path = user_ngram_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "cannot resolve a Hime data folder (set HIME_CONFIG_HOME or HOME)",
+        )
+    })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -189,7 +222,28 @@ mod tests {
                 model_path().as_deref(),
                 Some(root.join(MODEL_FILE_NAME).as_path())
             );
+            assert_eq!(
+                user_ngram_dir().as_deref(),
+                Some(root.join("userNgram").as_path())
+            );
+            assert_eq!(
+                user_ngram_path().as_deref(),
+                Some(root.join("userNgram").join(USER_NGRAM_FILE_NAME).as_path())
+            );
         });
+    }
+
+    #[test]
+    fn ensure_user_ngram_dir_creates_the_folder_without_the_model() {
+        let root = temp_folder("userngram");
+        let encoded = OsString::from(&root);
+        with_config_home(Some(encoded.as_os_str()), || {
+            let path = ensure_user_ngram_dir().expect("folder created");
+            assert_eq!(path, root.join("userNgram").join(USER_NGRAM_FILE_NAME));
+            assert!(root.join("userNgram").is_dir());
+            assert!(!path.exists(), "the model file appears on the first save");
+        });
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

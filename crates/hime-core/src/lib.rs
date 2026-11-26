@@ -36,6 +36,7 @@ pub mod sentence;
 pub mod session;
 pub mod translator;
 pub mod types;
+pub mod user_ngram;
 
 pub use config::{CodeType, Config, MAX_CODE_LEN_LIMIT, PAGE_SIZE_MAX};
 pub use dictionary::{Dictionary, TableFormat};
@@ -43,7 +44,10 @@ pub use diff::{annotate_candidate_diffs, sentence_diff};
 pub use filter::{DedupFilter, Filter, LimitFilter};
 pub use hdict::HDict;
 pub use ngram::NgramModel;
-pub use paths::{config_dir, ensure_config_layout, model_path, schemes_dir};
+pub use paths::{
+    config_dir, ensure_config_layout, ensure_user_ngram_dir, model_path, schemes_dir,
+    user_ngram_dir, user_ngram_path,
+};
 pub use pipeline::Pipeline;
 pub use pinyin::{PinyinLexicon, PinyinMatch, PinyinTranslator};
 pub use reverse::ReverseLookup;
@@ -52,6 +56,10 @@ pub use scheme::{load_scheme, scan_schemes, SchemeError, SchemeInfo, SchemeMetad
 pub use session::Session;
 pub use translator::{TableTranslator, Translator};
 pub use types::{Candidate, DiffKind, DiffSpan, EngineResponse};
+pub use user_ngram::{
+    UserNgram, UserNgramAction, UserNgramEdit, UserNgramEntry, UserNgramInfo, UserNgramQuery,
+    UserNgramQueryResult, UserNgramScope,
+};
 
 // Virtual key codes (SPEC §2.1). Printable keys use their ASCII code:
 // letters are 97..=122, digits are 49..=57.
