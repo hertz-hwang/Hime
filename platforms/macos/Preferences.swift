@@ -212,6 +212,108 @@ struct UserNgramQueryResult: Codable, Equatable {
     let info: UserNgramInfo
 }
 
+/// Mirror of `hime_typing_stats` (SPEC §9): the daily counters, the run
+/// averages, the first-choice rate and the per-scheme key histograms.
+struct TypingStatsInfo: Codable, Equatable {
+    let path: String
+    let exists: Bool
+    let fileBytes: Int64
+    let modifiedSecs: Int64?
+    let activeScheme: String
+    let error: String?
+    let firstDay: String?
+    let chars: CharTotals
+    let speed: SpeedStats
+    let firstChoice: FirstChoiceStats
+    let keyboard: KeyboardStats
+    let keyboards: [KeyboardStats]
+    let days: [DayChars]
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case exists
+        case fileBytes = "file_bytes"
+        case modifiedSecs = "modified_secs"
+        case activeScheme = "active_scheme"
+        case error
+        case firstDay = "first_day"
+        case chars
+        case speed
+        case firstChoice = "first_choice"
+        case keyboard
+        case keyboards
+        case days
+    }
+}
+
+struct CharTotals: Codable, Equatable {
+    let total: Int64
+    let today: Int64
+    let week: Int64
+    let month: Int64
+    let year: Int64
+}
+
+struct SpeedStats: Codable, Equatable {
+    let runs: Int64
+    let chars: Int64
+    let keys: Int64
+    let millis: Int64
+    let charsPerMin: Double
+    let keysPerSec: Double
+    let codeLength: Double
+
+    enum CodingKeys: String, CodingKey {
+        case runs
+        case chars
+        case keys
+        case millis
+        case charsPerMin = "chars_per_min"
+        case keysPerSec = "keys_per_sec"
+        case codeLength = "code_length"
+    }
+}
+
+struct FirstChoiceStats: Codable, Equatable {
+    let selections: Int64
+    let preferred: Int64
+    let rate: Double
+}
+
+struct DayChars: Codable, Equatable, Identifiable {
+    let date: String
+    let chars: Int64
+
+    var id: String { date }
+}
+
+/// One finger's share of a scheme's recorded keys.
+struct FingerShare: Codable, Equatable, Identifiable {
+    let id: String
+    let name: String
+    let hand: String
+    let count: Int64
+}
+
+/// One scheme's keyboard heat map (SPEC §9). Key names are canonical: the
+/// character for printable keys (letters lowercase), `Space`, `Backspace`,
+/// `Enter`, `Escape`, `Tab`, `Left` / `Up` / `Right` / `Down`.
+struct KeyboardStats: Codable, Equatable, Identifiable {
+    let scheme: String
+    let total: Int64
+    let left: Int64
+    let right: Int64
+    let thumb: Int64
+    let balance: Double
+    let keys: [String: Int64]
+    let fingers: [FingerShare]
+
+    var id: String { scheme }
+
+    /// Presses of one canonical key name.
+    func count(_ key: String) -> Int64 { keys[key] ?? 0 }
+}
+
 /// The persisted preferences. Reading them is the shell's job only; the
 /// engine keeps its own clamped copy (SPEC_MACOS §5).
 final class PreferencesModel: ObservableObject {
@@ -284,8 +386,22 @@ final class PreferencesModel: ObservableObject {
     /// after every edit.
     @Published private(set) var userModelStatus: UserNgramStatus?
 
+    /// `hime_typing_stats` mirror for 高级 → 数据指标 and 键盘用指 (SPEC §9);
+    /// refreshed when either page appears and after every commit typed in
+    /// this window's frames.
+    @Published private(set) var typingStats: TypingStatsInfo?
+
+    /// The scheme whose keyboard histogram 键盘用指 draws; empty follows
+    /// whichever scheme is active. Shell display state only — the counts and
+    /// the finger map stay in the engine.
+    @Published var keyboardSchemeChoice: String = ""
+
     /// Drives the live refresh of the 用户模型 page; nil otherwise.
     private var userModelRefreshTimer: Timer?
+
+    /// Drives the live refresh of 数据指标 / 键盘用指; nil while neither page
+    /// is visible.
+    private var typingStatsRefreshTimer: Timer?
 
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
@@ -591,6 +707,41 @@ final class PreferencesModel: ObservableObject {
         }
     }
 
+    /// hime_typing_stats as structured data (SPEC §9). Called when the 数据
+    /// 指标 or 键盘用指 page appears and while it stays visible, so typing in
+    /// another app shows up without reopening the window.
+    func refreshTypingStats() {
+        guard let ptr = hime_typing_stats() else { return }
+        defer { hime_free_string(ptr) }
+        guard let data = String(cString: ptr).data(using: .utf8) else { return }
+        guard let stats = try? JSONDecoder().decode(TypingStatsInfo.self, from: data) else { return }
+        if stats != typingStats {
+            typingStats = stats
+        }
+    }
+
+    /// Create the statistics folder (`hime_typing_ensure_dir`) and save
+    /// whatever the engine holds (`hime_typing_save`). Called when a
+    /// statistics page appears and when the preferences window closes.
+    func ensureTypingStatsStorage() {
+        if let ptr = hime_typing_ensure_dir() {
+            hime_free_string(ptr)
+        }
+        applyTypingStats()
+    }
+
+    /// Persist the live counters and republish them.
+    private func applyTypingStats() {
+        _ = hime_typing_save()
+        refreshTypingStats()
+    }
+
+    /// Save the counters now (window close, app quit). The engine throttles
+    /// saves while typing; this is the explicit flush.
+    func flushTypingStats() {
+        _ = hime_typing_save()
+    }
+
     /// Refresh 用户模型 while its page is visible: commits in other apps
     /// change the in-memory counts without any action in this window. Only a
     /// scheme that learns has live counts; otherwise the page keeps the
@@ -610,6 +761,25 @@ final class PreferencesModel: ObservableObject {
     func stopUserModelRefresh() {
         userModelRefreshTimer?.invalidate()
         userModelRefreshTimer = nil
+    }
+
+    /// Refresh the statistics pages while one of them is visible: typing in
+    /// another app changes the live counters with no action in this window.
+    /// Paused while the window is hidden or another page is selected.
+    func startTypingStatsRefresh() {
+        stopTypingStatsRefresh()
+        refreshTypingStats()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard PreferencesWindowController.shared.isVisible else { return }
+            self?.refreshTypingStats()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        typingStatsRefreshTimer = timer
+    }
+
+    func stopTypingStatsRefresh() {
+        typingStatsRefreshTimer?.invalidate()
+        typingStatsRefreshTimer = nil
     }
 
     /// Query one table of the learned model (`hime_user_ngram_query`).
@@ -712,6 +882,12 @@ final class PreferencesModel: ObservableObject {
     /// refresh timer idles itself while it is not.
     var isVisible: Bool { window?.isVisible == true }
 
+    /// Window close is the natural flush point for the live counters the
+    /// engine only saves on a throttle (SPEC §9).
+    func windowWillClose(_ notification: Notification) {
+        PreferencesModel.shared.flushTypingStats()
+    }
+
     /// Menu action (`HimeInputController.menu()`) and reopen action.
     @objc func showPreferences(_ sender: Any?) {
         if window == nil {
@@ -753,6 +929,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PreferencesWindowController.shared.showPreferences(nil)
         return true
     }
+
+    /// Last chance to persist counters the throttled saves may have missed
+    /// (quit, logout, shutdown).
+    func applicationWillTerminate(_ notification: Notification) {
+        PreferencesModel.shared.flushTypingStats()
+    }
 }
 
 // MARK: - SwiftUI
@@ -761,6 +943,8 @@ private enum PanelSection: String, CaseIterable, Identifiable {
     case basic = "基本"
     case model = "模型"
     case userModel = "用户模型"
+    case metrics = "数据指标"
+    case keyboard = "键盘用指"
     case about = "关于"
 
     var id: String { rawValue }
@@ -795,6 +979,8 @@ private struct PreferencesRootView: View {
                         sidebarRow(.basic, symbol: "gearshape", color: .blue)
                     }
                     Section("高级") {
+                        sidebarRow(.metrics, symbol: "chart.bar.xaxis", color: .green)
+                        sidebarRow(.keyboard, symbol: "keyboard", color: .indigo)
                         sidebarRow(.model, symbol: "cpu", color: .orange)
                         sidebarRow(.userModel, symbol: "person.crop.circle.badge.checkmark", color: .teal)
                     }
@@ -807,6 +993,8 @@ private struct PreferencesRootView: View {
         } detail: {
             switch selection.section {
             case .about: AboutView()
+            case .keyboard: KeyboardView()
+            case .metrics: MetricsView()
             case .model: ModelView()
             case .userModel: UserModelView()
             default: BasicView()
@@ -1223,6 +1411,820 @@ private struct UserModelView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(secs)))
+    }
+}
+
+/// 高级 → 数据指标 (SPEC §9): the typing averages, the first-choice rate and
+/// the daily character grid. All numbers come from `hime_typing_stats`; the
+/// page only formats and draws them.
+private struct MetricsView: View {
+    @EnvironmentObject private var model: PreferencesModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SectionHeading(title: "数据指标")
+            Form {
+                Section("输入表现") {
+                    if let speed = model.typingStats?.speed, speed.runs > 0 {
+                        metricRow(title: "速度",
+                                  hint: "每分钟上屏字数，取每次超过 15 字的输入",
+                                  value: Self.decimal(speed.charsPerMin),
+                                  unit: "字/分")
+                        metricRow(title: "击键",
+                                  hint: "每秒敲键次数，含上屏与编码键",
+                                  value: Self.decimal(speed.keysPerSec),
+                                  unit: "次/秒")
+                        metricRow(title: "码长",
+                                  hint: "平均每个字消耗的击键数",
+                                  value: Self.decimal(speed.codeLength),
+                                  unit: "键/字")
+                        infoRow(title: "样本",
+                                value: "\(Self.grouped(speed.runs)) 段 · \(Self.grouped(speed.chars)) 字 · \(Self.duration(speed.millis))")
+                    } else {
+                        metricRow(title: "速度", hint: "每分钟上屏字数，取每次超过 15 字的输入", value: "—", unit: "字/分")
+                        metricRow(title: "击键", hint: "每秒敲键次数，含上屏与编码键", value: "—", unit: "次/秒")
+                        metricRow(title: "码长", hint: "平均每个字消耗的击键数", value: "—", unit: "键/字")
+                        Text("累计输入超过 15 字的段落才会进入速度、击键与码长的统计。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let choice = model.typingStats?.firstChoice {
+                        metricRow(title: "首选率",
+                                  hint: "选词时直接上屏首选的比例",
+                                  value: choice.selections > 0 ? Self.decimal(choice.rate) : "—",
+                                  unit: "%")
+                        infoRow(title: "选词",
+                                value: "首选 \(Self.grouped(choice.preferred)) 次 / 共 \(Self.grouped(choice.selections)) 次")
+                    }
+                }
+                Section("输入字数") {
+                    if let chars = model.typingStats?.chars {
+                        totalRow(title: "历史输入", value: chars.total)
+                        totalRow(title: "今日", value: chars.today)
+                        totalRow(title: "本周", value: chars.week)
+                        totalRow(title: "本月", value: chars.month)
+                        totalRow(title: "今年", value: chars.year)
+                    } else {
+                        Text("尚无统计数据。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let stats = model.typingStats {
+                        ActivityGrid(days: stats.days)
+                            .padding(.vertical, 4)
+                        if let error = stats.error {
+                            infoRow(title: "诊断", value: error)
+                        }
+                        Text("标点、字母、数字都计为字数；颜色越深当天输入越多。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let stats = model.typingStats {
+                    Section("统计文件") {
+                        infoRow(title: "位置", value: stats.path.isEmpty ? "—" : stats.path)
+                        infoRow(title: "文件大小", value: Self.fileSize(stats.fileBytes))
+                        infoRow(title: "修改时间", value: Self.timestamp(stats.modifiedSecs))
+                        LabeledContent("数据") {
+                            Button("立即保存") { model.ensureTypingStatsStorage() }
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .onAppear {
+            model.ensureTypingStatsStorage()
+            model.startTypingStatsRefresh()
+        }
+        .onDisappear { model.stopTypingStatsRefresh() }
+    }
+
+    private func metricRow(title: String, hint: String, value: String, unit: String) -> some View {
+        LabeledContent {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(value)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
+                Text(unit)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func totalRow(title: String, value: Int64) -> some View {
+        LabeledContent(title) {
+            Text(Self.grouped(value))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func infoRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .help(value)
+        }
+    }
+
+    static func grouped(_ value: Int64) -> String {
+        value.formatted()
+    }
+
+    static func decimal(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+
+    static func duration(_ millis: Int64) -> String {
+        let seconds = millis / 1000
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    static func fileSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    static func timestamp(_ secs: Int64?) -> String {
+        guard let secs, secs > 0 else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(secs)))
+    }
+}
+
+/// The daily character grid of 数据指标 (SPEC §9): GitHub-style weeks. Each
+/// column is one week starting Monday, each cell one day shaded by that
+/// day's character count. The grid sizes itself to the panel width.
+private struct ActivityGrid: View {
+    let days: [DayChars]
+
+    private let gap: CGFloat = 2.5
+    private let weekdayLabelWidth: CGFloat = 14
+    private let headerHeight: CGFloat = 13
+
+    /// Four shading steps above "nothing recorded".
+    private static let levels: [Color] = [
+        Color.accentColor.opacity(0.18),
+        Color.accentColor.opacity(0.38),
+        Color.accentColor.opacity(0.62),
+        Color.accentColor.opacity(0.88),
+    ]
+
+    private struct Column: Identifiable {
+        let id: Int
+        let cells: [DayChars?]
+    }
+
+    /// The weeks of the grid, oldest first; the first and last columns may
+    /// hold fewer than seven days, padded with nil.
+    private var columns: [Column] {
+        guard !days.isEmpty else { return [] }
+        let calendar = Calendar(identifier: .gregorian)
+        let parsedFirst = Self.date(days[0].date)
+        // Pad the first week in front of its first day so Monday is on top.
+        let weekday = parsedFirst.map { (calendar.component(.weekday, from: $0) + 5) % 7 } ?? 0
+        var cells: [DayChars?] = Array(repeating: nil, count: weekday)
+        for day in days {
+            cells.append(day)
+        }
+        while cells.count % 7 != 0 {
+            cells.append(nil)
+        }
+        return stride(from: 0, to: cells.count, by: 7).enumerated().map { index, start in
+            Column(id: index, cells: Array(cells[start..<start + 7]))
+        }
+    }
+
+    /// Character count thresholds: the 20th, 40th, 60th and 80th percentile of
+    /// the recorded days, so the shading adapts to the user's volume.
+    private var thresholds: [Int64] {
+        let values = days.map(\.chars).filter { $0 > 0 }.sorted()
+        guard !values.isEmpty else { return [1, 2, 3, 4] }
+        func percentile(_ fraction: Double) -> Int64 {
+            let index = min(values.count - 1, Int(Double(values.count) * fraction))
+            return max(1, values[index])
+        }
+        return [percentile(0.2), percentile(0.4), percentile(0.6), percentile(0.8)]
+    }
+
+    private var maxChars: Int64 {
+        days.map(\.chars).max() ?? 0
+    }
+
+    private var totalChars: Int64 {
+        days.map(\.chars).reduce(0, +)
+    }
+
+    private static func date(_ key: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.date(from: key)
+    }
+
+    private func shade(_ chars: Int64) -> Color {
+        guard chars > 0 else {
+            return Color.secondary.opacity(0.12)
+        }
+        let limits = thresholds
+        if chars <= limits[0] { return Self.levels[0] }
+        if chars <= limits[1] { return Self.levels[1] }
+        if chars <= limits[2] { return Self.levels[2] }
+        return Self.levels[3]
+    }
+
+    private struct MonthLabel {
+        let text: String
+        let column: Int
+    }
+
+    private var monthLabels: [MonthLabel] {
+        let calendar = Calendar(identifier: .gregorian)
+        var labels: [MonthLabel] = []
+        var lastMonth = -1
+        for (index, column) in columns.enumerated() {
+            guard let first = column.cells.compactMap({ $0 }).first,
+                  let date = Self.date(first.date) else { continue }
+            let month = calendar.component(.month, from: date)
+            if month != lastMonth {
+                labels.append(MonthLabel(text: "\(month)月", column: index))
+                lastMonth = month
+            }
+        }
+        return labels
+    }
+
+    private var weekdayLabels: [String] {
+        ["一", "", "三", "", "五", "", "日"]
+    }
+
+    /// Cell edge computed from the panel width: the whole year fits without
+    /// scrolling at any window size the panel allows.
+    private func cellSize(for width: CGFloat) -> CGFloat {
+        let count = CGFloat(max(columns.count, 1))
+        let available = width - weekdayLabelWidth - 6
+        let size = (available - (count - 1) * gap) / count
+        return min(13, max(6, size))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { proxy in
+                let cell = cellSize(for: proxy.size.width)
+                HStack(alignment: .top, spacing: 6) {
+                    VStack(alignment: .trailing, spacing: gap) {
+                        ForEach(Array(weekdayLabels.enumerated()), id: \.offset) { _, label in
+                            Text(label)
+                                .font(.system(size: 8))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: weekdayLabelWidth, height: cell)
+                        }
+                    }
+                    .padding(.top, headerHeight)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .top, spacing: gap) {
+                            ForEach(columns) { column in
+                                Color.clear
+                                    .frame(width: cell, height: headerHeight)
+                                    .overlay(alignment: .leading) {
+                                        if let label = monthLabels.first(where: { $0.column == column.id }) {
+                                            Text(label.text)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.tertiary)
+                                                .fixedSize()
+                                        }
+                                    }
+                            }
+                        }
+                        HStack(spacing: gap) {
+                            ForEach(columns) { column in
+                                VStack(spacing: gap) {
+                                    ForEach(Array(column.cells.enumerated()), id: \.offset) { _, day in
+                                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                            .fill(day.map { shade($0.chars) } ?? Color.clear)
+                                            .frame(width: cell, height: cell)
+                                            .help(day.map { "\($0.date) · \(Self.format($0.chars)) 字" } ?? "")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(height: headerHeight + 3 + 7 * 13 + 6 * gap)
+            HStack(spacing: 6) {
+                Text("近 \(days.count) 天 · \(Self.format(totalChars)) 字")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("少")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                ForEach(0..<4) { level in
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(Self.levels[level])
+                        .frame(width: 9, height: 9)
+                }
+                Text("多")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    static func format(_ value: Int64) -> String {
+        value.formatted()
+    }
+}
+
+/// 高级 → 键盘用指 (SPEC §9): a drawn Mac keyboard shaded by the selected
+/// scheme's key histogram, beside the left/right balance (键法) and the
+/// per-finger shares (用指分布). Scheme choice only selects which block of
+/// `hime_typing_stats` to draw; the engine owns every count and the finger
+/// map.
+private struct KeyboardView: View {
+    @EnvironmentObject private var model: PreferencesModel
+
+    /// The scheme whose histogram is drawn. An explicit choice wins; the
+    /// engine's active scheme is the default, so the page opens on the
+    /// scheme being typed with.
+    private var selected: KeyboardStats? {
+        guard let stats = model.typingStats else { return nil }
+        let dir = model.keyboardSchemeChoice
+        guard !dir.isEmpty else { return stats.keyboard }
+        return stats.keyboards.first { $0.scheme == dir } ?? stats.keyboard
+    }
+
+    /// Folder names offered by the picker: every scheme with recorded
+    /// presses, plus the active scheme even before its first keystroke.
+    private var schemeChoices: [String] {
+        guard let stats = model.typingStats else { return [] }
+        var dirs = stats.keyboards.map(\.scheme)
+        if !stats.activeScheme.isEmpty && !dirs.contains(stats.activeScheme) {
+            dirs.append(stats.activeScheme)
+        }
+        return dirs
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SectionHeading(title: "键盘用指")
+            Form {
+                Section("方案统计") {
+                    pickerRow(title: "统计方案",
+                              hint: "按方案分别统计热力分布",
+                              selection: $model.keyboardSchemeChoice) {
+                        Text("跟随当前方案（\(schemeName(model.typingStats?.activeScheme ?? ""))）")
+                            .tag("")
+                        ForEach(schemeChoices, id: \.self) { dir in
+                            Text(schemeName(dir)).tag(dir)
+                        }
+                    }
+                    LabeledContent("击键总数") {
+                        Text("\(MetricsView.grouped(selected?.total ?? 0)) 次")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("键盘热力") {
+                    MacKeyboardHeatmap(stats: selected)
+                        .padding(.vertical, 6)
+                    HStack(spacing: 6) {
+                        Text("浅")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        ForEach(1..<6) { level in
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(MacKeyboardHeatmap.shade(level: level))
+                                .frame(width: 22, height: 10)
+                        }
+                        Text("深")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text("箭头与功能键不计入手掌、手指分布。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 6)
+                    }
+                }
+                Section("键法") {
+                    if let keyboard = selected, keyboard.left + keyboard.right > 0 {
+                        LabeledContent("左右手均衡") {
+                            Text("\(String(format: "%.2f", keyboard.balance))%")
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .monospacedDigit()
+                        }
+                        HandBalanceBar(left: keyboard.left,
+                                       right: keyboard.right,
+                                       thumb: keyboard.thumb)
+                            .padding(.vertical, 4)
+                        infoRow(title: "左手", value: "\(MetricsView.grouped(keyboard.left)) 次")
+                        infoRow(title: "右手", value: "\(MetricsView.grouped(keyboard.right)) 次")
+                        infoRow(title: "拇指", value: "\(MetricsView.grouped(keyboard.thumb)) 次")
+                    } else {
+                        Text("切换方案并打几个字后，这里显示左右手的分担。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("用指分布") {
+                    if let keyboard = selected {
+                        FingerBars(fingers: keyboard.fingers, total: keyboard.total)
+                    } else {
+                        Text("尚无击键记录。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let stats = model.typingStats, let error = stats.error {
+                    Section("统计文件") { infoRow(title: "诊断", value: error) }
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .onAppear {
+            model.ensureTypingStatsStorage()
+            model.startTypingStatsRefresh()
+        }
+        .onDisappear { model.stopTypingStatsRefresh() }
+    }
+
+    private func schemeName(_ dir: String) -> String {
+        model.schemes.first { $0.dir == dir }?.name ?? (dir.isEmpty ? "—" : dir)
+    }
+
+    /// Row with a drop-down on the right, titled and hinted on the left.
+    private func pickerRow<Value: Hashable>(title: String, hint: String,
+                                            selection: Binding<Value>,
+                                            @ViewBuilder options: () -> some View) -> some View {
+        LabeledContent {
+            Picker("", selection: selection) { options() }
+                .labelsHidden()
+                .pickerStyle(.menu)
+        } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func infoRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .font(.callout)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Drawn ANSI Mac keyboard: the function row, the main block and the arrow
+/// pad, each key filled by its share of the scheme's presses. Drawn in a
+/// fixed design space and scaled to whatever width the form offers, so the
+/// board always fits; only counts and canonical key names cross from Rust
+/// (SPEC §9).
+private struct MacKeyboardHeatmap: View {
+    let stats: KeyboardStats?
+
+    /// Design space; every length below is in these units and the whole
+    /// board scales to the available width.
+    private static let designWidth: CGFloat = 700
+    private static let designHeight: CGFloat = 208
+    private static let inset: CGFloat = 14
+    private static let key: CGFloat = 35.2
+    private static let gap: CGFloat = 3.9
+    private static let rowHeight: CGFloat = 27.4
+    private static let functionHeight: CGFloat = 16.2
+
+    /// Five heat steps plus the untouched base.
+    static let shades: [Color] = [
+        Color.secondary.opacity(0.10),
+        Color.accentColor.opacity(0.20),
+        Color.accentColor.opacity(0.40),
+        Color.accentColor.opacity(0.62),
+        Color.accentColor.opacity(0.84),
+    ]
+
+    static func shade(level: Int) -> Color {
+        shades[min(max(level, 0), shades.count - 1)]
+    }
+
+    private var maxCount: Int64 {
+        stats?.keys.values.max() ?? 0
+    }
+
+    private func level(_ key: String) -> Int {
+        guard let stats, maxCount > 0, stats.count(key) > 0 else { return 0 }
+        let ratio = Double(stats.count(key)) / Double(maxCount)
+        return min(4, 1 + Int(ratio * 4.0 - 0.0001))
+    }
+
+    private func numberColor(_ key: String) -> Color {
+        level(key) >= 4 ? .white : .primary
+    }
+
+    private struct Cap {
+        let name: String
+        let label: String
+        var width: CGFloat = 1
+        /// Records key presses; modifier and function keys are decoration.
+        var recorded = true
+    }
+
+    private var functionRow: [Cap] {
+        [
+            Cap(name: "Escape", label: "esc"),
+            Cap(name: "BrightnessDown", label: "☀︎", recorded: false),
+            Cap(name: "BrightnessUp", label: "☀︎", recorded: false),
+            Cap(name: "MissionControl", label: "▦", recorded: false),
+            Cap(name: "Launchpad", label: "◫", recorded: false),
+            Cap(name: "KeyboardBacklight", label: "☼", recorded: false),
+            Cap(name: "PrevTrack", label: "◀◀", recorded: false),
+            Cap(name: "PlayPause", label: "▶︎❙❙", recorded: false),
+            Cap(name: "NextTrack", label: "▶▶", recorded: false),
+            Cap(name: "Mute", label: "🔇", recorded: false),
+            Cap(name: "VolumeDown", label: "−", recorded: false),
+            Cap(name: "VolumeUp", label: "+", recorded: false),
+            Cap(name: "Eject", label: "⏏", recorded: false),
+        ]
+    }
+
+    private var mainRows: [[Cap]] {
+        [
+            [
+                Cap(name: "`", label: "`"), Cap(name: "1", label: "1"),
+                Cap(name: "2", label: "2"), Cap(name: "3", label: "3"),
+                Cap(name: "4", label: "4"), Cap(name: "5", label: "5"),
+                Cap(name: "6", label: "6"), Cap(name: "7", label: "7"),
+                Cap(name: "8", label: "8"), Cap(name: "9", label: "9"),
+                Cap(name: "0", label: "0"), Cap(name: "-", label: "-"),
+                Cap(name: "=", label: "="), Cap(name: "Backspace", label: "delete", width: 1.55),
+            ],
+            [
+                Cap(name: "Tab", label: "⇥", width: 1.55), Cap(name: "q", label: "q"),
+                Cap(name: "w", label: "w"), Cap(name: "e", label: "e"), Cap(name: "r", label: "r"),
+                Cap(name: "t", label: "t"), Cap(name: "y", label: "y"), Cap(name: "u", label: "u"),
+                Cap(name: "i", label: "i"), Cap(name: "o", label: "o"), Cap(name: "p", label: "p"),
+                Cap(name: "[", label: "["), Cap(name: "]", label: "]"), Cap(name: "\\", label: "\\"),
+            ],
+            [
+                Cap(name: "CapsLock", label: "⇪", width: 1.8, recorded: false),
+                Cap(name: "a", label: "a"), Cap(name: "s", label: "s"), Cap(name: "d", label: "d"),
+                Cap(name: "f", label: "f"), Cap(name: "g", label: "g"), Cap(name: "h", label: "h"),
+                Cap(name: "j", label: "j"), Cap(name: "k", label: "k"), Cap(name: "l", label: "l"),
+                Cap(name: ";", label: ";"), Cap(name: "'", label: "'"),
+                Cap(name: "Enter", label: "return", width: 1.95),
+            ],
+            [
+                Cap(name: "ShiftLeft", label: "⇧", width: 2.3, recorded: false),
+                Cap(name: "z", label: "z"), Cap(name: "x", label: "x"), Cap(name: "c", label: "c"),
+                Cap(name: "v", label: "v"), Cap(name: "b", label: "b"), Cap(name: "n", label: "n"),
+                Cap(name: "m", label: "m"), Cap(name: ",", label: ","), Cap(name: ".", label: "."),
+                Cap(name: "/", label: "/"),
+                Cap(name: "ShiftRight", label: "⇧", width: 2.35, recorded: false),
+            ],
+            [
+                Cap(name: "fn", label: "fn", width: 1.2, recorded: false),
+                Cap(name: "Control", label: "⌃", width: 1.2, recorded: false),
+                Cap(name: "Option", label: "⌥", width: 1.2, recorded: false),
+                Cap(name: "Command", label: "⌘", width: 1.35, recorded: false),
+                Cap(name: "Space", label: "", width: 5.25),
+                Cap(name: "CommandRight", label: "⌘", width: 1.35, recorded: false),
+                Cap(name: "OptionRight", label: "⌥", width: 1.2, recorded: false),
+            ],
+        ]
+    }
+
+    private var totalPresses: Int64 {
+        stats?.keys.values.reduce(0, +) ?? 0
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            let scale = size.width / Self.designWidth
+            context.scaleBy(x: scale, y: scale)
+            draw(&context)
+        }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(Self.designWidth / Self.designHeight, contentMode: .fit)
+    }
+
+    private func draw(_ context: inout GraphicsContext) {
+        let board = CGRect(x: 0, y: 0, width: Self.designWidth, height: Self.designHeight)
+        context.fill(
+            Path(roundedRect: board, cornerRadius: 10),
+            with: .color(Color.secondary.opacity(0.06))
+        )
+        context.stroke(
+            Path(roundedRect: board.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 10),
+            with: .color(Color.secondary.opacity(0.18)),
+            lineWidth: 0.5
+        )
+
+        // Function row: one cap per number-row column.
+        var x = Self.inset
+        let functionY = Self.inset
+        for cap in functionRow {
+            let rect = CGRect(x: x, y: functionY, width: Self.key * 0.9, height: Self.functionHeight)
+            drawKey(&context, rect: rect, fill: Color.secondary.opacity(0.07),
+                    stroke: Color.secondary.opacity(0.14),
+                    label: cap.label, labelColor: Color.secondary.opacity(0.6),
+                    count: nil, fontSize: 7.5)
+            x += Self.key + Self.gap
+        }
+
+        // Main block.
+        var y = Self.inset + Self.functionHeight + Self.gap * 2
+        for row in mainRows {
+            x = Self.inset
+            for cap in row {
+                let width = Self.key * cap.width + Self.gap * (cap.width - 1)
+                let rect = CGRect(x: x, y: y, width: width, height: Self.rowHeight)
+                let count = cap.recorded ? stats?.count(cap.name) ?? 0 : 0
+                drawKey(&context, rect: rect,
+                        fill: Self.shade(level: cap.recorded ? level(cap.name) : 0),
+                        stroke: Color.secondary.opacity(0.22),
+                        label: cap.label,
+                        labelColor: numberColor(cap.name).opacity(0.8),
+                        count: count > 0 ? Self.format(count) : nil,
+                        fontSize: 9)
+                x += width + Self.gap
+            }
+            y += Self.rowHeight + Self.gap
+        }
+
+        // Arrow pad: the inverted-T cluster inside the bottom row, each key
+        // half height like on the Mac. Up sits above Down.
+        let arrow = Self.key * 0.80
+        let padX = Self.inset + 14.55 * Self.key + 13 * Self.gap + Self.gap * 3
+        let padTop = Self.inset + Self.functionHeight + Self.gap * 2
+            + 4 * (Self.rowHeight + Self.gap)
+        let half = (Self.rowHeight - Self.gap) * 0.5
+        let column = { (index: Int) in padX + CGFloat(index) * (arrow + Self.gap) }
+        drawKey(&context,
+                rect: CGRect(x: column(1), y: padTop, width: arrow, height: half),
+                fill: Self.shade(level: level("Up")),
+                stroke: Color.secondary.opacity(0.22),
+                label: "▲", labelColor: numberColor("Up").opacity(0.8),
+                count: (stats?.count("Up") ?? 0) > 0 ? Self.format(stats?.count("Up") ?? 0) : nil,
+                fontSize: 8)
+        for (index, cap) in [Cap(name: "Left", label: "◀"), Cap(name: "Down", label: "▼"),
+                             Cap(name: "Right", label: "▶")].enumerated() {
+            let rect = CGRect(x: column(index), y: padTop + half + Self.gap,
+                              width: arrow, height: half)
+            let count = stats?.count(cap.name) ?? 0
+            drawKey(&context, rect: rect, fill: Self.shade(level: level(cap.name)),
+                    stroke: Color.secondary.opacity(0.22), label: cap.label,
+                    labelColor: numberColor(cap.name).opacity(0.8),
+                    count: count > 0 ? Self.format(count) : nil, fontSize: 8)
+        }
+
+    }
+
+    private func drawKey(_ context: inout GraphicsContext, rect: CGRect, fill: Color,
+                         stroke: Color, label: String, labelColor: Color,
+                         count: String?, fontSize: CGFloat) {
+        let path = Path(roundedRect: rect, cornerRadius: 3.5)
+        context.fill(path, with: .color(fill))
+        context.stroke(path, with: .color(stroke), lineWidth: 0.5)
+        if !label.isEmpty {
+            let size: CGFloat = label.count == 1 && !(label.first?.isLetter ?? false)
+                ? fontSize + 3 : fontSize
+            let text = Text(label)
+                .font(.system(size: size, weight: .medium))
+                .foregroundColor(labelColor)
+            context.draw(text,
+                         at: CGPoint(x: rect.minX + 4, y: rect.minY + 3),
+                         anchor: .topLeading)
+        }
+        if let count {
+            let text = Text(count)
+                .font(.system(size: 8, weight: .semibold).monospacedDigit())
+                .foregroundColor(labelColor)
+            context.draw(text,
+                         at: CGPoint(x: rect.maxX - 3, y: rect.maxY - 2),
+                         anchor: .bottomTrailing)
+        }
+    }
+
+    static func format(_ value: Int64) -> String {
+        value.formatted()
+    }
+}
+
+/// 键法: the left / right balance with the thumbs as their own segment.
+private struct HandBalanceBar: View {
+    let left: Int64
+    let right: Int64
+    let thumb: Int64
+
+    private var total: Double {
+        Double(max(1, left + right + thumb))
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            HStack(spacing: 2) {
+                segment(width: width * Double(left) / total, color: .blue.opacity(0.75))
+                segment(width: width * Double(thumb) / total, color: .green.opacity(0.55))
+                segment(width: width * Double(right) / total, color: .orange.opacity(0.75))
+            }
+        }
+        .frame(height: 14)
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+
+    private func segment(width: CGFloat, color: Color) -> some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(color)
+            .frame(width: max(width - 2, 0))
+    }
+}
+
+/// 用指分布: one bar per finger in draw order, sized by its share of the
+/// scheme's placed presses.
+private struct FingerBars: View {
+    let fingers: [FingerShare]
+    let total: Int64
+
+    private var placed: Int64 {
+        fingers.map(\.count).reduce(0, +)
+    }
+
+    private func color(_ hand: String) -> Color {
+        switch hand {
+        case "left": return .blue.opacity(0.75)
+        case "right": return .orange.opacity(0.75)
+        default: return .green.opacity(0.6)
+        }
+    }
+
+    /// Largest finger count, so the longest bar fills the track; the label
+    /// still reports the true percentage of placed presses.
+    private var peak: Double {
+        Double(fingers.map(\.count).max() ?? 0)
+    }
+
+    var body: some View {
+        if placed == 0 {
+            Text("尚无击键记录。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(fingers) { finger in
+                let share = Double(finger.count) / Double(placed) * 100
+                let bar = peak > 0 ? Double(finger.count) / peak : 0
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.10))
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(color(finger.hand))
+                                    .frame(width: max(proxy.size.width * bar, 2))
+                            }
+                        }
+                        .frame(width: 260, height: 11)
+                        Text(String(format: "%.2f%%", share))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 52, alignment: .trailing)
+                        Text(MetricsView.grouped(finger.count))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 56, alignment: .trailing)
+                    }
+                } label: {
+                    Text(finger.name)
+                }
+            }
+            Text("击键总数 \(MetricsView.grouped(total))，其中 \(MetricsView.grouped(placed)) 次落在主键区。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
