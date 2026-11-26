@@ -672,14 +672,13 @@ impl Session {
         if text.is_empty() {
             return;
         }
-        if !self.config.user_ngram {
-            // The scheme switched the model off, or never turned it on.
+        // The handle exists exactly when the selected scheme declares
+        // `user_ngram = true`; a scheme switch rebuilds the session.
+        let Some(model) = self.user_ngram.clone() else {
             return;
-        }
-        if let Some(model) = self.user_ngram.as_deref() {
-            model.record(text, &self.commit_context);
-            model.save_if_due();
-        }
+        };
+        model.record(text, &self.commit_context);
+        model.save_if_due();
         // The context is the two characters left of the caret: the previous
         // tail plus this commit's own characters.
         self.commit_context.push_str(text);

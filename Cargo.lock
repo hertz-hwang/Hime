@@ -44,6 +44,7 @@ name = "hime-ffi"
 version = "0.1.0"
 dependencies = [
  "hime-core",
+ "serde",
  "serde_json",
 ]
 
