@@ -7,7 +7,7 @@
 //! syllable. The reference implementation keeps the same list and the same
 //! `lue → lve` / `nue → nve` normalization for ü.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// Longest syllable (`zhuang` / `chuang` / `shuang`).
@@ -73,6 +73,14 @@ pub const ALL: &[&str] = &[
     "zuo", "zui", "zuan", "zun", "ca", "ce", "ci", "cai", "cao", "cou", "can", "cen", "cang",
     "ceng", "cong", "cu", "cuo", "cui", "cuan", "cun", "sa", "se", "si", "sai", "sao", "sou",
     "san", "sen", "sang", "seng", "song", "su", "suo", "sui", "suan", "sun",
+];
+
+/// Syllable initials that may stand alone as a 简拼 position (`kf` → `k` `f`,
+/// `zhg` → `zh` `g`). `y` / `w` count as initials by pinyin spelling even
+/// though they are glides.
+pub const INITIALS: &[&str] = &[
+    "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x", "zh", "ch", "sh", "r",
+    "z", "c", "s", "y", "w",
 ];
 
 /// Pack up to six ASCII bytes into one integer, zero-padded on the right.
@@ -157,6 +165,91 @@ pub fn canonical(syllable: &str) -> &str {
         "nue" => "nve",
         other => other,
     }
+}
+
+/// Number of bits one syllable id occupies in a packed key. 411 syllables fit
+/// in 9 bits, so a key holds up to 14 positions; [`MAX_WORD_SYLLABLES`] (8)
+/// is what the index stores, well inside that.
+const ID_BITS: u32 = 9;
+
+/// Syllable id (1-based; 0 is the wildcard of a 简拼 position). `None` for a
+/// string that is not a complete syllable.
+#[must_use]
+pub fn syllable_id(text: &str) -> Option<u32> {
+    static IDS: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+    let ids = IDS.get_or_init(|| {
+        let mut map = HashMap::with_capacity(ALL.len());
+        for (index, syllable) in ALL.iter().enumerate() {
+            map.entry(*syllable).or_insert(index as u32 + 1);
+        }
+        map
+    });
+    ids.get(canonical(text)).copied()
+}
+
+/// The syllable a packed id stands for.
+#[must_use]
+pub fn syllable_of(id: u32) -> Option<&'static str> {
+    id.checked_sub(1)
+        .and_then(|index| ALL.get(index as usize))
+        .copied()
+}
+
+/// A word's syllable sequence as one integer, one id per position. Two
+/// sequences with the same syllables in the same order pack equal, so the
+/// index is a plain integer sort instead of a string sort. A position that is
+/// not a syllable (a table row with an unsegmentable code) packs as 0, the
+/// wildcard a 简拼 position also uses.
+#[must_use]
+pub fn pack_ids(syllables: &[&str]) -> u128 {
+    let mut key = 0u128;
+    for (depth, syllable) in syllables.iter().enumerate().take(MAX_WORD_SYLLABLES) {
+        key |= u128::from(syllable_id(syllable).unwrap_or(0)) << shift_for(depth);
+    }
+    key
+}
+
+/// Bit offset of position `depth` inside a packed key (position 0 is the most
+/// significant syllable, so an integer comparison is a lexicographic one).
+#[must_use]
+pub const fn shift_for(depth: usize) -> u32 {
+    (128 - ID_BITS * (depth as u32 + 1)) as u32
+}
+
+/// The id at position `depth` of a packed key.
+#[must_use]
+pub fn id_at(key: u128, depth: usize) -> u32 {
+    if depth >= MAX_WORD_SYLLABLES {
+        return 0;
+    }
+    ((key >> shift_for(depth)) & ((1 << ID_BITS) - 1)) as u32
+}
+
+/// Build a packed key from the ids at its positions, in order.
+#[must_use]
+pub fn pack_positions(ids: &[u32]) -> u128 {
+    let mut key = 0u128;
+    for (depth, &id) in ids.iter().enumerate().take(MAX_WORD_SYLLABLES) {
+        key |= u128::from(id) << shift_for(depth);
+    }
+    key
+}
+
+/// How many letters of `bytes[from..]` could be a 简拼 initial (`zh` before
+/// `z`), longest first.
+#[must_use]
+pub fn initial_lengths(bytes: &[u8], from: usize) -> Vec<usize> {
+    let mut lengths: Vec<usize> = INITIALS
+        .iter()
+        .filter(|initial| {
+            let length = initial.len();
+            from + length <= bytes.len()
+                && &bytes[from..from + length] == initial.as_bytes()
+        })
+        .map(|initial| initial.len())
+        .collect();
+    lengths.sort_unstable_by(|a, b| b.cmp(a));
+    lengths
 }
 
 /// Every complete syllable segmentation of `code`, longest syllables tried
@@ -251,8 +344,10 @@ pub struct Pattern {
 }
 
 /// Segment a typed query into syllable positions. Every returned form covers
-/// the whole input; only the last position may be an unfinished prefix. Forms
-/// are ordered by longest syllables first, at most `max` of them.
+/// the whole input; positions are complete syllables, 简拼 initials (`kf` →
+/// `k` `f`, `zhg` → `zh` `g`) or an unfinished syllable prefix (`zho`), and
+/// only the last position may be an unfinished prefix. Forms are ordered by
+/// longest syllables first, at most `max` of them.
 #[must_use]
 pub fn segmentations(input: &str, max: usize) -> Vec<Vec<Pattern>> {
     let bytes = input.as_bytes();
@@ -263,55 +358,110 @@ pub fn segmentations(input: &str, max: usize) -> Vec<Vec<Pattern>> {
     {
         return Vec::new();
     }
-    let mut results: Vec<Vec<Pattern>> = Vec::new();
-    let mut current: Vec<Pattern> = Vec::new();
-    walk_query(bytes, 0, max, &mut current, &mut results);
+    // Dynamic programming over positions keeps the work bounded: 简拼 makes
+    // the number of full segmentations grow exponentially, so each position
+    // keeps only its best `max` prefixes. Insertion order is what breaks
+    // ties, which keeps the candidate order reproducible.
+    let mut best: Vec<Vec<Vec<Pattern>>> = vec![Vec::new(); bytes.len() + 1];
+    best[0] = vec![Vec::new()];
+    for position in 0..bytes.len() {
+        if best[position].is_empty() {
+            continue;
+        }
+        prune_forms(&mut best[position], max);
+        let bases = std::mem::take(&mut best[position]);
+        for token in query_tokens(bytes, position) {
+            let length = token.text.len();
+            let next = position + length;
+            for base in &bases {
+                let mut form = Vec::with_capacity(base.len() + 1);
+                form.extend(base.iter().cloned());
+                form.push(token.clone());
+                best[next].push(form);
+            }
+        }
+        best[position] = bases;
+    }
+    let mut results = std::mem::take(&mut best[bytes.len()]);
+    prune_forms(&mut results, max);
     results
 }
 
-fn walk_query(
-    bytes: &[u8],
-    position: usize,
-    max: usize,
-    current: &mut Vec<Pattern>,
-    results: &mut Vec<Vec<Pattern>>,
-) {
-    if results.len() >= max {
+/// Keep the `max` best of `forms`: fewest positions, then fewest incomplete
+/// ones, then longer leading syllables; ties keep insertion order.
+fn prune_forms(forms: &mut Vec<Vec<Pattern>>, max: usize) {
+    if forms.len() <= max {
         return;
     }
-    if position == bytes.len() {
-        results.push(current.clone());
-        return;
-    }
-    for &length in syllable_lengths(bytes, position).iter().rev() {
-        let text = std::str::from_utf8(&bytes[position..position + length])
-            .expect("pinyin queries are ASCII");
-        current.push(Pattern {
+    let mut decorated: Vec<(usize, Vec<Pattern>)> =
+        std::mem::take(forms).into_iter().enumerate().collect();
+    decorated.sort_by(|(left_index, left), (right_index, right)| {
+        left.len()
+            .cmp(&right.len())
+            .then_with(|| {
+                incomplete_count(left).cmp(&incomplete_count(right))
+            })
+            .then_with(|| {
+                let left_lengths = left.iter().map(|p| p.text.len());
+                let right_lengths = right.iter().map(|p| p.text.len());
+                // Longer leading syllables first (greedy reading).
+                right_lengths.cmp(left_lengths)
+            })
+            .then_with(|| left_index.cmp(right_index))
+    });
+    decorated.truncate(max);
+    forms.extend(decorated.into_iter().map(|(_, form)| form));
+}
+
+fn incomplete_count(form: &[Pattern]) -> usize {
+    form.iter().filter(|pattern| !pattern.complete).count()
+}
+
+/// The tokens a query position may stand for: complete syllables (longest
+/// first), a 简拼 initial, and — for the final position only — an unfinished
+/// syllable prefix.
+fn query_tokens(bytes: &[u8], position: usize) -> Vec<Pattern> {
+    let mut tokens: Vec<Pattern> = Vec::new();
+    for length in syllable_lengths(bytes, position).iter().rev() {
+        let text =
+            std::str::from_utf8(&bytes[position..position + length]).expect("pinyin queries are ASCII");
+        tokens.push(Pattern {
             text: text.to_owned(),
             canonical: canonical(text).to_owned(),
             complete: true,
         });
-        walk_query(bytes, position + length, max, current, results);
-        current.pop();
-        if results.len() >= max {
-            return;
+    }
+    // 简拼: an initial alone stands for any syllable starting with it
+    // (`kf` = kai fa, `zhg` = zhong guo). It is incomplete, so the lookup
+    // matches by prefix and the display keeps the typed letter.
+    for length in initial_lengths(bytes, position) {
+        if is_syllable(bytes, position, length) {
+            continue;
         }
+        let text =
+            std::str::from_utf8(&bytes[position..position + length]).expect("pinyin queries are ASCII");
+        tokens.push(Pattern {
+            text: text.to_owned(),
+            canonical: canonical(text).to_owned(),
+            complete: false,
+        });
     }
     // The tail may be a still-unfinished syllable (`zho`, `kaif`'s `f`).
     // A complete syllable can also be a proper prefix of a longer one (`fa`
     // of `fan`), so require that it is not complete itself.
     let rest = bytes.len() - position;
-    if !is_syllable(bytes, position, rest) && is_prefix(bytes, position, rest) {
-        let text =
-            std::str::from_utf8(&bytes[position..]).expect("pinyin queries are ASCII");
-        current.push(Pattern {
+    if position + rest == bytes.len()
+        && !is_syllable(bytes, position, rest)
+        && is_prefix(bytes, position, rest)
+    {
+        let text = std::str::from_utf8(&bytes[position..]).expect("pinyin queries are ASCII");
+        tokens.push(Pattern {
             text: text.to_owned(),
             canonical: canonical(text).to_owned(),
             complete: false,
         });
-        results.push(current.clone());
-        current.pop();
     }
+    tokens
 }
 
 #[cfg(test)]
@@ -355,10 +505,19 @@ mod tests {
     #[test]
     fn query_segmentations_cover_the_whole_input() {
         let forms = segmentations("kaifa", 8);
-        assert!(forms.iter().all(|form| form.iter().all(|p| p.complete)));
+        assert!(
+            forms[0].iter().all(|p| p.complete),
+            "the all-complete reading ranks first: {forms:?}"
+        );
         assert!(forms.iter().any(|form| form.len() == 2
             && form[0].text == "kai"
             && form[1].text == "fa"));
+        // Readings that spell a position with fewer letters exist only as
+        // 简拼, and every form still covers the whole input.
+        for form in &forms {
+            let covered: String = form.iter().map(|p| p.text.as_str()).collect();
+            assert_eq!(covered, "kaifa");
+        }
 
         let forms = segmentations("kaif", 8);
         let partial: Vec<_> = forms
@@ -377,5 +536,62 @@ mod tests {
         assert!(segmentations("zho", 8).iter().any(|form| {
             form.len() == 1 && form[0].text == "zho" && !form[0].complete
         }));
+    }
+
+    #[test]
+    fn initials_segment_as_abbreviations_in_any_position() {
+        let forms = segmentations("kf", 8);
+        assert!(
+            forms.iter().any(|form| {
+                form.len() == 2 && form[0].text == "k" && form[1].text == "f"
+            }),
+            "kf must read as the two initials: {forms:?}"
+        );
+        // A complete-syllable position is never repeated as an initial.
+        let forms = segmentations("zhg", 8);
+        assert!(forms.iter().any(|form| {
+            form.len() == 2 && form[0].text == "zh" && form[1].text == "g"
+        }));
+        // Mixed input: an initial followed by a full syllable.
+        let forms = segmentations("nhao", 8);
+        assert!(forms.iter().any(|form| {
+            form.len() == 2 && form[0].text == "n" && form[1].text == "hao"
+        }));
+        assert!(
+            segmentations("kaifa", 8)
+                .iter()
+                .any(|form| form.len() == 2 && form[0].text == "kai"),
+            "a full-pinyin reading keeps its complete syllables"
+        );
+    }
+
+    #[test]
+    fn packed_keys_round_trip_and_order_lexicographically() {
+        let ni_hao = pack_ids(&["ni", "hao"]);
+        let ni = pack_ids(&["ni"]);
+        assert_eq!(id_at(ni_hao, 0), syllable_id("ni").unwrap());
+        assert_eq!(id_at(ni_hao, 1), syllable_id("hao").unwrap());
+        assert_eq!(id_at(ni_hao, 2), 0);
+        assert_eq!(pack_positions(&[syllable_id("ni").unwrap(), syllable_id("hao").unwrap()]), ni_hao);
+        // Packed order is syllable order, which is what the index's binary
+        // search relies on.
+        let ni_hao_ma = pack_ids(&["ni", "hao", "ma"]);
+        assert!(ni < ni_hao && ni_hao < ni_hao_ma);
+        assert_eq!(syllable_of(syllable_id("hao").unwrap()), Some("hao"));
+        assert_eq!(syllable_id("lue"), syllable_id("lve"), "ü spellings share one id");
+        assert_eq!(syllable_id("zzz"), None);
+    }
+
+    /// A long 简拼 string stays bounded: the DP keeps only `max` prefixes at
+    /// each position instead of enumerating every segmentation.
+    #[test]
+    fn long_abbreviated_input_segments_with_a_bounded_work_set() {
+        let forms = segmentations("zgrmjcy", 8);
+        assert!(!forms.is_empty());
+        assert!(forms.iter().all(|form| form.len() <= 8));
+        assert!(
+            forms.iter().any(|form| form.iter().all(|p| !p.complete)),
+            "every position may be an initial"
+        );
     }
 }
