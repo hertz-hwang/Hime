@@ -280,8 +280,12 @@ final class PreferencesModel: ObservableObject {
     @Published private(set) var modelStatus: ModelStatus?
 
     /// `hime_user_ngram_status` mirror for 高级 → 用户模型 (SPEC §7.7);
-    /// refreshed wherever the model page is, plus after every edit.
+    /// refreshed on appear, once a second while the page is visible, and
+    /// after every edit.
     @Published private(set) var userModelStatus: UserNgramStatus?
+
+    /// Drives the live refresh of the 用户模型 page; nil otherwise.
+    private var userModelRefreshTimer: Timer?
 
     /// Engine ranges (SPEC §2.3); the steppers cannot leave them.
     static let pageSizeRange = 2...9
@@ -574,12 +578,38 @@ final class PreferencesModel: ObservableObject {
         modelStatus = try? JSONDecoder().decode(ModelStatus.self, from: data)
     }
 
-    /// hime_user_ngram_status as structured data (SPEC §7.7).
+    /// hime_user_ngram_status as structured data (SPEC §7.7). The published
+    /// value only changes when the status changes, so the 1 s refresh on the
+    /// 用户模型 page does not rebuild the form every tick.
     func refreshUserModelStatus() {
         guard let ptr = hime_user_ngram_status() else { return }
         defer { hime_free_string(ptr) }
         guard let data = String(cString: ptr).data(using: .utf8) else { return }
-        userModelStatus = try? JSONDecoder().decode(UserNgramStatus.self, from: data)
+        guard let status = try? JSONDecoder().decode(UserNgramStatus.self, from: data) else { return }
+        if status != userModelStatus {
+            userModelStatus = status
+        }
+    }
+
+    /// Refresh 用户模型 while its page is visible: commits in other apps
+    /// change the in-memory counts without any action in this window. Only a
+    /// scheme that learns has live counts; otherwise the page keeps the
+    /// snapshot taken when it appeared. Paused while the window is hidden.
+    func startUserModelRefresh() {
+        stopUserModelRefresh()
+        refreshUserModelStatus()
+        guard userModelStatus?.active == true else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard PreferencesWindowController.shared.isVisible else { return }
+            self?.refreshUserModelStatus()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        userModelRefreshTimer = timer
+    }
+
+    func stopUserModelRefresh() {
+        userModelRefreshTimer?.invalidate()
+        userModelRefreshTimer = nil
     }
 
     /// Query one table of the learned model (`hime_user_ngram_query`).
@@ -638,10 +668,13 @@ final class PreferencesModel: ObservableObject {
         return true
     }
 
-    /// Save the learned model now (`hime_user_ngram_save`).
+    /// Save the learned model now (`hime_user_ngram_save`), then show the
+    /// file's new size and timestamp.
     @discardableResult
     func saveUserModel() -> Bool {
-        hime_user_ngram_save()
+        let saved = hime_user_ngram_save()
+        refreshUserModelStatus()
+        return saved
     }
 
     /// Create the `userNgram` folder (`hime_user_ngram_ensure_dir`) and
@@ -674,6 +707,10 @@ final class PreferencesModel: ObservableObject {
     @objc static let shared = PreferencesWindowController()
 
     private var window: NSWindow?
+
+    /// Whether the preferences window is on screen; the 用户模型 page's
+    /// refresh timer idles itself while it is not.
+    var isVisible: Bool { window?.isVisible == true }
 
     /// Menu action (`HimeInputController.menu()`) and reopen action.
     @objc func showPreferences(_ sender: Any?) {
@@ -1150,8 +1187,9 @@ private struct UserModelView: View {
         }
         .onAppear {
             model.ensureUserModelFolder()
-            model.refreshUserModelStatus()
+            model.startUserModelRefresh()
         }
+        .onDisappear { model.stopUserModelRefresh() }
     }
 
     private func openFolder() {
