@@ -76,6 +76,7 @@ pub struct Config {
     pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效；形码整句下无效
     pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭；形码整句下无效
     pub ascii_punct: u8,          // 标点输出：0 英文标点 / 1 中文标点，即 metadata 的 ascii_punct，JSON 里就是这个数字（非布尔）；sanitized() 把其它值钳到 1
+    pub user_ngram: bool,         // 学习用户输入并让用户模型参与候选重排，即 metadata 的 user_ngram（§7.7）；方案定义、切换方案时重载，面板只读
     pub english_punct_after_alnum: bool, // 英文/数字后使用英文标点：中文标点下紧随字母/数字的首个表键标点放行给宿主（如 12:30），同一键紧接着再按一次则把那枚半角标点纠正为中文标点；方案不定义它，切换方案时保留
     pub semicolon_quote_select: bool,    // 使用分号/引号二三选：编码态有候选时 `;` 选第 2、`'` 选第 3 候选；方案不定义它，切换方案时保留
     pub show_code_in_window: bool,       // 输入码显示在候选窗（非嵌入模式），关闭时内嵌在输入框；方案不定义它，切换方案时保留
@@ -83,7 +84,7 @@ pub struct Config {
 }
 ```
 
-- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`、`vertical_candidates = false`），未设置时行为与从前完全一致。
+- 默认值等于编译期常量（`MAX_CANDIDATES = 5`、`MAX_CODE_LEN = 4`、`code_type = 形码`、`auto_commit = false`、`auto_commit_length = 4`、`commit_next_code = 0`、`ascii_punct = 0`、`user_ngram = false`、`english_punct_after_alnum = false`、`semicolon_quote_select = false`、`show_code_in_window = false`、`vertical_candidates = false`），未设置时行为与从前完全一致。
 - `CodeType` 的 serde 表示就是 `metadata.toml` 的数字，未知数字向上涨到已知最大档（形码整句）。
 - `max_code_len` 的上限是 `MAX_CODE_LEN_LIMIT = 32`：形码方案是 4，而全拼的一条编码是一整串拼音字母，随包的 `pinyin` 方案声明 `max_code = 32`（§8.2）。
 - 形码整句（`code_type = 3`）下 `max_code_len`、`auto_commit_length`、`commit_next_code` 均为无效配置（整句不按词码长截断、不顶码提交，自动上屏走 §7.6 的整句算法而非唯一候选规则）；macOS 面板在 `type = 3` 时置灰这三行，`auto_commit` 保留可编辑。见 §7.4。
@@ -189,6 +190,7 @@ pub struct Config {
 | `auto_commit_length` | 整数 | 自动上屏所需码长，`auto_commit` 关闭时无效 | 是 |
 | `commit_next_code` | 整数 | 顶码提交的码位 N，0 为关闭 | 是 |
 | `ascii_punct` | 0/1 | 标点输出：0 英文标点 / 1 中文标点，即 `Config.ascii_punct` | 是 |
+| `user_ngram` | 布尔 | 学习用户上屏文字并让用户模型参与候选重排，即 `Config.user_ngram`（§7.7）；随包方案里 琉璃v1 为 `false`、琉璃整句与全拼为 `true` | 否（只读） |
 
 - 表里的值是方案的**默认设置**：选中方案（含每次启动）时引擎配置整体替换为方案默认值，此后用户在设置面板修改（`type` 除外：编码类型由方案决定，面板只读跟随）；切换方案时再按新方案的元数据重载默认值（`page_size`、`english_punct_after_alnum`、`semicolon_quote_select`、`show_code_in_window` 四项不由方案定义，跨方案保留用户设置）。
 - 向前兼容：未知键忽略、缺键取内置默认、越界值经 `Config::sanitized()` 钳位，之后扩展新键不影响旧引擎加载。
@@ -208,6 +210,9 @@ codec、声明长度与头部 CRC 后解压；负载 CRC 只做全量扫描、�
   `<数据目录>/schemes/<名字>`（与随应用打包的 `data/schemes/` 并列），整句 `.hng`
   模型放在 `<数据目录>/sentence-ngram.hng`。模型体积大、不入库、不随 bundle 复制，
   用户目录是其部署位置。
+- 学到的用户模型放在 `<数据目录>/userNgram/user.hng`（`paths::user_ngram_path`，
+  目录由 `ensure_user_ngram_dir` 按需创建；§7.7）。它与整句模型同格式、分文件，
+  按用户共用：换方案不换数据，方案的 `user_ngram` 只决定用不用。
 - 数据目录解析（`hime-core::paths` 是唯一来源，引擎 / CLI / 外壳 / 测试共用），按
   下列顺序取第一个非空值；空字符串视作未设置：
   1. `HIME_CONFIG_HOME`：直接使用，它本身就指向数据目录；
@@ -284,8 +289,42 @@ bool hime_set_model_path(const char* path);
 // null 并给 error。hime_init 前可用（online 为 false）
 char* hime_model_status(void);
 
+// 为面板「用户模型」页（§7.7）描述学到的用户模型，返回 JSON（需调用方
+// 释放）：{"active":bool,"path":…,"folder":…,"info":{…}|null}。active 表示
+// 当前方案声明 user_ngram 并已装载句柄（正在学习、正在参与排序）；
+// path 为 <数据目录>/userNgram/user.hng，folder 是其目录；info 含
+// format/storage/exists/file_bytes/modified_secs/unigrams/bigrams/trigrams/
+// vocab/unigram_total/built_unixtime 与读盘失败时的 error。
+// hime_init 前可用（active 为 false）
+char* hime_user_ngram_status(void);
+
+// 查询用户模型的一张表，返回 JSON（需调用方释放）。json 为
+// {"scope":"char"|"bigram"|"trigram","query":子串,"limit":n,"offset":n}，
+// 缺省为字符表、不过滤、100 行、无偏移；返回
+// {"scope":…,"total":命中行数,"entries":[{"scope","key","prev2","prev",
+//  "text","count","total"}],"info":{…}}，每行 total 是该语境自己的总量。
+// null / 非法 JSON / 序列化失败返回 NULL
+char* hime_user_ngram_query(const char* json);
+
+// 对用户模型执行一次编辑并立即落盘，json 为
+// {"action":"add"|"set"|"delete"|"clear","scope":…,"prev2":字符,
+//  "prev":字符,"text":字符,"count":n}：add 累加（0 视作 1），set 覆盖
+// （0 即删除），delete 删行，clear 清空整份模型并解除坏文件的写入封锁。
+// 非法 JSON、text 不是单个可存字符、模型文件不可读时返回 false
+bool hime_user_ngram_edit(const char* json);
+
+// 按需创建 userNgram 目录并返回模型路径（需调用方释放）；模型文件在首次
+// 保存时出现。无数据目录可解析时返回 NULL
+char* hime_user_ngram_ensure_dir(void);
+
+// 立即保存用户模型（打字中按 15 秒节流；会话结束 / 退出前调用）。
+// 文件不可读而无法写入时返回 false
+bool hime_user_ngram_save(void);
+
 // 释放 Rust 分配的 C 字符串（hime_process_key / hime_get_config /
-// hime_scan_schemes / hime_schemes_dir / hime_model_status 均用它）
+// hime_scan_schemes / hime_schemes_dir / hime_model_status /
+// hime_user_ngram_status / hime_user_ngram_query / hime_user_ngram_ensure_dir
+// 均用它）
 void hime_free_string(char* ptr);
 ```
 
@@ -329,18 +368,27 @@ AGENTS.md §1）。`code_type` 随方案固定（§2.3、§5.1，面板只读）
 
 逐位置 beam：同一文本的状态按 log-sum-exp 合并概率质量，保留的代表按（更小
 max-rank、更高分、更少边）择定；每个位置先按文本去重、再按码长对应的 beam 宽
-截断（`select_exact_top` 精确取前 N），然后才向外扩展。整段单边（键流恰好命中
-一条词图边）保持词库序，只有多词分段之间才按分数竞争；候选一律补 EOS 转移
-打分后再排序，输出附 ␣ 连接的码分段串。`SentenceDecoder::decode(model, lexicon,
-raw_code, context, allow_duplicate_single)` 是纯函数（`context` 仅作模型历史），
-其中 `Rc` 引用图与 `Cell` 仅在单次调用内存在，调用结束即释放，引擎仍 `Send +
-Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
+截断（`select_exact_top` 精确取前 N），然后才向外扩展。候选一律补 EOS 转移
+打分后再排序，输出附 ␣ 连接的码分段串。
+
+排序分两类，这是「码表内条目不重排」的落点（§7.7）：
+
+- **码表条目**：键流恰好命中一条词图边（整段单边），无论这条边是单字还是多字
+  （`f` → 一 / “ / 一定要），都保持词库序，默认模型与用户模型都不重排。
+- **生成整句**：用户用多条表内条目拼出的路径按分数竞争，两个模型都参与（默认
+  n-gram 与用户 n-gram 在概率空间混合）。码表条目恒排在生成整句之前。
+
+`SentenceDecoder::decode(model, lexicon, raw_code, context, allow_duplicate_single)`
+与 `decode_with_user(..., user, ...)` 是纯函数（`context` 仅作模型历史，`user` 为
+可选的用户模型），其中 `Rc` 引用图与 `Cell` 仅在单次调用内存在，调用结束即释放，
+引擎仍 `Send + Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
 
 延迟项（与参考实现中无学习 / 用户数据时等价关闭，均为无数据时归零的附加分项）：
-学习通道 A/B/C1、Aho-Corasick 加权词补充、按会话增量 lattice（纯延迟优化，
-此处每次全量重建）、拼音。概率提前上屏（参考实现的 early-commit）已移植到
-`sentence::auto_commit`，见 §7.6；解码器为它额外暴露 `decode_with_evidence`，
-返回各候选的路径分段与每个前缀的后验份额等证据（`decode` 的候选输出不变）。
+学习通道 A/C1、Aho-Corasick 加权词补充、按会话增量 lattice（纯延迟优化，
+此处每次全量重建）、拼音。通道 B（用户 n-gram）已移植，见 §7.7。概率提前上屏
+（参考实现的 early-commit）已移植到 `sentence::auto_commit`，见 §7.6；解码器为它
+额外暴露 `decode_with_evidence`，返回各候选的路径分段与每个前缀的后验份额等证据
+（解码候选输出不变）。
 
 ### 7.4 引擎门面与状态机
 
@@ -411,6 +459,61 @@ Sync`。`allow_duplicate_single`（单字重码组句）默认开启。
 片段（`context_text`）；候选展示管线仍用空上下文，二者差异由 ≥0.995 份额、闭合边界
 与 `prefix_belongs_to_visible` 约束兜住。参考实现的 supplement（加权词）通道延后，故
 `acceptedTop` 守卫恒成立，已并入上文。
+
+### 7.7 用户模型（`user_ngram`，`userNgram/user.hng`）
+
+`metadata.toml` 的 `user_ngram`（→ `Config.user_ngram`）为 `true` 的方案学习用户的
+上屏历史，并把学到的字级 n-gram 与默认整句模型一起用于候选重排。随包的三个方案
+里，琉璃v1（纯查表）为 `false`，琉璃整句与全拼为 `true`。
+
+**文件与格式**（`core::user_ngram`）
+
+- 一个用户一份数据：`<数据目录>/userNgram/user.hng`（`paths::user_ngram_path`）。
+  与整句模型共用 HFNGMF v1 容器（§7.1）与 mmap 读取形态，但**行质量字段存的是
+  计数**、`λ` 存语境总量，`meta` 声明 `"hime-kind":"user-ngram"`、
+  `"storage":"counts"`。两个读取器互相拒收：整句模型读到 user 文件报错，用户模型
+  读到整句文件也报错，所以两份文件不会被混用。
+- 词表 id 0/1/2 仍是 UNK/BOS/EOS；其后按一元计数降序排。只收 BMP 内可打印字符，
+  含至少一个汉字的文本才学习（标点、英文、纯数字不记），超出 BMP 的字符跳过。
+- 只写冷区（热区上限 H = 3，二元/三元行都在 `bi_rows_cold` / `tri_rows_cold`），
+  但热 × 热三元矩阵照填，标准读取器按同一格式读得出来。容量上限：一元 2 万、
+  二元 20 万、三元 40 万，超出按计数从低到高淘汰并同步语境总量。
+- **跨会话隔离**：每个会话从 BOS 起链，上下文只取本会话已上屏文本的末两字；新会话
+  的首字永远接 BOS，上一个会话的末字不会成为下一个会话首字的语境。同一会话内的
+  多次上屏照常串成一条链。
+- 保存是替换式写入（临时文件 + rename），打字中按 15 秒节流（`save_if_due`），
+  会话结束 / 方案切换 / 面板「立即保存」走 `flush` / `save`。文件读不出来时
+  （损坏或外来格式）**停止写入**并保留用户原文件，直到面板显式「清空」重建。
+
+**打分**（概率空间插值，移植自参考实现 `blendedLogp`）
+
+```text
+α             = min(0.35, T(prev1) / (T(prev1) + 8))
+p_uni(c)      = (c(c)   + 4·p_general(c)) / (N + 4)
+p_bi(c|w)     = (c(w,c) + 2·p_uni(c))     / (T(w) + 2)
+p_user(c|v,w) = (c(v,w,c) + 4·p_bi(c|w))  / (T(v,w) + 4)
+logp          = ln((1 − α)·e^base + α·p_user)
+```
+
+语境从未出现时整式返回 `None`，调用方原样保留默认模型的分数，因此空模型下每个
+排名与没有该功能时逐位相同。学习只改**排序分**：整句解码器把学习增量从 `mass`
+里剥掉，自动上屏的置信度仍按默认模型校准（§7.6）。
+
+**谁被重排**
+
+- 形码整句：只有用户用多条表内条目拼出的整句按混合分竞争；键流命中码表条目的
+  输入（`f` → 一 / “ / 一定要）保持码表序（§7.3）。
+- 全拼：词表单字与整句路径的每个字符分都过混合式，单音节查询（选字）因此由两个
+  模型共同重排；音节词表的非单字行保持词表序。
+- 其它方案（`user_ngram = false`）不学习、不混合。
+
+**管理**（`hime_user_ngram_*`，§6；SPEC_MACOS §5）
+
+- `query` 按表（`char` / `bigram` / `trigram`）、子串和分页列出行，每行带
+  `count` 与语境总量 `total`，一次往返同时带回统计信息。
+- `edit` 有 `add` / `set` / `delete` / `clear` 四个动作，改完立即落盘；`clear`
+  同时解除坏文件的写入封锁。
+- 首选项「高级 → 用户模型」展示状态与路径，并打开管理窗口做增删改查。
 
 ## 8. 全拼（`pinyin`）与反查（`reverse`）
 
