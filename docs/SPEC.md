@@ -213,6 +213,8 @@ codec、声明长度与头部 CRC 后解压；负载 CRC 只做全量扫描、�
 - 学到的用户模型放在 `<数据目录>/userNgram/user.hng`（`paths::user_ngram_path`，
   目录由 `ensure_user_ngram_dir` 按需创建；§7.7）。它与整句模型同格式、分文件，
   按用户共用：换方案不换数据，方案的 `user_ngram` 只决定用不用。
+- 打字统计放在 `<数据目录>/statistics/typing.json`（`paths::typing_stats_path`，
+  目录由 `ensure_statistics_dir` 按需创建；§9）。
 - 数据目录解析（`hime-core::paths` 是唯一来源，引擎 / CLI / 外壳 / 测试共用），按
   下列顺序取第一个非空值；空字符串视作未设置：
   1. `HIME_CONFIG_HOME`：直接使用，它本身就指向数据目录；
@@ -227,7 +229,7 @@ codec、声明长度与头部 CRC 后解压；负载 CRC 只做全量扫描、�
   绝不创建模型文件，无位置可解析时返回 `NotFound`）。
 
 ## 6. C-ABI 接口定义 (`hime-ffi`)
-头文件 `hime.h` 需暴露以下 13 个函数：
+头文件 `hime.h` 需暴露以下 21 个函数：
 ```c
 #include <stdint.h>
 #include <stdbool.h>
@@ -321,10 +323,31 @@ char* hime_user_ngram_ensure_dir(void);
 // 文件不可读而无法写入时返回 false
 bool hime_user_ngram_save(void);
 
+// 描述打字统计（§9），返回 JSON（需调用方释放）：{"path","exists",
+//  "file_bytes","modified_secs","active_scheme","error","first_day",
+//  "chars":{"total","today","week","month","year"},
+//  "speed":{"runs","chars","keys","millis","chars_per_min","keys_per_sec",
+//           "code_length"},
+//  "first_choice":{"selections","preferred","rate"},
+//  "keyboard":{"scheme","total","left","right","thumb","balance","keys":{…},
+//              "fingers":[{"id","name","hand","count"}]},
+//  "keyboards":[…每个方案一份…],
+//  "days":[{"date":"YYYY-MM-DD","chars":n}]}。读的是内存中的实时计数，
+// 未落盘的打字也计入；没有数据目录时 path 为空、计数为零。hime_init 前可用
+char* hime_typing_stats(void);
+
+// 按需创建 statistics 目录并返回统计文件路径（需调用方释放），无数据目录
+// 可解析时返回 NULL。文件在首次保存时出现
+char* hime_typing_ensure_dir(void);
+
+// 立即保存打字统计（打字中按 15 秒节流；首选项窗口关闭、应用退出前调用）。
+// 全部落盘返回 true
+bool hime_typing_save(void);
+
 // 释放 Rust 分配的 C 字符串（hime_process_key / hime_get_config /
 // hime_scan_schemes / hime_schemes_dir / hime_model_status /
-// hime_user_ngram_status / hime_user_ngram_query / hime_user_ngram_ensure_dir
-// 均用它）
+// hime_user_ngram_status / hime_user_ngram_query / hime_user_ngram_ensure_dir /
+// hime_typing_stats / hime_typing_ensure_dir 均用它）
 void hime_free_string(char* ptr);
 ```
 
@@ -656,3 +679,78 @@ logp          = ln((1 − α)·e^base + α·p_user)
   整句解码并打印实际路径；形码 / 形码整句模式下自动装上反查，直接逐键验证 `` ` `` + 拼音。
 - 打包：`build.sh` 原样复制 `data/schemes`，`pinyin` 目录连同 `py.hdict` 一起进
   `Resources/schemes`。
+
+## 9. 打字统计（`typing`、数据指标与键盘用指）
+
+统计记录引擎真正交给宿主的内容，供首选项「高级 → 数据指标」「高级 → 键盘用指」
+两页展示。计数、汇总与持久化全部在 `hime-core::typing`，外壳只渲染
+`hime_typing_stats` 的 JSON。
+
+### 9.1 计数口径
+
+- **字数**：每个上屏字符计 1——`commit_text` 里的字符（候选、标点、原码、整句
+  片段一视同仁），加上引擎放行给宿主的可打印 ASCII（`handled: false` 的空闲
+  英文、数字与符号）。标点、字母、数字都算；只用于组字的编码键不算。
+  `replace_text` 的原地纠正不重复计数。
+- **击键**：每次送进引擎并被处理的按键计 1。外壳直接放行的键（Command 组合等）
+  不经过引擎，不计。热力图按每次按键记录，与上屏字数各走各的。
+- **首选率**：只在选词时计数，`preferred / selections` 的百分比。空格提交、数字
+  选中、二选/三选、唯一候选自动上屏、顶码上屏与标点上屏都算一次选择；焦点在
+  索引 0 时该次选择计入 `preferred`。
+- **单次输入**：一个会话内连续的一段打字。两次按键间隔超过 30 秒
+  （`RUN_IDLE_GAP`）或会话结束（切应用、切方案、退出）就收束；每段按键间隔最多
+  按 2 秒（`KEY_GAP_CAP`）计入耗时，思考停顿不会稀释速度。
+- **速度样本**：只有上屏字数**超过 15**（`RUN_MIN_CHARS`，严格大于）的段才并入
+  速度、击键、码长的平均；不足 15 字的输入仍计入每日字数与首选率，只是不作为
+  速度样本。
+
+### 9.2 指标
+
+- 速度 = 样本总字数 / 样本总耗时 × 60（字/分）。
+- 击键 = 样本总按键 / 样本总耗时（次/秒）。
+- 码长 = 样本总按键 / 样本总字数（键/字）。
+- 历史总字数与今日、本周、本月、今年字数：按本地日历切分。今日取当天；本周从
+  周一累计到今日；本月、今年按 `YYYY-MM`、`YYYY` 前缀从每日计数求和。跨天、跨周、
+  跨月、跨年不需要迁移状态。
+- 活动点阵：最近 371 天（53 周 × 7 天）的每日字数，周一在上的周列排布；分档阈值
+  取非零日字数的 20/40/60/80 百分位，随用户输入量自适应。
+
+### 9.3 键盘统计（按方案）
+
+- 每次按键同时写入整体直方图和**当前方案**的直方图（方案文件夹名即键）。切换
+  方案只切换写入目标，旧方案的分布原样保留；面板可用下拉在已记录方案间切换
+  查看。
+- 键名归一：字母折小写；上档符号归到物理键（`!`→`1`、`:`→`;`、`?`→`/` 等）；
+  空格、回车、退格、Tab、Esc 与四个方向键用固定名。同一物理键只有一根柱子。
+- 左右手与用指：一张内建的 ANSI Mac 键盘映射把主键区（字母、数字、标点、空格）
+  分到八根手指加拇指（`Finger`，稳定 id 如 `l_pinky`、`r_index`）；方向键、功能键
+  等主键区外的键计入热力图，但不进入左右手与手指分布。
+- 键法（左右手均衡）：`100 - |左 - 右| / (左 + 右) × 100`（%），100% 表示左右
+  完全相等；拇指单列，不计入左右。
+- 用指分布：每根手指的按键数及其占已归指按键总数的百分比，顺序固定为左小指 →
+  右小指。
+
+### 9.4 持久化
+
+- 一条 JSON 镜像：`<数据目录>/statistics/typing.json`（`paths::typing_stats_path`，
+  目录由 `ensure_statistics_dir` 按需创建）。字段：`version`、`daily`
+  （`YYYY-MM-DD` → 计数器）、`overall`（同形计数器）、`schemes`（方案文件夹 →
+  键名 → 次数）。计数器含 `chars`、`keys`、`selections`、`preferred`、`runs`、
+  `run_chars`、`run_keys`、`run_millis`。
+- 打字过程中每 15 秒最多落盘一次（临时文件 + rename）；会话销毁、切换方案、引擎
+  被替换与首选项窗口关闭、应用退出时显式 `flush`。读盘失败时记录诊断并在内存中
+  继续；内容无法解析时把原文件改名为 `typing.json.bad-<秒>`，版本不符时改名为
+  `typing.json.v<版本>`，随后从空统计开始，不阻塞输入。
+- 统计文件缺失或没有数据目录时各接口照常返回零值，输入法不受影响。
+
+### 9.5 接入
+
+- FFI（§6）：`hime_typing_stats` 返回整份报告（`path`/`exists`/`file_bytes`/
+  `modified_secs`/`active_scheme`/`error`/`first_day`、`chars`、`speed`、
+  `first_choice`、`keyboard`、`keyboards`、`days`）；`hime_typing_ensure_dir`
+  建目录并返回文件路径；`hime_typing_save` 立即落盘。
+- 会话（§3）：`Session` 持有 `RunMeter` 与 `Arc<TypingStats>`；`process_key`
+  返回响应后按响应记账，空闲超时或 `end_run` 收束当前段；切换方案前先收束旧
+  会话的段。
+- 外壳：`PreferencesModel` 在统计页可见时每秒拉一次 `hime_typing_stats`，窗口
+  关闭与应用退出时调 `hime_typing_save`。
