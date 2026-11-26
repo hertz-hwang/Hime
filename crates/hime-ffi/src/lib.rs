@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use hime_core::ngram::{find_model_path, probe_model, set_model_override};
+use hime_core::ngram::{find_model_path, probe_model, set_model_override, NgramModel};
 use hime_core::sentence::SentenceEngine;
 use hime_core::pinyin::SharedPinyin;
 use hime_core::{
@@ -28,7 +28,9 @@ use hime_core::{
 enum EngineSource {
     Table(Arc<Dictionary>),
     Sentence(Arc<SentenceEngine>),
-    Pinyin(Arc<PinyinLexicon>),
+    /// A 全拼 (type 0) scheme. The model is present when an `.hng` was found:
+    /// then the sessions decode whole sentences, not just table words.
+    Pinyin { lexicon: Arc<PinyinLexicon>, model: Option<Arc<NgramModel>> },
 }
 
 /// Global engine state, present only after a successful `hime_init`.
@@ -71,8 +73,15 @@ impl Engine {
         let session = match &self.source {
             EngineSource::Table(dict) => Session::with_config(Arc::clone(dict), self.config),
             EngineSource::Sentence(engine) => Session::sentence(Arc::clone(engine), self.config),
-            EngineSource::Pinyin(lexicon) => {
+            EngineSource::Pinyin { lexicon, model: None } => {
                 return Session::pinyin(Arc::clone(lexicon), self.config);
+            }
+            EngineSource::Pinyin { lexicon, model: Some(model) } => {
+                return Session::pinyin_sentence(
+                    Arc::clone(lexicon),
+                    Arc::clone(model),
+                    self.config,
+                );
             }
         };
         match (&self.pinyin, &self.source) {
@@ -437,7 +446,24 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
                 // The scheme's own table is also the reverse source, so a
                 // user pinyin scheme serves 反查 in the shape schemes.
                 pinyin = Some(PathBuf::from(&info.table));
-                (EngineSource::Pinyin(Arc::new(lexicon)), None)
+                // Whole-sentence decoding needs the n-gram model; without one
+                // the scheme still types words and 简拼, so a missing model is
+                // reported and not fatal here.
+                let model = find_model_path().and_then(|path| match NgramModel::load(&path) {
+                    Ok(model) => Some((Arc::new(model), path)),
+                    Err(e) => {
+                        eprintln!(
+                            "hime-ffi: 全拼 sentence decoding is off, model {path:?} failed to load: {e}"
+                        );
+                        None
+                    }
+                });
+                let model_path = model.as_ref().map(|(_, path)| path.clone());
+                let source = EngineSource::Pinyin {
+                    lexicon: Arc::new(lexicon),
+                    model: model.map(|(model, _)| model),
+                };
+                (source, model_path)
             }
             Err(e) => {
                 eprintln!("hime-ffi: failed to load pinyin table {:?}: {e}", info.table);
@@ -575,7 +601,13 @@ pub unsafe extern "C" fn hime_set_model_path(path: *const c_char) -> bool {
 pub extern "C" fn hime_model_status() -> *mut c_char {
     let (online, loaded) = with_engine("hime_model_status", |slot| match slot.as_ref() {
         Some(engine) => {
-            (matches!(engine.source, EngineSource::Sentence(_)), engine.model_path.clone())
+            (
+                matches!(
+                    engine.source,
+                    EngineSource::Sentence(_) | EngineSource::Pinyin { model: Some(_), .. }
+                ),
+                engine.model_path.clone(),
+            )
         }
         None => (false, None),
     });

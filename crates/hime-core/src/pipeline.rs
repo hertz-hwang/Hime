@@ -69,6 +69,21 @@ impl Pipeline {
         )
     }
 
+    /// The 全拼 chain with whole-sentence decoding: the same translator, given
+    /// the n-gram model, so a combination the table lacks still reaches the
+    /// window (`huangzhao` → 皇朝 / 黄照). The translator places sentence
+    /// candidates at the head and drops their texts from the word list, so the
+    /// de-dup stage has nothing to do for them.
+    pub fn pinyin_sentence(
+        lexicon: Arc<crate::pinyin::PinyinLexicon>,
+        model: Arc<crate::ngram::NgramModel>,
+    ) -> Self {
+        Self::new(
+            vec![Box::new(crate::pinyin::PinyinTranslator::with_model(lexicon, model))],
+            vec![Box::new(DedupFilter)],
+        )
+    }
+
     /// The 反查 chain: pinyin candidates that already carry the active
     /// scheme's code in `comment`, so there is nothing left to filter.
     pub fn reverse(lookup: Arc<crate::reverse::ReverseLookup>) -> Self {

@@ -180,9 +180,29 @@ impl Session {
     /// `lexicon`. The key model is the table one, with the longer pinyin code
     /// cap and no overflow commit (`Processor` reads `code_type`); paging,
     /// digits, Space and punctuation behave exactly as they do for 形码.
+    ///
+    /// This constructor serves table words (including 简拼). Use
+    /// [`Self::pinyin_sentence`] to add whole-sentence decoding.
     pub fn pinyin(lexicon: Arc<PinyinLexicon>, config: Config) -> Self {
-        let config = Config { code_type: CodeType::Quanpin, ..config }.sanitized();
         let pipeline = Pipeline::pinyin(Arc::clone(&lexicon));
+        Self::pinyin_with(pipeline, config)
+    }
+
+    /// Session for 全拼 with whole-sentence decoding: a word the table does
+    /// not contain still becomes a candidate when `model` scores the
+    /// character chain well (`huangzhao` → 皇朝 / 黄照). The sentence
+    /// candidates head the window; table words, 简拼 and prefix words follow.
+    pub fn pinyin_sentence(
+        lexicon: Arc<PinyinLexicon>,
+        model: Arc<crate::ngram::NgramModel>,
+        config: Config,
+    ) -> Self {
+        let pipeline = Pipeline::pinyin_sentence(Arc::clone(&lexicon), model);
+        Self::pinyin_with(pipeline, config)
+    }
+
+    fn pinyin_with(pipeline: Pipeline, config: Config) -> Self {
+        let config = Config { code_type: CodeType::Quanpin, ..config }.sanitized();
         Self {
             dict: None,
             config,
@@ -1752,6 +1772,27 @@ mod tests {
         s.process_key(b'n' as u32);
         let punct = s.process_key(b',' as u32);
         assert_eq!(punct.commit_text.as_deref(), Some("你，"), "中文标点 joins the candidate");
+    }
+
+    /// A 全拼 session with a model decodes a combination the table lacks and
+    /// commits it with Space, which is the whole point of the sentence stage:
+    /// the shipped table has no `huangzhao` row.
+    #[test]
+    fn pinyin_sentence_session_decodes_out_of_table_words() {
+        let Some(model) = crate::ngram::find_model_path()
+            .and_then(|path| crate::ngram::NgramModel::load(path).ok())
+        else {
+            return;
+        };
+        let lexicon = Arc::new(PinyinLexicon::parse("黄\thuang\t5843\n照\tzhao\t100\n"));
+        let conf = Config { ascii_punct: 1, ..Config::default() };
+        let mut s = Session::pinyin_sentence(lexicon, Arc::new(model), conf);
+        for key in b"huangzhao" {
+            s.process_key(u32::from(*key));
+        }
+        let r = s.process_key(KEY_SPACE);
+        let committed = r.commit_text.expect("the sentence commits");
+        assert!(committed.contains('黄'), "{committed}");
     }
 
     /// 全拼 owns no reverse lookup: `` ` `` stays the punctuation key the

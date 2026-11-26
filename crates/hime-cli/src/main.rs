@@ -15,9 +15,11 @@
 //! everywhere else (see `ngram::find_model_path`: `HIME_SENTENCE_MODEL`, then
 //! the user folder `~/.config/hime/sentence-ngram.hng`, then the bundled
 //! `data/sentence-ngram.hng`). With `--pinyin` the encoding is full pinyin
-//! (全拼) and candidates are pinyin words. In the 形码 and 形码整句 modes ` ``
-//! opens 反查: type full pinyin afterwards and each candidate shows the
-//! scheme's complete code.
+//! (全拼) and candidates are pinyin words, 简拼 abbreviations and — when the
+//! same `.hng` model is found — whole-sentence decodings, so a combination the
+//! pinyin table lacks still appears as a candidate. In the 形码 and 形码整句
+//! modes ` `` ` opens 反查: type full pinyin afterwards and each candidate
+//! shows the scheme's complete code.
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -38,7 +40,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use hime_core::ngram::find_model_path;
+use hime_core::ngram::{find_model_path, NgramModel};
 use hime_core::sentence::SentenceEngine;
 use hime_core::pinyin::SharedPinyin;
 use hime_core::{
@@ -147,7 +149,23 @@ fn main() -> ExitCode {
             lexicon.entry_count(),
             path.display()
         );
-        let mut session = Session::pinyin(lexicon, Config::default());
+        let model = find_model_path().and_then(|model_path| match NgramModel::load(&model_path) {
+            Ok(model) => {
+                eprintln!(
+                    "hime-cli: 全拼 sentence decoding on ({})",
+                    model_path.display()
+                );
+                Some(Arc::new(model))
+            }
+            Err(e) => {
+                eprintln!("hime-cli: 全拼 sentence decoding off, model failed to load: {e}");
+                None
+            }
+        });
+        let mut session = match model {
+            Some(model) => Session::pinyin_sentence(lexicon, model, Config::default()),
+            None => Session::pinyin(lexicon, Config::default()),
+        };
         eprintln!("hime-cli: {HELP}");
         return run(&mut session);
     }
