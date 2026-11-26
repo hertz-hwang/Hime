@@ -585,7 +585,8 @@ pub unsafe extern "C" fn hime_set_model_path(path: *const c_char) -> bool {
 /// "modified_secs":…,"info":{…}|null}`:
 ///
 /// - `online` is true exactly while the loaded engine decodes with the
-///   model, i.e. a 形码整句 scheme is selected (面板显示 onAir/offLine);
+///   model: a 形码整句 scheme, or a 全拼 scheme whose `.hng` loaded (面板显示
+///   onAir/offLine);
 /// - `override_path` / `default_path` report the [`hime_set_model_path`]
 ///   override and `<data-dir>/sentence-ngram.hng` when set/resolvable;
 /// - `path`, `error`, `modified_secs` and `info` describe the file the
