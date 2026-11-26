@@ -102,7 +102,9 @@ pub struct Config {
     pub ascii_punct: u8,
     /// Release the first punctuation key after English letters or digits to
     /// the host as ASCII instead of mapping it to 中文标点 (the `12:30`
-    /// case). Schemes do not define it; it survives a scheme switch.
+    /// case). Pressing that same key again right away corrects the released
+    /// character to 中文标点 (SPEC §3.1). Schemes do not define it; it
+    /// survives a scheme switch.
     pub english_punct_after_alnum: bool,
     /// While a candidate is on screen, `;` selects the 2nd candidate and
     /// `'` the 3rd, clamped to the last candidate of the rendered page; the

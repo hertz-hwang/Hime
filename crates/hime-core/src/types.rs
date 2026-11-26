@@ -63,6 +63,13 @@ pub struct EngineResponse {
     pub handled: bool,
     /// Text to send to the application now, if any.
     pub commit_text: Option<String>,
+    /// Text already in the host that `commit_text` replaces: the ASCII
+    /// punctuation the engine released one press earlier, corrected to
+    /// 中文标点 (SPEC §3.1). The shell replaces the characters before the
+    /// caret when they read exactly this, and inserts otherwise. `None`
+    /// inserts without replacing anything.
+    #[serde(default)]
+    pub replace_text: Option<String>,
     /// In-progress encoding as typed (the raw letters).
     pub preedit: String,
     /// Encoding to display: the first candidate's code split when it covers

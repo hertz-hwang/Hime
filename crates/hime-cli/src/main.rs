@@ -27,7 +27,8 @@
 //!   :1 .. :9      digit keys (candidate selection is :1..:5)
 //!   :punct        toggle ascii_punct (0 = English, 1 = Chinese punctuation)
 //!   :afteralnum   toggle english_punct_after_alnum (first punctuation after
-//!                 letters/digits stays English)
+//!                 letters/digits stays English; pressing it again corrects
+//!                 it to 中文标点)
 //!   :selquote     toggle semicolon_quote_select (';' / ' select 2nd / 3rd)
 //!   :help         show this help
 //!   :quit         exit

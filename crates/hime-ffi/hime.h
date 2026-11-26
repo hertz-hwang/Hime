@@ -55,8 +55,10 @@ void hime_destroy_session(uint64_t session_id);
 
 /* Process one keystroke. Returns a NUL-terminated JSON string describing the
  * EngineResponse, or NULL on unknown session / uninitialized engine. Fields:
- * handled, commit_text, preedit (the raw encoding), code_line (the display
- * line; word-separated when the top candidate supplies a code split),
+ * handled, commit_text, replace_text (text already at the caret that
+ * commit_text overwrites; see the punctuation rule below), preedit (the raw
+ * encoding), code_line (the display line; word-separated when the top
+ * candidate supplies a code split),
  * code_in_window (render code_line in the candidate window instead of inline),
  * candidates (each with text, comment, code and spans), focus (zero-based
  * focused candidate in candidates), page (one-based), page_count. A candidate
@@ -69,6 +71,10 @@ void hime_destroy_session(uint64_t session_id);
  * and, in punctuation mode, for
  * punctuation the mapping does not claim (also the first mapped punctuation
  * right after English letters/digits when english_punct_after_alnum is on).
+ * Pressing that same punctuation key again right away corrects it: the
+ * engine answers handled true with the 中文标点 in commit_text and the ASCII
+ * character in replace_text, which the shell must replace in place when it
+ * still reads exactly that before the caret (insert at the caret otherwise).
  * When semicolon_quote_select is on and a candidate is shown, ';' and '''
  * select the 2nd/3rd candidate instead of emitting punctuation.
  *
@@ -89,7 +95,8 @@ char* hime_process_key(uint64_t session_id, uint32_t key_code, uint32_t modifier
  *  "show_code_in_window":false,"vertical_candidates":false}.
  * ascii_punct is 0 (English punctuation) or 1 (Chinese punctuation).
  * english_punct_after_alnum releases the first punctuation right after
- * English letters/digits to the host (e.g. the ':' in 12:30).
+ * English letters/digits to the host (e.g. the ':' in 12:30); pressing that
+ * key a second time corrects the released character to 中文标点.
  * semicolon_quote_select makes ';' pick the 2nd candidate and ''' the 3rd
  * while a candidate stands. show_code_in_window renders the encoding in the
  * candidate window instead of inline. vertical_candidates stacks the window

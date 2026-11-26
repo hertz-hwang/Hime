@@ -75,6 +75,21 @@ pub fn is_mapped(ascii: u8) -> bool {
     matches!(ascii, b'\'' | b'"') || DIRECT.iter().any(|(key, _)| *key == ascii)
 }
 
+/// Whether the key's 中文标点 text differs from its ASCII character, i.e.
+/// whether correcting a released press would change what stands on screen.
+/// `/`, `` ` `` and `~` map to themselves, so pressing them twice is two
+/// characters rather than one corrected one.
+#[must_use]
+pub fn is_correctable(ascii: u8) -> bool {
+    match ascii {
+        b'\'' | b'"' => true,
+        _ => DIRECT
+            .iter()
+            .find(|(key, _)| *key == ascii)
+            .is_some_and(|(_, text)| *text != char::from(ascii).to_string()),
+    }
+}
+
 /// Printable ASCII punctuation and symbol keys (nothing letters or digits
 /// use): the class the engine may release to the host instead of swallowing,
 /// in idle or mid-composition.
@@ -170,6 +185,26 @@ mod tests {
         for key in RELEASED.iter().chain(b"01a") {
             assert_eq!(map(*key, &mut quotes), None, "key {key:?}");
             assert!(!is_mapped(*key), "key {key:?} must pass through");
+        }
+    }
+
+    /// The correction applies only where 中文标点 differs from the ASCII
+    /// character. `/`, `` ` `` and `~` map to themselves, so a second press
+    /// types a second character instead of rewriting the first.
+    #[test]
+    fn only_keys_with_a_distinct_mapping_are_correctable() {
+        for key in DIRECT.iter().map(|(key, _)| *key).chain([b'\'', b'"']) {
+            let differs = DIRECT
+                .iter()
+                .find(|(k, _)| *k == key)
+                .is_none_or(|(_, text)| *text != char::from(key).to_string());
+            assert_eq!(is_correctable(key), differs, "key {key:?}");
+        }
+        for key in [b'/', b'`', b'~'] {
+            assert!(!is_correctable(key), "key {key:?} maps to itself");
+        }
+        for key in [b':', b',', b';', b'?', b'^', b'\'', b'"'] {
+            assert!(is_correctable(key), "key {key:?} corrects to 中文标点");
         }
     }
 

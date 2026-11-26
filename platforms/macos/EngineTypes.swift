@@ -42,6 +42,11 @@ struct EngineCandidate: Decodable {
 struct EngineResponse: Decodable {
     let handled: Bool
     let commitText: String?
+    /// Text already in the host that `commitText` replaces: the ASCII
+    /// punctuation the engine released on the previous press, corrected to
+    /// 中文标点 (SPEC §3.1). The shell replaces the characters before the
+    /// caret only when they read exactly this, and inserts otherwise.
+    let replaceText: String?
     /// Raw encoding as typed.
     let preedit: String
     /// Display line: the top candidate's word-separated split when it covers
@@ -60,6 +65,7 @@ struct EngineResponse: Decodable {
     enum CodingKeys: String, CodingKey {
         case handled
         case commitText = "commit_text"
+        case replaceText = "replace_text"
         case preedit
         case codeLine = "code_line"
         case codeInWindow = "code_in_window"

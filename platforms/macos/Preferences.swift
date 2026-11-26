@@ -662,7 +662,7 @@ private struct BasicView: View {
                               hint: "开启输出中文标点，关闭输出英文标点",
                               isOn: model.asciiPunctSwitch)
                     switchRow(title: "英文/数字后使用英文标点",
-                              hint: "输入英文或数字后的首个标点保持英文，如 12:30",
+                              hint: "输入英文或数字后的首个标点保持英文，如 12:30；同一标点连按两次则改为中文标点",
                               isOn: $model.englishPunctAfterAlnum)
                     switchRow(title: "使用分号/引号二三选",
                               hint: "有候选时分号选第二、引号选第三；候选不足时顺延",

@@ -213,7 +213,9 @@ pub extern "C" fn hime_destroy_session(session_id: u64) {
 /// `ascii_punct = 1` mode the engine commits full-width punctuation for
 /// mapped keys, and answers `handled: false` for the rest so the host
 /// inserts them itself. With `english_punct_after_alnum` the first mapped
-/// punctuation right after English letters or digits is released too, and
+/// punctuation right after English letters or digits is released too and
+/// pressing that same key again answers a correction (`replace_text` holds
+/// the ASCII character to overwrite with `commit_text`), and
 /// with `semicolon_quote_select` a standing candidate turns `;` and `'`
 /// into 2nd/3rd-selection keys (SPEC §3).
 ///

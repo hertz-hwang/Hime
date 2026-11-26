@@ -72,6 +72,14 @@ pub enum Action {
     /// Commit the 中文标点 text of this ASCII punctuation key (the
     /// `Config::ascii_punct = 1` mode) and stay idle.
     CommitPunct(u8),
+    /// Release this ASCII punctuation key to the host as-is, the first one
+    /// right after English letters or digits (`Config::english_punct_after_alnum`,
+    /// the `12:30` case). The session remembers the release so the same key
+    /// pressed again can correct it (SPEC §3.1).
+    ReleasePunct(u8),
+    /// Replace the ASCII punctuation the previous press released with this
+    /// key's 中文标点 text: the same punctuation key pressed twice.
+    CorrectPunct(u8),
     /// Commit the focused candidate (the raw letters when no candidate
     /// matches) followed by the 中文标点 text of this key, and end the
     /// composition.
@@ -125,14 +133,18 @@ impl Processor {
     /// punctuation mode. `after_alnum` reports whether the text the engine
     /// last sent or released to the host ended in an English letter or digit
     /// (the state the `english_punct_after_alnum` rule reads; [`Session`]
-    /// owns it). `reverse` says whether 反查 is available and open; while it
-    /// is open `code` is the pinyin query behind the `` ` ``.
+    /// owns it). `released_punct` is the punctuation key that rule released
+    /// last, still standing at the host's caret; `Some(key)` makes a second
+    /// press of that key a correction. `reverse` says whether 反查 is
+    /// available and open; while it is open `code` is the pinyin query
+    /// behind the `` ` ``.
     pub fn decide(
         key: u32,
         code: &str,
         candidate_count: usize,
         config: Config,
         after_alnum: bool,
+        released_punct: Option<u8>,
         reverse: ReverseState,
     ) -> Action {
         let letter = (ASCII_A..=ASCII_Z).contains(&key).then_some(key as u8);
@@ -145,20 +157,27 @@ impl Processor {
         // mapped punctuation, everything else belongs to the application.
         // With `english_punct_after_alnum` on, the first punctuation right
         // after English letters or digits is released instead: a time like
-        // `12:30` must reach the host in ASCII. `` ` `` opens 反查 in a scheme
-        // that has codes to look up (SPEC §8.3).
+        // `12:30` must reach the host in ASCII. A second press of the same
+        // key replaces that released character with 中文标点, which is how
+        // the ASCII time is fixed up without reaching for the host. `` ` ``
+        // opens 反查 in a scheme that has codes to look up (SPEC §8.3).
         if code.is_empty() {
             if key == KEY_BACKTICK && reverse == ReverseState::Closed {
                 return Action::StartReverse;
             }
             return match letter {
                 Some(byte) => Action::AppendCode(byte),
-                None
-                    if chinese_punct(config)
-                        && is_punct_key(key)
-                        && !(config.english_punct_after_alnum && after_alnum) =>
-                {
-                    Action::CommitPunct(key as u8)
+                None if chinese_punct(config) && is_punct_key(key) => {
+                    if config.english_punct_after_alnum
+                        && released_punct == u8::try_from(key).ok()
+                        && punct::is_correctable(key as u8)
+                    {
+                        Action::CorrectPunct(key as u8)
+                    } else if config.english_punct_after_alnum && after_alnum {
+                        Action::ReleasePunct(key as u8)
+                    } else {
+                        Action::CommitPunct(key as u8)
+                    }
                 }
                 None => Action::Pass,
             };
@@ -377,7 +396,15 @@ mod tests {
     /// Ordinary decision with 反查 unavailable: the shape nearly every case
     /// below has.
     fn decide(key: u32, code: &str, candidates: usize, config: Config, after_alnum: bool) -> Action {
-        Processor::decide(key, code, candidates, config, after_alnum, ReverseState::Unsupported)
+        Processor::decide(
+            key,
+            code,
+            candidates,
+            config,
+            after_alnum,
+            None,
+            ReverseState::Unsupported,
+        )
     }
 
     fn idle(key: u32) -> Action {
@@ -800,7 +827,7 @@ mod tests {
         };
         assert_eq!(
             decide(b',' as u32, "", 0, cn, true),
-            Action::Pass,
+            Action::ReleasePunct(b','),
             "after alphanumerics , reaches the host as ,"
         );
         assert_eq!(decide(b',' as u32, "", 0, cn, false), Action::CommitPunct(b','));
@@ -814,6 +841,56 @@ mod tests {
             decide(b',' as u32, "", 0, off, true),
             Action::CommitPunct(b','),
             "the rule is inert while the switch is off"
+        );
+    }
+
+    /// A second press of the released key is a correction: 中文标点 in place of
+    /// the ASCII character the host inserted. Only the very key that was
+    /// released corrects, only while it still stands at the caret.
+    #[test]
+    fn second_press_of_the_released_punctuation_corrects_it() {
+        let cn = Config {
+            ascii_punct: 1,
+            english_punct_after_alnum: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            Processor::decide(
+                b':' as u32, "", 0, cn, false, Some(b':'), ReverseState::Unsupported
+            ),
+            Action::CorrectPunct(b':'),
+            "the same key pressed twice becomes 中文标点 even with the rule idle"
+        );
+        assert_eq!(
+            Processor::decide(
+                b';' as u32, "", 0, cn, false, Some(b':'), ReverseState::Unsupported
+            ),
+            Action::CommitPunct(b';'),
+            "another punctuation key is an ordinary 中文标点 commit"
+        );
+        let off = Config { ascii_punct: 1, ..Config::default() };
+        assert_eq!(
+            Processor::decide(
+                b':' as u32, "", 0, off, false, Some(b':'), ReverseState::Unsupported
+            ),
+            Action::CommitPunct(b':'),
+            "with the switch off nothing is ever released, so nothing corrects"
+        );
+        assert_eq!(
+            Processor::decide(
+                b':' as u32, "a", 1, cn, false, Some(b':'), ReverseState::Unsupported
+            ),
+            Action::CommitCandidatePunct(b':'),
+            "mid-composition the punctuation still joins the candidate commit"
+        );
+        // `/`, `` ` `` and `~` read the same in both widths, so a second
+        // press types a second character rather than rewriting the first.
+        assert_eq!(
+            Processor::decide(
+                b'/' as u32, "", 0, cn, false, Some(b'/'), ReverseState::Unsupported
+            ),
+            Action::CommitPunct(b'/'),
+            "a key whose mapping equals its ASCII form is not correctable"
         );
     }
 
@@ -890,18 +967,18 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            Processor::decide(KEY_A, "abcd", 3, quanpin, false, ReverseState::Unsupported),
+            Processor::decide(KEY_A, "abcd", 3, quanpin, false, None, ReverseState::Unsupported),
             Action::AppendCode(b'a'),
             "a word cap of 4 does not apply to a pinyin code"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "abcd", 3, quanpin, false, ReverseState::Unsupported),
+            Processor::decide(KEY_A, "abcd", 3, quanpin, false, None, ReverseState::Unsupported),
             Action::AppendCode(b'a'),
             "nor does the overflow rule"
         );
         let full = "a".repeat(PINYIN_MAX_CODE_LEN);
         assert_eq!(
-            Processor::decide(KEY_A, &full, 1, quanpin, false, ReverseState::Unsupported),
+            Processor::decide(KEY_A, &full, 1, quanpin, false, None, ReverseState::Unsupported),
             Action::Noop,
             "the pinyin cap still ends the code"
         );
@@ -913,22 +990,22 @@ mod tests {
     fn backtick_opens_reverse_only_when_available() {
         let config = Config::default();
         assert_eq!(
-            Processor::decide(KEY_BACKTICK, "", 0, config, false, ReverseState::Closed),
+            Processor::decide(KEY_BACKTICK, "", 0, config, false, None, ReverseState::Closed),
             Action::StartReverse
         );
         assert_eq!(
-            Processor::decide(KEY_BACKTICK, "", 0, config, false, ReverseState::Unsupported),
+            Processor::decide(KEY_BACKTICK, "", 0, config, false, None, ReverseState::Unsupported),
             Action::Pass,
             "an unsupported lookup leaves the key to the host in English mode"
         );
         let cn = Config { ascii_punct: 1, ..Config::default() };
         assert_eq!(
-            Processor::decide(KEY_BACKTICK, "", 0, cn, false, ReverseState::Unsupported),
+            Processor::decide(KEY_BACKTICK, "", 0, cn, false, None, ReverseState::Unsupported),
             Action::CommitPunct(b'`'),
             "and to the punctuation table in 中文标点 mode"
         );
         assert_eq!(
-            Processor::decide(KEY_A, "", 0, config, false, ReverseState::Closed),
+            Processor::decide(KEY_A, "", 0, config, false, None, ReverseState::Closed),
             Action::AppendCode(b'a'),
             "ordinary idle keys are unaffected by an available lookup"
         );
@@ -941,7 +1018,7 @@ mod tests {
     fn reverse_keys_extend_select_and_close() {
         let config = Config::default();
         let open = |key, code: &str, candidates| {
-            Processor::decide(key, code, candidates, config, false, ReverseState::Open)
+            Processor::decide(key, code, candidates, config, false, None, ReverseState::Open)
         };
         assert_eq!(open(KEY_A, "", 0), Action::AppendCode(b'a'));
         assert_eq!(open(KEY_A, "nihao", 3), Action::AppendCode(b'a'));
@@ -976,12 +1053,12 @@ mod tests {
     fn reverse_keeps_the_punctuation_rules() {
         let cn = Config { ascii_punct: 1, ..Config::default() };
         assert_eq!(
-            Processor::decide(b',' as u32, "ni", 2, cn, false, ReverseState::Open),
+            Processor::decide(b',' as u32, "ni", 2, cn, false, None, ReverseState::Open),
             Action::CommitCandidatePunct(b',')
         );
         let sel = Config { semicolon_quote_select: true, ..Config::default() };
         assert_eq!(
-            Processor::decide(b';' as u32, "ni", 3, sel, false, ReverseState::Open),
+            Processor::decide(b';' as u32, "ni", 3, sel, false, None, ReverseState::Open),
             Action::Select(1)
         );
     }

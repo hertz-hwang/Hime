@@ -44,6 +44,7 @@ pub struct Candidate {
 pub struct EngineResponse {
     pub handled: bool,               // true 表示输入法拦截该按键；false 表示交还给系统处理
     pub commit_text: Option<String>, // 需要直接上屏的文本
+    pub replace_text: Option<String>,// 上屏时替换的、光标前已有的文本：英文/数字后放行的半角标点被同一键第二次按下纠正时，这里放那枚半角字符（§3.1）；其余情况为 null
     pub preedit: String,             // 已输入的原码
     pub code_line: String,           // 展示用编码行：首选候选的 code 恰好覆盖原码时用其分段，否则等于 preedit
     pub code_in_window: bool,        // true = 输入码显示在候选窗（非嵌入模式）；false = 内嵌在输入框
@@ -57,6 +58,7 @@ pub struct EngineResponse {
 - `code_line` 由引擎计算：整句候选的 `code` 是解码路径按词的编码切分（空格连接），当去掉空格后与原码一致时作为展示行，否则退回原码。于是输入的码串会随首选候选自动分段（如 `pmssdfghdskfje` 显示为 `pms sdf gh ds kf je`）。
 - `focus` 是打字状态，归 `Session`：候选窗高亮 `candidates[focus]`，空格提交该候选。编码变化、退格、翻页与提交都把它复位到当前页第 1 项；改配置重切页时钳进新页范围。
 - `spans` 由引擎在切页后计算，基准是**当前页**的首选候选：等长替换 `modified`、候选侧净短 `deleted`、候选侧净长 `inserted`、相同 `equal`。首选候选自身与词表候选为空。外壳只按类型取色，不做比对。
+- `replace_text` 只在「纠正放行的半角标点」这一种响应里非空（§3.1）：它给出光标前那枚半角字符，外壳若发现光标前正好是这段文字就用 `commit_text` 原地替换，否则按普通插入处理——点击或编辑把光标挪开时，两侧字符都不会被误删。
 - `code_in_window` 来自 `Config.show_code_in_window`；外壳据此决定内嵌 Marked Text 还是把 `code_line` 画在候选窗里。
 - `page`/`page_count` 供候选窗页码（如 `1/4`）使用，页码是打字状态，归 `Session`。
 
@@ -74,7 +76,7 @@ pub struct Config {
     pub auto_commit_length: usize,// auto_commit 需要的码长（1..=16），auto_commit 关闭时无效；形码整句下无效
     pub commit_next_code: usize,  // 顶码提交：输入第 N 个字母时提交前 N-1 码的候选并以该字母开新编码；0 关闭，1 视作关闭；形码整句下无效
     pub ascii_punct: u8,          // 标点输出：0 英文标点 / 1 中文标点，即 metadata 的 ascii_punct，JSON 里就是这个数字（非布尔）；sanitized() 把其它值钳到 1
-    pub english_punct_after_alnum: bool, // 英文/数字后使用英文标点：中文标点下紧随字母/数字的首个表键标点放行给宿主（如 12:30）；方案不定义它，切换方案时保留
+    pub english_punct_after_alnum: bool, // 英文/数字后使用英文标点：中文标点下紧随字母/数字的首个表键标点放行给宿主（如 12:30），同一键紧接着再按一次则把那枚半角标点纠正为中文标点；方案不定义它，切换方案时保留
     pub semicolon_quote_select: bool,    // 使用分号/引号二三选：编码态有候选时 `;` 选第 2、`'` 选第 3 候选；方案不定义它，切换方案时保留
     pub show_code_in_window: bool,       // 输入码显示在候选窗（非嵌入模式），关闭时内嵌在输入框；方案不定义它，切换方案时保留
     pub vertical_candidates: bool,       // 候选竖排：true 一列、false 一行；同时决定焦点方向键（竖排上下、横排左右）；方案不定义它，切换方案时保留
@@ -93,14 +95,14 @@ pub struct Config {
 - `vertical_candidates` 同时决定候选窗排版与按键模型的方向轴（§3）：它原本是纯 Shell 渲染参数，加入焦点候选后按键语义依赖排列，因此并入引擎配置；方案元数据不定义它，切换方案时保留。
 
 ## 3. 形码状态机逻辑 (`Session::process_key`)
-按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum, reverse)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `SelectFocused` / `FocusPrevious` / `FocusNext` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）、焦点索引与反查开关同样由 `Session` 持有，`Processor` 只读；`reverse` 取 `Unsupported` / `Closed` / `Open` 三态，`Open` 时按键走 §8.3 的 `decide_reverse` 表。翻页（page）与焦点移动由 `Processor` 发对应 `Action`、由 `Session` 维护页码与焦点，不动编码缓冲（详见 §3「翻页」「焦点候选与方向键」条）。
+按键语义集中在 `Processor::decide(key, code, candidate_count, config, after_alnum, released_punct, reverse)`，它只读状态、返回 `Action`（`AppendCode` / `DeleteCode` / `Discard` / `Select(index)` / `SelectFocused` / `FocusPrevious` / `FocusNext` / `PageUp` / `PageDown` / `CommitRaw` / `CommitPunct` / `ReleasePunct` / `CorrectPunct` / `CommitCandidatePunct` / `Noop` / `Pass`）；`Session` 是唯一持有组字状态的一方，只负责执行 `Action` 并重新检索。`after_alnum`（§3.1 的英文/数字后状态）、`released_punct`（§3.1 最近放行、可被下一次同键纠正的标点）、焦点索引与反查开关同样由 `Session` 持有，`Processor` 只读；`reverse` 取 `Unsupported` / `Closed` / `Open` 三态，`Open` 时按键走 §8.3 的 `decide_reverse` 表。翻页（page）与焦点移动由 `Processor` 发对应 `Action`、由 `Session` 维护页码与焦点，不动编码缓冲（详见 §3「翻页」「焦点候选与方向键」条）。
 `candidate_count` 传入的是**当前页**渲染的候选数，因此数字键始终只选中当前页上的词，`-`/`=` 的「有候选」判据也只看当前页是否为空。
 下面 `input_buffer` 即 `Session` 持有的编码缓冲：
 
 1. **当 `input_buffer` 为空时（空闲状态）**：
    - 输入 `a`-`z`：追加到 `input_buffer`，查词库更新 `preedit` 和 `candidates`，返回 `handled: true`。
    - `ascii_punct = 1` 且输入标点映射表（§3.1）内的键：该键的映射文字直接进 `commit_text`，状态保持空闲，返回 `handled: true`（引号按开/闭交替，见 §3.1）。`english_punct_after_alnum = true` 且 `after_alnum` 为真时本条不适用——见 §3.1 的英文/数字后规则。
-   - `english_punct_after_alnum = true`、中文标点、`after_alnum` 为真且输入表内键：该键按半角原样放行，返回 `handled: false`，同时 `after_alnum` 复位——英文/数字之后的**首个**表键标点归宿主（`12:30`），其后的标点照常走中文映射。
+   - `english_punct_after_alnum = true`、中文标点、`after_alnum` 为真且输入表内键：该键按半角原样放行，返回 `handled: false`，同时 `after_alnum` 复位——英文/数字之后的**首个**表键标点归宿主（`12:30`），其后的标点照常走中文映射。引擎同时记下这枚放行的键，见 §3.1 的「按第二次纠正」条。
    - 形码 / 形码整句方案（带反查）下输入 `` ` ``：打开反查，`handled: true`（§8.3）；全拼方案下 `` ` `` 是 §3.1 的表键，按上面两条处理。
    - 输入其他任何键（包括 Space, Backspace, Enter, 1-9，以及任何模式下的表外可打印符号）：输入法不拦截，返回 `handled: false`。
 
@@ -126,6 +128,7 @@ pub struct Config {
 - **英文标点（`ascii_punct = 0`）**：引擎不认领任何标点，可打印符号在空闲与编码态一律放行（返回 `handled: false`），宿主直接插入半角字符。翻页键 `-`/`=` 是唯一例外：编码态无候选时被吞掉（§3）。
 - **中文标点（`ascii_punct = 1`）**：下表内的键由引擎认领，输出该键在表里的映射文字（空闲直接进 `commit_text`；编码态先提交第 1 候选再拼接映射文字，见 §3）。认领看的是键本身在不在表里，与上档组合无关——`?`（63）、`^`（94）自身就是表键；表外的可打印符号两种模式下一律放行，翻页键 `-`/`=` 同样按 §3 处理（本表不含 `-` 与 `=`，两种模式下它们都不输出标点）。
 - **英文/数字后使用英文标点（`Config.english_punct_after_alnum`）**：只在中文标点下生效。`Session` 持有 `after_alnum` 状态——「最近一次交给宿主的文字是否以英文字母或数字结尾」：带 `commit_text` 的响应按提交文字末字符更新（上屏汉字即复位）；被放行的键按自身更新（字母/数字置真，Space 与可打印符号置假）；控制键（Backspace、Enter、方向键等）看不到宿主现在握着什么，状态原样保留。开启且状态为真时，空闲态的表键标点放行半角并复位状态——仅「首个」标点变英文，随后的标点回到中文映射；表外符号本就放行，置假后照常接续。编码态不受本开关影响：编码中的字母没有交给宿主，标点仍按 §3 提交焦点候选。大写经 §3 放行，同样武装该状态（`A:` 的冒号出半角）。
+- **按第二次纠正（同一开关）**：放行的半角标点若**同一个键紧接着再按一次**，引擎把这枚半角字符纠正为中文标点——`12` `:` `:` 得到 `12：`，`12:30` 因冒号只按一次而不受影响。`Session` 为此记下「最近放行的那枚表键」（`released_punct`），窗口只有一键：下一次按键不是同一个表键就丢弃它，因此字母、空格、退格、点击等任何后续输入都不会让纠正跨过别的字符去改写更早的文字。命中时返回 `handled: true`、`commit_text` 为该键的映射文字、`replace_text` 为那枚半角字符（§2.2），并推进引号配对（放行的那一次没有消耗配对）；外壳按 `replace_text` 原地替换。开关关闭时没有放行，也就没有纠正，连按两下仍是两次普通中文标点提交。`/`、`` ` ``、`~` 三键的中文映射就是半角自身（§3.1 末条），纠正不会改变屏幕内容，因此不参与本条：第二下照常提交映射文字。
 
 映射表按键码升序，20 个直接映射加两组引号：
 

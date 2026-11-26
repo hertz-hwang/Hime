@@ -275,6 +275,29 @@ fn full_flow_through_c_abi() {
     // An unmapped symbol still reaches the host application.
     let r = process(live, b'%' as u32);
     assert_eq!(r["handled"], false, "unmapped punctuation is released");
+
+    // english_punct_after_alnum: the first punctuation after a digit reaches
+    // the host as ASCII, and pressing that same key again answers a
+    // correction the shell applies in place of it (replace_text = ":").
+    // hime_set_config replaces the whole config, so toggle the one key on
+    // top of the values the scheme gave the engine.
+    let mut cfg = get_config();
+    cfg["english_punct_after_alnum"] = serde_json::json!(true);
+    assert!(set_config(&cfg.to_string()));
+    let r = process(live, b'1' as u32);
+    assert_eq!(r["handled"], false);
+    let r = process(live, b':' as u32);
+    assert_eq!(r["handled"], false, "the first colon stays half-width");
+    assert!(r["replace_text"].is_null());
+    let r = process(live, b':' as u32);
+    assert_eq!(r["handled"], true, "the second press is the engine's");
+    assert_eq!(r["commit_text"], "：");
+    assert_eq!(r["replace_text"], ":", "it overwrites the ASCII colon on screen");
+    let r = process(live, b':' as u32);
+    assert_eq!(r["commit_text"], "：");
+    assert!(r["replace_text"].is_null(), "the third press appends");
+    cfg["english_punct_after_alnum"] = serde_json::json!(false);
+    assert!(set_config(&cfg.to_string()));
     hime_destroy_session(live);
 
     // A folder that is not a scheme leaves the engine untouched.

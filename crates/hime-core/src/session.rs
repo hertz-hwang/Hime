@@ -75,6 +75,11 @@ pub struct Session {
     /// and commits it forwarded. Like [`Self::quotes`] it survives
     /// [`Session::clear`]: a committed `12` still arms the next punctuation.
     after_alnum: bool,
+    /// The punctuation key [`Config::english_punct_after_alnum`] released to
+    /// the host last, while that ASCII character still stands at the caret
+    /// (SPEC §3.1). A second press of the same key corrects it to 中文标点;
+    /// anything else the engine learns about the caret clears it.
+    released_punct: Option<u8>,
     /// 形码整句 probabilistic/empty-code auto-commit state; `None` for every
     /// non-sentence session, which keeps the sentence path fully gated.
     sentence: Option<SentenceComposer>,
@@ -111,6 +116,7 @@ impl Session {
             focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
+            released_punct: None,
             sentence: None,
             reverse: None,
             reversing: false,
@@ -131,6 +137,7 @@ impl Session {
             focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
+            released_punct: None,
             sentence: None,
             reverse: None,
             reversing: false,
@@ -159,6 +166,7 @@ impl Session {
             focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
+            released_punct: None,
             sentence: Some(SentenceComposer {
                 engine,
                 auto_commit: SentenceAutoCommit::default(),
@@ -186,6 +194,7 @@ impl Session {
             focus: 0,
             quotes: QuotePair::default(),
             after_alnum: false,
+            released_punct: None,
             sentence: None,
             reverse: None,
             reversing: false,
@@ -243,12 +252,17 @@ impl Session {
     /// page and are always consumed, so the digits keep selecting inside
     /// whichever page is currently rendered.
     pub fn process_key(&mut self, key: u32) -> EngineResponse {
+        // The correction window lasts exactly one key: if this key is not the
+        // released punctuation pressed again, the release no longer stands at
+        // the caret (or something else happened to it), so drop it.
+        let released_punct = self.released_punct.take();
         let decision = Processor::decide(
             key,
             &self.input_buffer,
             self.candidates.len(),
             self.config,
             self.after_alnum,
+            released_punct,
             self.reverse_state(),
         );
         let response = match decision {
@@ -300,6 +314,21 @@ impl Session {
                 // Processor gates on the same table, so this only guards
                 // the two from ever disagreeing.
                 None => self.response(false, None),
+            },
+            Action::ReleasePunct(byte) => {
+                // The host inserts the ASCII character itself; the response
+                // only records it so a second press can correct it.
+                self.released_punct = Some(byte);
+                self.response(false, None)
+            }
+            Action::CorrectPunct(byte) => match punct::map(byte, &mut self.quotes) {
+                Some(text) => {
+                    // The ASCII character already stands in the host text:
+                    // the shell swaps the 中文标点 for it in place.
+                    let response = self.response(true, Some(text.to_owned()));
+                    EngineResponse { replace_text: Some(char::from(byte).to_string()), ..response }
+                }
+                None => self.response(true, None),
             },
             Action::CommitCandidatePunct(byte) => {
                 let Some(punctuation) = punct::map(byte, &mut self.quotes) else {
@@ -608,6 +637,7 @@ impl Session {
         EngineResponse {
             handled,
             commit_text,
+            replace_text: None,
             preedit: self.input_buffer.clone(),
             code_line: self.code_line(),
             code_in_window: self.config.show_code_in_window,
@@ -997,6 +1027,7 @@ mod tests {
         for field in [
             "handled",
             "commit_text",
+            "replace_text",
             "preedit",
             "code_line",
             "code_in_window",
@@ -1009,6 +1040,7 @@ mod tests {
         }
         assert_eq!(v["handled"], serde_json::json!(true));
         assert_eq!(v["commit_text"], serde_json::json!("工"));
+        assert_eq!(v["replace_text"], serde_json::Value::Null);
         assert_eq!(v["preedit"], serde_json::json!(""));
         assert_eq!(v["code_line"], serde_json::json!(""));
         assert_eq!(v["code_in_window"], serde_json::json!(false));
@@ -1423,6 +1455,89 @@ mod tests {
             assert!(!s.process_key(key).handled);
         }
         assert_eq!(s.process_key(b':' as u32).commit_text.as_deref(), Some("\u{FF1A}"));
+    }
+
+    /// Pressing the released key a second time replaces the ASCII character
+    /// the host typed with 中文标点: `12` `:` `:` ends as `12：`. Only that
+    /// key does it, and only while the release is still the last thing that
+    /// reached the caret.
+    #[test]
+    fn second_press_corrects_the_released_punctuation() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let config =
+            Config { ascii_punct: 1, english_punct_after_alnum: true, ..Config::default() };
+
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        s.process_key(b'1' as u32);
+        s.process_key(b'2' as u32);
+        let r = s.process_key(b':' as u32);
+        assert!(!r.handled, "the first colon reaches the host");
+        let r = s.process_key(b':' as u32);
+        assert!(r.handled, "the engine claims the correction");
+        assert_eq!(r.commit_text.as_deref(), Some("\u{FF1A}"));
+        assert_eq!(
+            r.replace_text.as_deref(),
+            Some(":"),
+            "it replaces the ASCII colon already on screen"
+        );
+        assert!(r.preedit.is_empty());
+        // The correction leaves 中文标点 behind, so the next key is ordinary.
+        let r = s.process_key(b':' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("\u{FF1A}"));
+        assert!(r.replace_text.is_none(), "a third press appends, it does not correct");
+
+        // Another punctuation key is not a correction: `:` then `;` stays
+        // the ordinary 中文标点 commit of `;`.
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        s.process_key(b'1' as u32);
+        assert!(!s.process_key(b':' as u32).handled);
+        let r = s.process_key(b';' as u32);
+        assert!(r.handled);
+        assert_eq!(r.commit_text.as_deref(), Some("\u{FF1B}"));
+        assert!(r.replace_text.is_none());
+
+        // A later character at the caret drops the window: after a capital
+        // reaches the host, the next colon is a fresh first release, and the
+        // correction after it replaces that colon.
+        let mut s = Session::with_config(Arc::clone(&dict), config);
+        s.process_key(b'1' as u32);
+        assert!(!s.process_key(b':' as u32).handled);
+        assert!(!s.process_key(b'A' as u32).handled, "a capital reaches the host");
+        let r = s.process_key(b':' as u32);
+        assert!(!r.handled, "the colon after the capital is released again");
+        let r = s.process_key(b':' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("\u{FF1A}"));
+        assert_eq!(r.replace_text.as_deref(), Some(":"));
+
+        // With the switch off nothing is released, so a repeated mapped key
+        // stays two ordinary 中文标点 commits.
+        let mut s = Session::with_config(
+            Arc::clone(&dict),
+            Config { ascii_punct: 1, ..Config::default() },
+        );
+        assert_eq!(s.process_key(b',' as u32).replace_text, None);
+        assert_eq!(s.process_key(b',' as u32).commit_text.as_deref(), Some("\u{FF0C}"));
+        assert_eq!(s.process_key(b',' as u32).replace_text, None);
+    }
+
+    /// A released quote corrects to the glyph its own press would have
+    /// produced, and the pairing advances exactly once.
+    #[test]
+    fn second_press_corrects_a_released_quote() {
+        let dict = Arc::new(Dictionary::parse_str(SAMPLE).expect("sample parses"));
+        let mut s = Session::with_config(
+            dict,
+            Config { ascii_punct: 1, english_punct_after_alnum: true, ..Config::default() },
+        );
+        s.process_key(b'H' as u32); // a capital released to the host arms the rule
+        let r = s.process_key(b'\'' as u32);
+        assert!(!r.handled);
+        let r = s.process_key(b'\'' as u32);
+        assert_eq!(r.commit_text.as_deref(), Some("\u{2018}"), "an opening quote");
+        assert_eq!(r.replace_text.as_deref(), Some("'"), "the ASCII quote is what it replaces");
+        // The pairing state advanced once: the next quote outside the window
+        // is the closing glyph.
+        assert_eq!(s.process_key(b'\'' as u32).commit_text.as_deref(), Some("\u{2019}"));
     }
 
     /// What arms and disarms the rule at the session level: committing raw

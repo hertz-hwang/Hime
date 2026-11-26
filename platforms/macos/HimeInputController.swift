@@ -187,7 +187,16 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
         guard let client else { return }
 
         if let commit = response.commitText, !commit.isEmpty {
-            client.insertText(commit, replacementRange: notFound)
+            // A correction replaces the ASCII punctuation the previous press
+            // released to the host (SPEC §3.1); everything else inserts at
+            // the caret. The replaced range must read exactly that text, so
+            // a click or edit in between leaves both characters alone.
+            if let replaced = response.replaceText, !replaced.isEmpty,
+               let range = replacementRange(for: replaced, in: client) {
+                client.insertText(commit, replacementRange: range)
+            } else {
+                client.insertText(commit, replacementRange: notFound)
+            }
         }
         if response.codeInWindow {
             // Non-embedded preedit: the code lives in the candidate window.
@@ -221,6 +230,22 @@ final class HimeInputController: IMKInputController, CandidatePanelDelegate {
             fontSize: CGFloat(PreferencesModel.shared.candidateFontSize),
             delegate: self
         )
+    }
+
+    /// The host range just before the caret when it holds exactly `text`,
+    /// for the correction that overwrites what the previous press inserted.
+    /// Nil when the client reports no caret or the range reads something
+    /// else: the correction is then inserted at the caret, which keeps the
+    /// engine's correction from deleting text the user moved to.
+    private func replacementRange(for text: String, in client: IMKTextInput) -> NSRange? {
+        let caret = client.selectedRange()
+        guard caret.location != NSNotFound, caret.length == 0 else { return nil }
+        let length = text.utf16.count
+        guard caret.location >= length else { return nil }
+        let range = NSRange(location: caret.location - length, length: length)
+        guard let actual = client.attributedSubstring(from: range)?.string, actual == text
+        else { return nil }
+        return range
     }
 
     /// The line rectangle that anchors the candidate panel, in global screen
