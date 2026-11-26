@@ -1770,6 +1770,12 @@ private struct KeyboardView: View {
         return stats.keyboards.first { $0.scheme == dir } ?? stats.keyboard
     }
 
+    /// Every recorded press, arrows and function keys included; `total` only
+    /// counts the keys that map to a finger.
+    private var recordedPresses: Int64 {
+        selected?.keys.values.reduce(0, +) ?? 0
+    }
+
     /// Folder names offered by the picker: every scheme with recorded
     /// presses, plus the active scheme even before its first keystroke.
     private var schemeChoices: [String] {
@@ -1796,7 +1802,7 @@ private struct KeyboardView: View {
                         }
                     }
                     LabeledContent("击键总数") {
-                        Text("\(MetricsView.grouped(selected?.total ?? 0)) 次")
+                        Text("\(MetricsView.grouped(recordedPresses)) 次")
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
@@ -1845,7 +1851,7 @@ private struct KeyboardView: View {
                 }
                 Section("用指分布") {
                     if let keyboard = selected {
-                        FingerBars(fingers: keyboard.fingers, total: keyboard.total)
+                        FingerBars(fingers: keyboard.fingers, total: recordedPresses)
                     } else {
                         Text("尚无击键记录。")
                             .font(.caption)
