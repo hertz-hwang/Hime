@@ -1,13 +1,14 @@
-//! Terminal interactive tester for the Hime engine.
+//! Terminal tools for the Hime engine.
 //!
-//! Loads a scheme, reads simulated keystroke commands from stdin, and prints
-//! the `EngineResponse` JSON for every key — the same payload the macOS shell
-//! will receive over FFI.
+//! Interactive tester (the default): loads a scheme, reads simulated
+//! keystroke commands from stdin, and prints the `EngineResponse` JSON for
+//! every key — the same payload the macOS shell will receive over FFI.
 //!
 //! Usage:
 //!   cargo run -p hime-cli -- [table.txt]
 //!   cargo run -p hime-cli -- --sentence [sentence_table.txt]
 //!   cargo run -p hime-cli -- --pinyin [py.hdict]
+//!   cargo run -p hime-cli -- build-index [py.hdict] [-o py.hidx]
 //!
 //! Without a flag the table is a 形码 word table and each encoding looks up
 //! words. With `--sentence` the encoding decodes to whole sentences (形码整句)
@@ -20,6 +21,11 @@
 //! pinyin table lacks still appears as a candidate. In the 形码 and 形码整句
 //! modes ` `` ` opens 反查: type full pinyin afterwards and each candidate
 //! shows the scheme's complete code.
+//!
+//! `build-index` is not a typing mode: it compiles a pinyin table into the
+//! `.hidx` index the engine maps in place of parsing and sorting that table
+//! (SPEC §8.1). `platforms/macos/build.sh` runs it while assembling the app
+//! bundle, so a shipped install never parses a table at all.
 //!
 //! Commands (one per line):
 //!   letters a-z   each letter is sent as one keystroke ("ad" sends 'a','d')
@@ -39,6 +45,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use hime_core::ngram::{find_model_path, NgramModel};
 use hime_core::sentence::SentenceEngine;
@@ -124,7 +131,129 @@ fn pinyin_table(explicit: Option<PathBuf>) -> PathBuf {
     ))
 }
 
+/// Compile a pinyin table into the `.hidx` index the engine maps in place of
+/// parsing the table (SPEC §8.1):
+/// `hime-cli build-index [table] [-o out.hidx]`.
+///
+/// The table is always read from its rows: an index that is already there is
+/// what this replaces, never the input. What it wrote is mapped back before the
+/// command reports success, so a bad container fails a build instead of
+/// silently costing every user the slow path.
+fn build_index(args: &[String]) -> ExitCode {
+    let mut table: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-h" || arg == "--help" {
+            eprintln!(
+                "usage: hime-cli build-index [table.hdict|table.txt] [-o out.hidx]\n\
+                 default table: {};\ndefault output: <table>.hidx beside it",
+                pinyin_table(None).display()
+            );
+            return ExitCode::SUCCESS;
+        } else if (arg == "-o" || arg == "--output") && index + 1 < args.len() {
+            out = Some(PathBuf::from(&args[index + 1]));
+            index += 2;
+        } else if table.is_none() && !arg.starts_with('-') {
+            table = Some(PathBuf::from(arg));
+            index += 1;
+        } else {
+            eprintln!("hime-cli: build-index: unexpected argument {arg}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let table = pinyin_table(table);
+    if !table.is_file() {
+        eprintln!("hime-cli: build-index: no table at {}", table.display());
+        return ExitCode::FAILURE;
+    }
+    let out = out.unwrap_or_else(|| hime_core::pinyin::index_path(&table));
+
+    let started = Instant::now();
+    let lexicon = match PinyinLexicon::parse_file(&table) {
+        Ok(lexicon) => lexicon,
+        Err(e) => {
+            eprintln!("hime-cli: build-index: failed to read {}: {e}", table.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let parsed_ms = started.elapsed().as_millis();
+
+    let started = Instant::now();
+    if let Err(e) = lexicon.write_index(&out, &table) {
+        eprintln!("hime-cli: build-index: failed to write {}: {e}", out.display());
+        return ExitCode::FAILURE;
+    }
+    let written_ms = started.elapsed().as_millis();
+    let file_bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+
+    let started = Instant::now();
+    let checked = match PinyinLexicon::load(&table) {
+        Ok(checked) => checked,
+        Err(e) => {
+            eprintln!("hime-cli: build-index: the table stopped loading: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mapped_ms = started.elapsed().as_millis();
+    if !checked.from_index() {
+        eprintln!(
+            "hime-cli: build-index: {} was written but the engine still parses the table",
+            out.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    if checked.entry_count() != lexicon.entry_count()
+        || checked.key_count() != lexicon.key_count()
+        || checked.slot_count() != lexicon.slot_count()
+    {
+        eprintln!(
+            "hime-cli: build-index: {} does not match the table ({} rows / {} keys / {} slots \
+             against {} / {} / {})",
+            out.display(),
+            checked.entry_count(),
+            checked.key_count(),
+            checked.slot_count(),
+            lexicon.entry_count(),
+            lexicon.key_count(),
+            lexicon.slot_count()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!(
+        "hime-cli: parsed {} rows ({} keys, {} slots) from {} in {} ms",
+        lexicon.entry_count(),
+        lexicon.key_count(),
+        lexicon.slot_count(),
+        table.display(),
+        parsed_ms
+    );
+    eprintln!(
+        "hime-cli: wrote {} of index to {} in {} ms",
+        megabytes(file_bytes),
+        out.display(),
+        written_ms
+    );
+    eprintln!(
+        "hime-cli: loading it back takes {} ms — 反查 and 全拼 no longer parse the table",
+        mapped_ms
+    );
+    ExitCode::SUCCESS
+}
+
+/// Byte count phrased in megabytes, for the build log.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "build-index") {
+        return build_index(&args[1..]);
+    }
     let (mode, table_arg) = parse_args();
     // 反查 needs a pinyin table beside the active shape scheme. It is shared
     // and read on first use, so a session created for the word-table modes
@@ -137,6 +266,7 @@ fn main() -> ExitCode {
             Some(path) => path.clone(),
             None => pinyin_path.clone(),
         };
+        let started = Instant::now();
         let lexicon = match PinyinLexicon::load(&path) {
             Ok(lexicon) => Arc::new(lexicon),
             Err(e) => {
@@ -145,9 +275,11 @@ fn main() -> ExitCode {
             }
         };
         eprintln!(
-            "hime-cli: 全拼 mode — {} entries from {}",
+            "hime-cli: 全拼 mode — {} entries from {} ({}) in {} ms",
             lexicon.entry_count(),
-            path.display()
+            path.display(),
+            if lexicon.from_index() { "index" } else { "parsed table" },
+            started.elapsed().as_millis()
         );
         let model = find_model_path().and_then(|model_path| match NgramModel::load(&model_path) {
             Ok(model) => {
