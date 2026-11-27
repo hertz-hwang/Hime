@@ -469,6 +469,12 @@ final class PreferencesModel: ObservableObject {
     /// engine: the scheme's metadata defaults plus whatever the user last
     /// asked for. Returns false when no scheme loads, which leaves the
     /// process unusable (main.swift exits).
+    ///
+    /// This one scheme load stays on the calling thread: it runs before the
+    /// IMKServer exists, so the engine answers the first client instead of
+    /// loading a table under it, and the process cannot come up without it. A
+    /// 形码 scheme's pinyin table is the one thing it leaves for a background
+    /// thread — the engine starts reading that itself (SPEC §8.4).
     @discardableResult
     func startup(schemesDir: String) -> Bool {
         bundledSchemesDir = schemesDir
@@ -500,7 +506,8 @@ final class PreferencesModel: ObservableObject {
     /// scheme's table and model again — after dropping scheme folders or a
     /// `.hng` model into the user data folder, 重新载入 picks them up. The
     /// user's settings survive (a scheme switch discards them); a scheme
-    /// that fails to load leaves the engine untouched.
+    /// that fails to load leaves the engine untouched. The reload itself runs
+    /// off the main queue (see `loadScheme`).
     func reload() {
         hime_ensure_data_dir()
         let discovered = discoverSchemes()
@@ -508,15 +515,8 @@ final class PreferencesModel: ObservableObject {
             schemes = discovered
         }
         let target = discovered.first { $0.dir == schemeDir } ?? discovered.first
-        if let target, hime_select_scheme(target.path) {
-            isApplyingEngineConfig = true
-            schemeDir = target.dir
-            applyEngineConfig(storedOverrides: true)
-            isApplyingEngineConfig = false
-            persist()
-            syncEngine()
-        } else if let target {
-            NSLog("Hime: reload could not load scheme %@", target.path)
+        if let target {
+            loadScheme(SchemeRequest(target: target, replayStoredOverrides: true))
         }
         refreshModelStatus()
     }
@@ -545,9 +545,11 @@ final class PreferencesModel: ObservableObject {
     }
 
     /// Binding for the 方案码表 picker: picking a scheme goes through the
-    /// engine, never through a direct field write.
+    /// engine, never through a direct field write. While a switch is running the
+    /// picker shows the folder it was asked for, so the row does not jump back
+    /// to the previous scheme while its table is read.
     var schemeSelection: Binding<String> {
-        Binding(get: { self.schemeDir }, set: { self.selectScheme($0) })
+        Binding(get: { self.requestedSchemeDir }, set: { self.selectScheme($0) })
     }
 
     /// Binding for the 中文标点 switch: the engine key is the number 0/1,
@@ -559,24 +561,90 @@ final class PreferencesModel: ObservableObject {
 
     /// Switch schemes: the engine reloads the table and the metadata
     /// defaults; the panel mirrors those defaults, discarding the previous
-    /// scheme's user values exactly as the reload promises.
+    /// scheme's user values exactly as the reload promises. The load runs off
+    /// the main queue (see `loadScheme`).
     func selectScheme(_ dir: String) {
-        guard dir != schemeDir, let info = schemes.first(where: { $0.dir == dir }) else { return }
-        guard hime_select_scheme(info.path) else {
-            NSLog("Hime: hime_select_scheme(%@) failed", info.path)
+        guard dir != requestedSchemeDir, let info = schemes.first(where: { $0.dir == dir }) else {
+            return
+        }
+        loadScheme(SchemeRequest(target: info, replayStoredOverrides: false))
+    }
+
+    /// A scheme load the model has asked for: the scheme to hand to
+    /// `hime_select_scheme`, and whether the user's stored numbers are replayed
+    /// on top of the scheme defaults (重新载入) or dropped (a scheme switch).
+    private struct SchemeRequest {
+        let target: SchemeInfo
+        let replayStoredOverrides: Bool
+    }
+
+    /// The switch being read on a background queue; requests that arrive while
+    /// it runs wait in `schemeQueue` and go in order, so the scheme the user
+    /// asked for last is the one that ends up loaded.
+    private var loadingScheme: SchemeRequest?
+    @Published private var schemeQueue: [SchemeRequest] = []
+
+    /// The scheme the panel shows as selected: the newest request, whether it is
+    /// still being read or already loaded.
+    private var requestedSchemeDir: String {
+        (schemeQueue.last ?? loadingScheme)?.target.dir ?? schemeDir
+    }
+
+    /// Asks for a scheme to be loaded: at once when nothing is being read,
+    /// otherwise behind the requests already waiting. Call from the main queue,
+    /// as every control does.
+    private func loadScheme(_ request: SchemeRequest) {
+        guard loadingScheme == nil else {
+            schemeQueue.append(request)
+            return
+        }
+        startLoading(request)
+    }
+
+    /// Reads a scheme's table on a background queue and takes the result into
+    /// the model on the main queue. Selecting a scheme is where the engine reads
+    /// a table — 全拼 maps its pinyin table, a 形码整句 scheme loads its model —
+    /// and the preferences window has to keep answering while that happens
+    /// (SPEC §8.4).
+    private func startLoading(_ request: SchemeRequest) {
+        loadingScheme = request
+        let path = request.target.path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loaded = hime_select_scheme(path)
+            DispatchQueue.main.async {
+                self.loadingScheme = nil
+                self.applyScheme(request, loaded: loaded)
+                guard !self.schemeQueue.isEmpty else { return }
+                self.startLoading(self.schemeQueue.removeFirst())
+            }
+        }
+    }
+
+    /// Takes a finished load into the model: the panel mirrors the engine, the
+    /// choice is persisted, and the 模型 page is refreshed because the new
+    /// source may have loaded (or dropped) a model. A failed load leaves every
+    /// field as it was, which is what the engine guarantees.
+    private func applyScheme(_ request: SchemeRequest, loaded: Bool) {
+        guard loaded else {
+            NSLog("Hime: hime_select_scheme(%@) failed", request.target.path)
             return
         }
         isApplyingEngineConfig = true
-        schemeDir = dir
-        applyEngineConfig(storedOverrides: false)
+        schemeDir = request.target.dir
+        applyEngineConfig(storedOverrides: request.replayStoredOverrides)
         isApplyingEngineConfig = false
         persist()
-        refreshModelStatus() // the new source may load (or drop) the model
+        if request.replayStoredOverrides {
+            syncEngine() // replay the stored request onto the scheme defaults
+        }
+        refreshModelStatus()
     }
 
-    /// The metadata of the selected scheme, for the read-only info rows.
+    /// The metadata of the selected scheme, for the read-only info rows. It
+    /// follows a switch that is still loading, so the rows describe the scheme
+    /// the picker shows.
     var selectedScheme: SchemeInfo? {
-        schemes.first { $0.dir == schemeDir }
+        schemes.first { $0.dir == requestedSchemeDir }
     }
 
     /// Write the engine's current Config into the model. `storedOverrides`
