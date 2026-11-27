@@ -22,15 +22,22 @@
 //! every reading is indexed, so `西安` answers both `xian` and `xi'an`. Rows
 //! are de-duplicated by `(text, code)`; the index keeps one slot per
 //! `(key, text)` with the best rank first.
+//!
+//! What is built above is exactly the layout the `.hidx` container writes, so
+//! [`PinyinLexicon`] is a reader over one flat byte buffer in both cases: a
+//! `.hidx` mapping (the normal load, milliseconds) or the buffer this module
+//! assembled while parsing the table (the fallback and the index builder).
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use crate::hdict;
 
+use super::index::{self, Builder, Row, SLOT_STRIDE};
 use super::syllables::{self, Pattern, MAX_CODE_LEN, MAX_QUERY_SEGMENTATIONS, MAX_WORD_SYLLABLES};
 
 /// Syllabifications indexed per table code (`xian` → `xian`, `xi an`; at most
@@ -69,11 +76,15 @@ pub struct PinyinMatch {
 
 /// A pinyin table that is loaded on first use.
 ///
-/// The table is 11 MB of compressed rows and needs a full sort to index, which
-/// must not happen while a session is being created — a process that only ever
-/// types 形码 pays nothing for it. The first 反查 (or the first 全拼 keystroke)
-/// pays the load once; every later caller shares the result. A load failure is
-/// remembered too, so a broken table is reported once instead of per keystroke.
+/// A session must not be created, and a keystroke must not be answered, by
+/// reading an 11 MB table — a process that only ever types 形码 pays nothing for
+/// it. The first 反查 (or the first 全拼 keystroke) loads it once and every later
+/// caller shares the result: normally that is a `.hidx` mapping (SPEC §8.1),
+/// milliseconds; only a table with no current index is parsed and sorted here,
+/// which is why `hime-cli build-index` exists. The outcome is a single `Arc`
+/// that 反查 and every 全拼 session read, so one table is never parsed or held
+/// twice. A load failure is remembered too, so a broken table is reported once
+/// instead of per keystroke.
 pub struct SharedPinyin {
     path: PathBuf,
     loaded: OnceLock<Result<Arc<PinyinLexicon>, String>>,
@@ -100,10 +111,23 @@ impl SharedPinyin {
     #[must_use]
     pub fn get(&self) -> Option<Arc<PinyinLexicon>> {
         let outcome = self.loaded.get_or_init(|| {
-            PinyinLexicon::load(&self.path).map(Arc::new).map_err(|e| {
+            let started = Instant::now();
+            let outcome = PinyinLexicon::load(&self.path).map(Arc::new).map_err(|e| {
                 eprintln!("hime-core: failed to load pinyin table {:?}: {e}", self.path);
                 e.to_string()
-            })
+            });
+            if let Ok(lexicon) = &outcome {
+                // Once per process. This is the pause a user could feel, so the
+                // log says what it cost and whether the index covered it.
+                eprintln!(
+                    "hime-core: pinyin table ready in {} ms: {} entries from {} ({})",
+                    started.elapsed().as_millis(),
+                    lexicon.entry_count(),
+                    self.path.display(),
+                    if lexicon.from_index() { "index" } else { "parsed table" },
+                );
+            }
+            outcome
         });
         match outcome {
             Ok(lexicon) if !lexicon.is_empty() => Some(Arc::clone(lexicon)),
@@ -135,9 +159,10 @@ impl PartialEq for SharedPinyin {
 
 impl Eq for SharedPinyin {}
 
-/// One table row. `code` is normalized so `lue` / `nue` answer both ways.
+/// One table row while a table is parsed. `code` is normalized so `lue` / `nue`
+/// answer both ways. [`Builder`] flattens it into the image [`Row`] reads back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Row {
+struct DraftRow {
     text: String,
     code: String,
     /// The code's fewest-syllable reading, packed. This is what the candidate
@@ -152,22 +177,11 @@ struct Row {
     rank: usize,
 }
 
-/// One distinct syllable key and its word slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct KeySpan {
-    /// Syllable ids packed most significant first.
-    packed: u128,
-    /// First slot in [`PinyinLexicon::slots`].
-    start: u32,
-    /// Number of slots (distinct texts under this key).
-    count: u32,
-}
-
-/// A hit before its display split is materialized. Borrowed from the table
+/// A hit before its display split is materialized. Borrowed from the image
 /// while the bounded collector is filled, then sorted and materialized.
 #[derive(Debug, Clone, Copy)]
 struct Scored<'a> {
-    row: &'a Row,
+    row: Row<'a>,
     exact: bool,
     syllable_gap: usize,
     coverage: usize,
@@ -188,7 +202,7 @@ struct Scored<'a> {
 /// better.
 fn rank_tuple<'a>(
     item: &'a Scored<'a>,
-) -> (usize, bool, Reverse<usize>, usize, bool, bool, Reverse<i64>, usize, usize, &'a str, &'a str) {
+) -> (usize, bool, Reverse<usize>, usize, bool, bool, Reverse<i64>, u32, usize, &'a [u8], &'a [u8]) {
     (
         item.syllable_gap,
         !item.exact,
@@ -199,8 +213,8 @@ fn rank_tuple<'a>(
         Reverse(item.row.weight),
         item.row.rank,
         item.row.text.len(),
-        &item.row.text,
-        &item.row.code,
+        item.row.text,
+        item.row.code,
     )
 }
 
@@ -261,27 +275,65 @@ impl<'a> TopK<'a> {
 }
 
 /// Pinyin word table with a syllable index, in table order.
-#[derive(Debug, Default)]
+///
+/// The rows, keys and slots live in one flat buffer — a `.hidx` mapping, or the
+/// buffer [`Self::parse`] assembled — so reading a table is a mapping rather
+/// than a rebuild (SPEC §8.1).
+#[derive(Debug)]
 pub struct PinyinLexicon {
-    rows: Vec<Row>,
-    /// Distinct syllable keys, ascending by packed value.
-    keys: Vec<KeySpan>,
-    /// Row ids grouped by key; inside one key the best word leads.
-    slots: Vec<u32>,
-    entry_count: usize,
+    store: index::Store,
+    /// Whether `store` came from a `.hidx` mapping.
+    from_index: bool,
 }
 
 impl PinyinLexicon {
-    /// Read a `.hdict` container or a plain `候选\t连写全拼[\t词频]` text file.
+    /// Read a pinyin table: the `.hidx` beside `path` while it still describes
+    /// that table (SPEC §8.1), otherwise the `.hdict` container or plain
+    /// `候选\t连写全拼[\t词频]` text at `path`.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, hdict::HDictError> {
+        let path = path.as_ref();
+        if let Some(store) = index::open_for(path) {
+            return Ok(Self { store, from_index: true });
+        }
+        Self::parse_file(path)
+    }
+
+    /// Read the table file itself and build the index in memory, ignoring any
+    /// `.hidx`. This is the slow path: `hime-cli build-index` uses it to write
+    /// one, and [`Self::load`] falls back to it when there is nothing to map.
+    pub fn parse_file(path: impl AsRef<Path>) -> Result<Self, hdict::HDictError> {
         let text = hdict::load_table_text(path)?;
         Ok(Self::parse(&text))
+    }
+
+    /// A table with no rows. An engine whose 全拼 table disappeared mid-run keeps
+    /// answering with this — no candidates, no error to the shell (SPEC §8.4).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { store: index::Store::default(), from_index: false }
+    }
+
+    /// Write the tables as a `.hidx` at `index_path`, recording `table` as the
+    /// file they were built from. A later [`Self::load`] of `table` then maps that
+    /// index instead of parsing the table (SPEC §8.1).
+    pub fn write_index(
+        &self,
+        index_path: &Path,
+        table: &Path,
+    ) -> Result<(), hdict::HDictError> {
+        self.store.write_index(index_path, table)
+    }
+
+    /// Whether [`Self::load`] mapped a `.hidx` rather than parsing the table.
+    #[must_use]
+    pub fn from_index(&self) -> bool {
+        self.from_index
     }
 
     /// Build the index from table text already in memory.
     #[must_use]
     pub fn parse(content: &str) -> Self {
-        let mut rows: Vec<Row> = Vec::new();
+        let mut rows: Vec<DraftRow> = Vec::new();
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for (index, raw) in content.lines().enumerate() {
             let line = raw.trim_end();
@@ -312,7 +364,7 @@ impl PinyinLexicon {
                     syllables::pack_ids(&parts)
                 })
                 .unwrap_or(0);
-            rows.push(Row {
+            rows.push(DraftRow {
                 text: text.to_owned(),
                 syllables: fewest,
                 reading,
@@ -321,25 +373,27 @@ impl PinyinLexicon {
                 rank: index + 1,
             });
         }
-        let entry_count = rows.len();
 
         // One (packed key, row id) pair per reading. Sorting by packed first
         // groups every key without a tree, and the tie-breakers put the most
         // frequent word first inside its key.
         let mut pairs: Vec<(u128, u32)> = Vec::with_capacity(rows.len() * 2);
-        let mut reading_cache: HashMap<&str, Vec<u128>> = HashMap::with_capacity(rows.len() / 2);
-        for (index, row) in rows.iter().enumerate() {
-            let code_key: &str = &row.code;
-            let forms = match reading_cache.get(code_key) {
-                Some(cached) => cached.clone(),
-                None => {
-                    let forms = readings(code_key);
-                    reading_cache.insert(code_key, forms.clone());
-                    forms
+        {
+            let mut reading_cache: HashMap<&str, Vec<u128>> =
+                HashMap::with_capacity(rows.len() / 2);
+            for (index, row) in rows.iter().enumerate() {
+                let code_key: &str = &row.code;
+                let forms = match reading_cache.get(code_key) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let forms = readings(code_key);
+                        reading_cache.insert(code_key, forms.clone());
+                        forms
+                    }
+                };
+                for packed in forms {
+                    pairs.push((packed, index as u32));
                 }
-            };
-            for packed in forms {
-                pairs.push((packed, index as u32));
             }
         }
         pairs.sort_by(|left, right| {
@@ -353,40 +407,53 @@ impl PinyinLexicon {
             })
         });
 
-        let mut keys: Vec<KeySpan> = Vec::new();
-        let mut slots: Vec<u32> = Vec::with_capacity(pairs.len());
+        // The rows are written first, so a row id stays the table order and the
+        // slots can keep the ids the sort produced.
+        let mut builder = Builder::default();
+        for row in &rows {
+            builder.push_row(
+                row.text.as_bytes(),
+                row.code.as_bytes(),
+                row.weight,
+                row.rank as u32,
+                row.syllables as u32,
+                row.reading,
+            );
+        }
+        let mut slot_count = 0u32;
         let mut index = 0;
         while index < pairs.len() {
             let packed = pairs[index].0;
-            let start = slots.len() as u32;
+            let start = slot_count;
             let mut seen_text: HashSet<&str> = HashSet::new();
             while index < pairs.len() && pairs[index].0 == packed {
                 let row = &rows[pairs[index].1 as usize];
                 // A text may repeat under one key through several readings;
                 // the best-ordered slot is the first one.
                 if seen_text.insert(row.text.as_str()) {
-                    slots.push(pairs[index].1);
+                    builder.push_slot(pairs[index].1);
+                    slot_count += 1;
                 }
                 index += 1;
             }
-            keys.push(KeySpan { packed, start, count: slots.len() as u32 - start });
+            builder.push_key(packed, start, slot_count - start);
         }
 
-        Self { rows, keys, slots, entry_count }
+        Self { store: builder.into_store(), from_index: false }
     }
 
     /// Number of usable table rows.
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        self.entry_count
+        self.store.row_count()
     }
 
     /// Number of distinct codes.
     #[must_use]
     pub fn code_count(&self) -> usize {
-        self.rows
-            .iter()
-            .map(|row| row.code.as_str())
+        (0..self.entry_count() as u32)
+            .filter_map(|index| self.store.row(index))
+            .map(|row| row.code)
             .collect::<HashSet<_>>()
             .len()
     }
@@ -394,13 +461,25 @@ impl PinyinLexicon {
     /// Number of indexed syllable keys (each code contributes one per reading).
     #[must_use]
     pub fn key_count(&self) -> usize {
-        self.keys.len()
+        self.store.key_count()
+    }
+
+    /// Number of `(key, text)` slots, one per word under each of its readings.
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.store.slot_count()
+    }
+
+    /// Bytes the tables occupy, mapped or built here.
+    #[must_use]
+    pub fn image_bytes(&self) -> usize {
+        self.store.image_bytes()
     }
 
     /// Whether the lexicon holds nothing usable.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.store.row_count() == 0
     }
 
     /// Whether the table already spells the whole query as one word, reading
@@ -460,12 +539,12 @@ impl PinyinLexicon {
                 &patterns,
                 0,
                 0,
-                0..self.keys.len(),
+                0..self.store.key_count(),
                 false,
                 &mut |_packed, key_syllables, row, ordinal| {
                     top.offer(Scored {
                         row,
-                        exact: row.code == whole_code,
+                        exact: row.code == whole_code.as_bytes(),
                         syllable_gap: row.syllables.abs_diff(form.len()),
                         coverage: letters,
                         abbreviated,
@@ -491,7 +570,7 @@ impl PinyinLexicon {
                 self.collect_exact(
                     prefix_patterns,
                     0,
-                    0..self.keys.len(),
+                    0..self.store.key_count(),
                     &mut |_packed, key_syllables, row, ordinal| {
                         top.offer(Scored {
                             row,
@@ -510,8 +589,8 @@ impl PinyinLexicon {
 
         let mut scored = top.into_sorted();
         // One text can appear under several readings; keep the best.
-        let mut seen_text: HashSet<&str> = HashSet::new();
-        scored.retain(|item| seen_text.insert(item.row.text.as_str()));
+        let mut seen_text: HashSet<&[u8]> = HashSet::new();
+        scored.retain(|item| seen_text.insert(item.row.text));
         scored.truncate(limit);
         scored.into_iter().map(materialize).collect()
     }
@@ -536,7 +615,7 @@ impl PinyinLexicon {
         // Within one span the table's own order (weight, then rank) is the
         // pre-selection key, so the ranking tuple is used with every
         // structural field tied.
-        self.collect_exact(&ids, 0, 0..self.keys.len(), &mut |_packed, key_syllables, row, ordinal| {
+        self.collect_exact(&ids, 0, 0..self.store.key_count(), &mut |_packed, key_syllables, row, ordinal| {
             top.offer(Scored {
                 row,
                 exact: true,
@@ -549,8 +628,8 @@ impl PinyinLexicon {
             });
         });
         let mut scored = top.into_sorted();
-        let mut seen_text: HashSet<&str> = HashSet::new();
-        scored.retain(|item| seen_text.insert(item.row.text.as_str()));
+        let mut seen_text: HashSet<&[u8]> = HashSet::new();
+        scored.retain(|item| seen_text.insert(item.row.text));
         scored.truncate(capacity);
         scored.into_iter().map(materialize).collect()
     }
@@ -565,7 +644,7 @@ impl PinyinLexicon {
         prefix: u128,
         range: std::ops::Range<usize>,
         exact_only: bool,
-        visit: &mut dyn FnMut(u128, usize, &'a Row, usize),
+        visit: &mut dyn FnMut(u128, usize, Row<'a>, usize),
     ) {
         if depth == patterns.len() {
             self.visit_range(range, exact_only, patterns.len(), visit);
@@ -578,7 +657,7 @@ impl PinyinLexicon {
             let low = prefix | (u128::from(id) << shift);
             let high = low + (1u128 << shift);
             let start = self.lower_bound(low, range.clone());
-            let end = self.upper_bound(high, start..range.end);
+            let end = self.lower_bound(high, start..range.end);
             if start < end {
                 self.collect(patterns, depth + 1, low, start..end, exact_only, visit);
             }
@@ -592,7 +671,7 @@ impl PinyinLexicon {
         patterns: &[Vec<u32>],
         depth: usize,
         range: std::ops::Range<usize>,
-        visit: &mut dyn FnMut(u128, usize, &'a Row, usize),
+        visit: &mut dyn FnMut(u128, usize, Row<'a>, usize),
     ) {
         self.collect(patterns, depth, 0, range, true, visit);
     }
@@ -602,42 +681,36 @@ impl PinyinLexicon {
         range: std::ops::Range<usize>,
         exact_only: bool,
         depth: usize,
-        visit: &mut dyn FnMut(u128, usize, &'a Row, usize),
+        visit: &mut dyn FnMut(u128, usize, Row<'a>, usize),
     ) {
         for key_index in range {
-            let key = &self.keys[key_index];
+            let key = self.store.key(key_index);
             let key_syllables = key_depth(key.packed);
             if exact_only && key_syllables != depth {
                 continue;
             }
-            let start = key.start as usize;
-            for (offset, slot) in self.slots[start..start + key.count as usize].iter().enumerate() {
-                let row = &self.rows[*slot as usize];
+            let Some(slots) = self.store.slots(&key) else { continue };
+            // Every slot is a `SLOT_STRIDE`-byte record; the section's tail pad
+            // is the remainder and is never read.
+            for (offset, slot) in slots.as_chunks::<SLOT_STRIDE>().0.iter().enumerate() {
+                // A damaged slot is skipped: a keystroke must answer with fewer
+                // candidates rather than with a panic (SPEC §8.1).
+                let Some(row) = self.store.slot_row(slot) else { continue };
                 visit(key.packed, key_syllables, row, offset + 1);
             }
         }
     }
 
+    /// First key index in `range` whose packed key is `packed` or greater. Keys
+    /// ascend, so one binary search bounds a whole syllable position — and the
+    /// same search gives the exclusive end of a prefix range by asking for the
+    /// value just past it.
     fn lower_bound(&self, packed: u128, range: std::ops::Range<usize>) -> usize {
         let mut start = range.start;
         let mut end = range.end;
         while start < end {
             let mid = start + (end - start) / 2;
-            if self.keys[mid].packed < packed {
-                start = mid + 1;
-            } else {
-                end = mid;
-            }
-        }
-        start
-    }
-
-    fn upper_bound(&self, packed: u128, range: std::ops::Range<usize>) -> usize {
-        let mut start = range.start;
-        let mut end = range.end;
-        while start < end {
-            let mid = start + (end - start) / 2;
-            if self.keys[mid].packed < packed {
+            if self.store.key(mid).packed < packed {
                 start = mid + 1;
             } else {
                 end = mid;
@@ -653,16 +726,22 @@ const PREFIX_LOOKBEHIND: usize = 6;
 /// Turn one collected hit into the public match (display split included).
 fn materialize(item: Scored<'_>) -> PinyinMatch {
     PinyinMatch {
-        text: item.row.text.clone(),
+        text: text_of(item.row.text),
         key: split_of(item.row.reading),
-        code: item.row.code.clone(),
+        code: text_of(item.row.code),
         exact: item.exact,
         syllable_gap: item.syllable_gap,
         coverage: item.coverage,
         weight: item.row.weight,
-        rank: item.row.rank,
+        rank: item.row.rank as usize,
         ordinal: item.ordinal,
     }
+}
+
+/// Table bytes are UTF-8 by construction; a damaged image reads as lossy text
+/// instead of failing the whole candidate list.
+fn text_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// The syllable split a packed key stands for (`ni hao`).
@@ -771,20 +850,40 @@ fn normalize_code(code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::index::{self, index_path};
+    use std::fs;
+
+    /// A table small enough to reason about and big enough to reach every
+    /// retrieval path: exact codes, prefix words, 简拼, two readings of one code
+    /// and both ü spellings.
+    const CORPUS: &str = "你好\tnihao\t200\n\
+                           你\tni\t100\n\
+                           呢\tni\t90\n\
+                           泥\tni\t90\n\
+                           开发\tkaifa\t100\n\
+                           开\tkai\t90\n\
+                           先\txian\t100\n\
+                           西安\txian\t80\n\
+                           略\tlve\t50\n\
+                           绿色\tlvse\t40\n";
 
     fn lexicon() -> PinyinLexicon {
-        PinyinLexicon::parse(
-            "你好\tnihao\t200\n\
-             你\tni\t100\n\
-             呢\tni\t90\n\
-             泥\tni\t90\n\
-             开发\tkaifa\t100\n\
-             开\tkai\t90\n\
-             先\txian\t100\n\
-             西安\txian\t80\n\
-             略\tlve\t50\n\
-             绿色\tlvse\t40\n",
-        )
+        PinyinLexicon::parse(CORPUS)
+    }
+
+    /// A scratch folder that does not collide with other tests or runs.
+    fn temp_folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hime-pinyin-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch folder created");
+        dir
+    }
+
+    fn remove_folder(dir: PathBuf) {
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn texts(list: &[PinyinMatch]) -> Vec<&str> {
@@ -941,6 +1040,126 @@ mod tests {
         assert_eq!(texts(&list), vec!["词199", "词198"]);
     }
 
+    /// A `.hidx` holds the very tables the parse built: writing one and mapping
+    /// it back answers every query with the same ranked matches (SPEC §8.1).
+    #[test]
+    fn a_prebuilt_index_answers_exactly_like_the_parse() {
+        let dir = temp_folder("index-round-trip");
+        let table = dir.join("py.txt");
+        fs::write(&table, CORPUS).expect("table written");
+
+        let parsed = PinyinLexicon::parse_file(&table).expect("table parsed");
+        assert!(!parsed.from_index(), "parse_file ignores any index");
+        parsed.write_index(&index_path(&table), &table).expect("index written");
+
+        let mapped = PinyinLexicon::load(&table).expect("index loaded");
+        assert!(mapped.from_index(), "the index beside the table is what loads");
+        assert_eq!(mapped.entry_count(), parsed.entry_count(), "rows");
+        assert_eq!(mapped.key_count(), parsed.key_count(), "keys");
+        assert_eq!(mapped.slot_count(), parsed.slot_count(), "slots");
+        assert_eq!(mapped.code_count(), parsed.code_count(), "codes");
+        for query in ["ni", "nih", "nihao", "nh", "kf", "kaif", "xian", "lve", "lvse", "zzz"] {
+            assert_eq!(mapped.lookup(query, 8), parsed.lookup(query, 8), "query {query}");
+        }
+        remove_folder(dir);
+    }
+
+    /// An index that no longer describes its table is ignored: candidates come
+    /// from the table itself, slow as that is (SPEC §8.1).
+    #[test]
+    fn an_index_of_another_table_is_ignored() {
+        let dir = temp_folder("index-stale");
+        let table = dir.join("py.txt");
+        fs::write(&table, CORPUS).expect("table written");
+        let parsed = PinyinLexicon::parse_file(&table).expect("table parsed");
+        parsed.write_index(&index_path(&table), &table).expect("index written");
+        assert!(PinyinLexicon::load(&table).expect("index loads").from_index());
+
+        fs::write(&table, format!("{CORPUS}你好\tbuzhidao\t1\n")).expect("table replaced");
+        let reloaded = PinyinLexicon::load(&table).expect("table parsed");
+        assert!(!reloaded.from_index(), "a table that moved on is parsed again");
+        assert_eq!(reloaded.entry_count(), parsed.entry_count() + 1);
+        remove_folder(dir);
+    }
+
+    /// A damaged index must never become a broken candidate list: the load falls
+    /// back to the table, and an index whose payload (not header) was edited still
+    /// answers without panicking (SPEC §8.1).
+    #[test]
+    fn a_damaged_index_never_loses_the_table() {
+        let dir = temp_folder("index-damaged");
+        let table = dir.join("py.txt");
+        fs::write(&table, CORPUS).expect("table written");
+        let expected = PinyinLexicon::parse_file(&table).expect("table parsed");
+        let index_path = index_path(&table);
+        expected.write_index(&index_path, &table).expect("index written");
+        let good = fs::read(&index_path).expect("index read");
+
+        let mut foreign_magic = good.clone();
+        foreign_magic[0] = b'X';
+        let mut edited_payload = good.clone();
+        edited_payload[index::HEADER_SIZE] ^= 0xFF;
+        let cases = [
+            ("empty", Vec::new()),
+            ("truncated", good[..good.len() - 64].to_vec()),
+            ("foreign magic", foreign_magic),
+            ("edited payload", edited_payload),
+        ];
+        for (tag, bytes) in cases {
+            fs::write(&index_path, &bytes).expect("damaged index written");
+            let lexicon = PinyinLexicon::load(&table)
+                .unwrap_or_else(|e| panic!("{tag}: the load reported {e}"));
+            // Every case answers the corpus: the rejected ones by parsing the
+            // table, the edited payload by skipping what no longer resolves.
+            let list = lexicon.lookup("ni", 8);
+            if tag == "edited payload" {
+                assert!(!list.is_empty(), "{tag}: the whole table went silent");
+            } else {
+                assert!(!lexicon.from_index(), "{tag}: the damaged index was used");
+                assert_eq!(list, expected.lookup("ni", 8), "{tag}");
+            }
+        }
+        remove_folder(dir);
+    }
+
+    #[test]
+    fn an_index_lives_beside_its_table() {
+        assert_eq!(
+            index_path(Path::new("/schemes/pinyin/py.hdict")),
+            PathBuf::from("/schemes/pinyin/py.hidx")
+        );
+        assert_eq!(
+            index_path(Path::new("/schemes/mine/py.txt")),
+            PathBuf::from("/schemes/mine/py.hidx"),
+            "a user scheme's table keeps its own index name"
+        );
+        assert_eq!(
+            index_path(Path::new("/schemes/mine/table")),
+            PathBuf::from("/schemes/mine/table.hidx")
+        );
+    }
+
+    /// A table with no rows is a valid table: an engine keeps answering with it
+    /// when its 全拼 file disappears mid-run (SPEC §8.4).
+    #[test]
+    fn an_empty_table_answers_nothing() {
+        let lex = PinyinLexicon::empty();
+        assert!(lex.is_empty());
+        assert_eq!(lex.entry_count(), 0);
+        assert!(lex.lookup("ni", 5).is_empty());
+        assert!(!lex.spells_in_full_pinyin("ni"));
+        assert!(lex
+            .exact_matches(
+                &[Pattern {
+                    text: "ni".into(),
+                    canonical: "ni".into(),
+                    complete: true,
+                }],
+                5
+            )
+            .is_empty());
+    }
+
     /// The shared table reads nothing until first use, answers from then on,
     /// and reports a broken file once instead of per keystroke.
     #[test]
@@ -973,6 +1192,14 @@ mod tests {
     fn loads_the_shipped_pinyin_table() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/schemes/pinyin/py.hdict");
         let lex = PinyinLexicon::load(path).expect("shipped pinyin table loads");
+        // Which source this proved depends on the working tree: a compiled
+        // index beside the table is the runtime path, its absence parses the
+        // rows (SPEC §8.1). `hime-cli build-index` refuses to write an index
+        // that does not answer identically to the parse, so the two agree on
+        // this table by construction; here the queries have to hold either way.
+        if lex.from_index() {
+            assert!(index_path(Path::new(path)).is_file(), "mapped from an index beside the table");
+        }
         assert!(lex.entry_count() > 900_000, "{} entries", lex.entry_count());
         assert!(lex.code_count() > 500_000, "{} codes", lex.code_count());
 
@@ -983,5 +1210,22 @@ mod tests {
         // 简拼 over the real table: the initials reach the words.
         assert!(texts(&lex.lookup("nh", 10)).contains(&"你好"), "nh reaches 你好");
         assert!(texts(&lex.lookup("kf", 10)).contains(&"开发"), "kf reaches 开发");
+
+        // Writing those tables out as a `.hidx` and mapping them back answers
+        // identically at a million-row scale — the path `hime-cli build-index`
+        // packages (SPEC §8.1).
+        let dir = temp_folder("shipped-index");
+        let copy = dir.join("py.hdict");
+        fs::copy(path, &copy).expect("table copied");
+        lex.write_index(&index_path(&copy), &copy).expect("index written");
+        let mapped = PinyinLexicon::load(&copy).expect("shipped index mapped");
+        assert!(mapped.from_index(), "the index beside the copy is what loads");
+        assert_eq!(mapped.entry_count(), lex.entry_count(), "rows");
+        assert_eq!(mapped.key_count(), lex.key_count(), "keys");
+        assert_eq!(mapped.slot_count(), lex.slot_count(), "slots");
+        for query in ["nihao", "kaifa", "de", "kf", "nh", "zhuang"] {
+            assert_eq!(mapped.lookup(query, 10), lex.lookup(query, 10), "query {query}");
+        }
+        remove_folder(dir);
     }
 }

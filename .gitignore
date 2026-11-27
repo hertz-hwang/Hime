@@ -5,3 +5,8 @@
 # Trained HFNGMF v1 whole-sentence model (191 MB, binary). Loaded at runtime by path;
 # not committed — obtain from the Hime model release.
 sentence-ngram.hng
+
+# Compiled pinyin index (SPEC §8.1): derived from a scheme table by
+# `hime-cli build-index`, which platforms/macos/build.sh runs while assembling
+# the bundle. Never hand-edited, so it never belongs in the repository.
+**/*.hidx

@@ -101,6 +101,42 @@ pub fn load_table_text(path: impl AsRef<Path>) -> Result<String, HDictError> {
         .map_err(|_| HDictError::Format("table text is not valid UTF-8".into()))
 }
 
+/// Identity of a lexicon table file: its length and, for a `.hdict` container,
+/// the payload CRC its header declares (0 for a plain-text table).
+///
+/// The 全拼 index (SPEC §8.1) records one and refuses to serve a table that has
+/// moved on since the index was built. Taking it from the container header —
+/// rather than from mtime or a hash of the bytes — costs one small read, so the
+/// check stays out of the cost the index exists to avoid, and it survives a
+/// copy or a `git checkout` that rewrites timestamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fingerprint {
+    /// Size of the table file in bytes.
+    pub bytes: u64,
+    /// Header `payload_crc`; 0 when the table is plain text.
+    pub payload_crc: u32,
+}
+
+/// Fingerprint a table file without reading it. Only the container header is
+/// read, so this stays usable on a load path that must not inflate anything.
+pub fn fingerprint(path: impl AsRef<Path>) -> Result<Fingerprint, HDictError> {
+    let path = path.as_ref();
+    let bytes = fs::metadata(path)?.len();
+    let mut head = [0u8; HEADER_LEN];
+    let mut filled = 0;
+    let mut file = fs::File::open(path)?;
+    while filled < head.len() {
+        match std::io::Read::read(&mut file, &mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let payload_crc = if filled >= 36 && head[..4] == MAGIC { u32_at(&head, 32) } else { 0 };
+    Ok(Fingerprint { bytes, payload_crc })
+}
+
 /// Parse a complete container already in memory.
 pub fn parse(bytes: &[u8]) -> Result<HDict, HDictError> {
     if bytes.len() < HEADER_LEN {
@@ -197,8 +233,9 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(raw)
 }
 
-/// CRC-32/IEEE (the same value as `zlib.crc32`), used only for the header.
-fn crc32(bytes: &[u8]) -> u32 {
+/// CRC-32/IEEE (the same value as `zlib.crc32`), used only for headers
+/// (`.hdict` and the 全拼 index `.hidx`, SPEC §8.1).
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in bytes {
         crc ^= u32::from(byte);

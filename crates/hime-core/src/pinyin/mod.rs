@@ -17,6 +17,10 @@
 //!   whole sentences with the character n-gram, which reaches combinations
 //!   the table has no row for (`huangzhao` → 黄照).
 //!
+//! The index the lexicon queries is compiled offline into a `.hidx` container
+//! (SPEC §8.1): reading a table is then a file mapping, and parsing and sorting
+//! the rows in this process is only the fallback for a table nobody compiled.
+//!
 //! The lexicon is also the reverse-lookup source: a 形码 or 形码整句 session
 //! prefixes the query with `` ` `` and the candidates carry the current
 //! scheme's complete code in their comment (see
@@ -26,12 +30,14 @@
 //! model. The reference implementation's fuzzy spellings, typo correction and
 //! learning channels stay deferred.
 
+mod index;
 pub mod decoder;
 pub mod lexicon;
 pub mod syllables;
 pub mod translator;
 
 pub use decoder::PinyinCandidate;
+pub use index::index_path;
 pub use lexicon::{PinyinLexicon, PinyinMatch, SharedPinyin};
 pub use syllables::MAX_CODE_LEN;
 pub use translator::PinyinTranslator;
