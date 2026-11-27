@@ -42,7 +42,9 @@ impl CodeSource {
 /// candidate list is worth.
 const MAX_CHARACTER_CODE_WORD: usize = 4;
 
-/// The pinyin source plus the active scheme's code table.
+/// The pinyin source plus the active scheme's code table. The handle is the
+/// same one 全拼 sessions read, and the shell is expected to have warmed it
+/// before the first `` ` ``.
 pub struct ReverseLookup {
     pinyin: Arc<SharedPinyin>,
     codes: CodeSource,
@@ -75,9 +77,16 @@ impl ReverseLookup {
     /// code in `comment`. A word the table does not list falls back to its
     /// characters' codes joined by spaces (`你好` → `flll olgu`) when it is
     /// short enough; otherwise the comment stays empty.
+    ///
+    /// This reads the table only when it is already in memory: a lookup answers
+    /// from a partial query on every keystroke, so it must never wait for an
+    /// 11 MB file. A shell warms the handle with
+    /// [`SharedPinyin::preheat`](SharedPinyin::preheat) at start-up; while that
+    /// load is still running this returns no candidates and the next keystroke,
+    /// once the table is there, returns them.
     #[must_use]
     pub fn lookup(&self, query: &str, limit: usize) -> Vec<Candidate> {
-        let Some(pinyin) = self.pinyin.get() else {
+        let Some(pinyin) = self.pinyin.get_ready() else {
             return Vec::new();
         };
         pinyin
@@ -152,6 +161,36 @@ mod tests {
         let list = lookup().lookup("ni", 5);
         assert_eq!(list[0].text, "你");
         assert_eq!(list[0].comment, "flll", "the longest code is the full code");
+    }
+
+    /// 反查 reads the table from memory. A handle that is still loading — or
+    /// that was never pointed at a readable file — answers the keystroke with no
+    /// candidates and no wait; the same lookup answers once the load is done,
+    /// which is the degradation SPEC §8.4 asks for.
+    #[test]
+    fn a_table_that_is_not_ready_answers_nothing() {
+        let dict = Arc::new(Dictionary::parse_str("你好\tflol\n").expect("table"));
+        let pinyin = Arc::new(SharedPinyin::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/schemes/pinyin/py.hdict"
+        )));
+        let lookup = ReverseLookup::for_table(pinyin, dict);
+
+        assert!(
+            lookup.lookup("nihao", 5).is_empty(),
+            "no load has run, so there is nothing to wait for"
+        );
+
+        Arc::clone(&lookup.pinyin).preheat();
+        for _ in 0..2_000 {
+            if !lookup.lookup("nihao", 5).is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let list = lookup.lookup("nihao", 5);
+        assert_eq!(list[0].text, "你好", "the next keystroke after the load has the candidates");
+        assert_eq!(list[0].comment, "flol");
     }
 
     /// A word the table does not list falls back to its characters' codes,

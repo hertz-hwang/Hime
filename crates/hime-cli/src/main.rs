@@ -255,11 +255,10 @@ fn main() -> ExitCode {
         return build_index(&args[1..]);
     }
     let (mode, table_arg) = parse_args();
-    // 反查 needs a pinyin table beside the active shape scheme. It is shared
-    // and read on first use, so a session created for the word-table modes
-    // does not pay for it until the first backtick.
+    // 反查 needs a pinyin table beside the active shape scheme. One handle for
+    // the whole process, the same table a 全拼 session reads (SPEC §8.4).
     let pinyin_path = pinyin_table(None);
-    let shared_pinyin = || Arc::new(SharedPinyin::new(&pinyin_path));
+    let shared_pinyin = Arc::new(SharedPinyin::new(&pinyin_path));
 
     if mode == Mode::Pinyin {
         let path = match &table_arg {
@@ -302,6 +301,12 @@ fn main() -> ExitCode {
         return run(&mut session);
     }
 
+    // Both remaining modes offer 反查, which answers a keystroke only from a
+    // table that is already in memory (SPEC §8.4). A terminal has no keystroke
+    // deadline and a scripted backtick has to be able to rely on the first one,
+    // so the tester reads the table here instead of preheating it; hime-core
+    // prints what that cost.
+    let _ = shared_pinyin.get();
     let mut session = if mode == Mode::Sentence {
         let Some(model) = find_model_path() else {
             eprintln!(
@@ -327,7 +332,7 @@ fn main() -> ExitCode {
             table.display()
         );
         Session::sentence(Arc::clone(&engine), Config::default()).with_reverse(Arc::new(
-            ReverseLookup::for_sentence(shared_pinyin(), engine),
+            ReverseLookup::for_sentence(Arc::clone(&shared_pinyin), engine),
         ))
     } else {
         let path = word_table(table_arg);
@@ -345,7 +350,7 @@ fn main() -> ExitCode {
         );
         eprintln!("hime-cli: 反查 ready (backtick, then full pinyin)");
         Session::new(Arc::clone(&dict))
-            .with_reverse(Arc::new(ReverseLookup::for_table(shared_pinyin(), dict)))
+            .with_reverse(Arc::new(ReverseLookup::for_table(Arc::clone(&shared_pinyin), dict)))
     };
     eprintln!("hime-cli: {HELP}");
     run(&mut session)

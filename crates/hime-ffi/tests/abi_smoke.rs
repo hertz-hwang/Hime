@@ -363,6 +363,9 @@ fn full_flow_through_c_abi() {
 
     // --- 反查 (SPEC §8.3): backtick + full pinyin lists scheme codes ---
 
+    // The 全拼 selection above resolved the shared pinyin handle for this same
+    // table, so 反查 has a table to read: it answers from memory and never waits
+    // for a load of its own. An unloaded table shows no candidates instead.
     assert!(select_scheme(liuli["path"].as_str().unwrap()));
     let reverse = hime_create_session();
     let r = process(reverse, 96);

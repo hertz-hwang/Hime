@@ -80,9 +80,11 @@ impl Engine {
 
     /// The pinyin table a 全拼 session retrieves from. It is the same handle
     /// 反查 uses — one table is parsed once and held once (SPEC §8.4) — so
-    /// building a session is an atomic read plus an `Arc` clone. A missing or
-    /// unreadable table leaves the sessions with nothing to offer, which is
-    /// what an empty lexicon means.
+    /// building a session is an atomic read plus an `Arc` clone. This is the one
+    /// reader that waits for a load: a 全拼 session is useless without the
+    /// table, and [`hime_select_scheme`] has resolved it before rebuilding any
+    /// session. A missing or unreadable table leaves the sessions with nothing
+    /// to offer, which is what an empty lexicon means.
     fn pinyin_lexicon(&self) -> Arc<PinyinLexicon> {
         self.pinyin
             .as_ref()
@@ -211,7 +213,8 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
     match Dictionary::load(path) {
         Ok(dict) => {
             let dict = Arc::new(dict);
-            let pinyin = pinyin_table_near(Path::new(path));
+            let pinyin = pinyin_table_near(Path::new(path))
+                .map(|path| Arc::new(SharedPinyin::new(path)));
             // The legacy entry point has no scheme folder; attribute its key
             // presses to the table's own folder when there is one.
             let scheme = Path::new(path)
@@ -226,13 +229,15 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
                         user.flush();
                     }
                 }
-                let engine = Engine::new(
-                    EngineSource::Table(dict),
-                    pinyin.map(|path| Arc::new(SharedPinyin::new(path))),
-                );
+                let engine = Engine::new(EngineSource::Table(dict), pinyin.clone());
                 engine.typing.set_scheme(&scheme);
                 *slot = Some(engine);
             });
+            // 反查 answers a keystroke only from a table already in memory, so
+            // the read starts now and on its own thread (SPEC §8.4).
+            if let Some(handle) = pinyin {
+                handle.preheat();
+            }
             true
         }
         Err(e) => {
@@ -456,6 +461,12 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 /// `data/sentence-ngram.hng`). If that model is absent, selecting such a
 /// scheme fails and leaves the engine unchanged.
 ///
+/// A 全拼 scheme's pinyin table is read by this call: a scheme the user cannot
+/// type with should not be selected, and reading it outside the engine lock
+/// keeps other threads' keystrokes running while it is. A 形码 scheme's table is
+/// only ever read by 反查, so this starts that read on a background thread and
+/// returns (SPEC §8.4).
+///
 /// Returns `false` on a null/invalid path or when the folder's metadata, table
 /// or (for 形码整句) model fails to load, or a 全拼 scheme's table yields no
 /// candidates; the engine stays unchanged.
@@ -543,16 +554,31 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     // presses recorded before any scheme loads stay unattributed.
     let scheme_dir = info.dir.clone();
     let quanpin = matches!(source, EngineSource::Pinyin { .. });
+    // Resolve the shared handle while the engine lock is held, but read the
+    // table outside it: a 全拼 scheme cannot answer a single keystroke without
+    // its table, so that check has to run before any of the live engine is
+    // touched, and holding the lock across a load would stop the keystrokes of
+    // every other thread for the same seconds.
+    let shared = with_engine("hime_select_scheme", |slot| {
+        shared_pinyin(slot.as_ref().and_then(|engine| engine.pinyin.as_ref()), pinyin.as_deref())
+    });
+    if quanpin && shared.as_ref().and_then(|table| table.get()).is_none() {
+        // A 全拼 scheme types from this table, so the switch waits for it and a
+        // table that offers nothing fails the call.
+        eprintln!("hime-ffi: scheme {path:?} is 全拼 but its table offers no candidates");
+        return false;
+    }
+    // A 形码 scheme reads this table for 反查 alone, and 反查 answers a keystroke
+    // from memory only, so the read starts here, on its own thread (SPEC §8.4).
+    // A handle the check above has already resolved starts nothing new.
+    if let Some(handle) = shared.as_ref() {
+        handle.preheat();
+    }
     let switched = with_engine("hime_select_scheme", |slot| {
-        // Resolve the shared handle first: it has to be the engine's own when
-        // the path is unchanged, and a 全拼 scheme whose table cannot be read
-        // has to fail before any of the live engine is touched.
+        // A concurrent switch can have installed another handle in between, and
+        // the engine's own handle is the one to keep when it reads this table.
         let current = slot.as_ref().and_then(|engine| engine.pinyin.as_ref());
-        let shared = shared_pinyin(current, pinyin.as_deref());
-        if quanpin && shared.as_ref().and_then(|table| table.get()).is_none() {
-            eprintln!("hime-ffi: scheme {path:?} is 全拼 but its table offers no candidates");
-            return false;
-        }
+        let shared = shared_pinyin(current.or(shared.as_ref()), pinyin.as_deref());
         match slot.as_mut() {
             None => {
                 let mut engine = Engine::new(source, shared);

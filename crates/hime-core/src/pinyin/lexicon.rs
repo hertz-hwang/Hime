@@ -74,24 +74,30 @@ pub struct PinyinMatch {
     pub ordinal: usize,
 }
 
-/// A pinyin table that is loaded on first use.
+/// A pinyin table that is loaded once, off the keystroke path.
 ///
 /// A session must not be created, and a keystroke must not be answered, by
 /// reading an 11 MB table — a process that only ever types 形码 pays nothing for
-/// it. The first 反查 (or the first 全拼 keystroke) loads it once and every later
-/// caller shares the result: normally that is a `.hidx` mapping (SPEC §8.1),
-/// milliseconds; only a table with no current index is parsed and sorted here,
-/// which is why `hime-cli build-index` exists. The outcome is a single `Arc`
-/// that 反查 and every 全拼 session read, so one table is never parsed or held
-/// twice. A load failure is remembered too, so a broken table is reported once
-/// instead of per keystroke.
+/// it. The first caller loads the table once and every later caller shares the
+/// result: normally that is a `.hidx` mapping (SPEC §8.1), milliseconds; only a
+/// table with no current index is parsed and sorted here, which is why
+/// `hime-cli build-index` exists. The outcome is a single `Arc` that 反查 and
+/// every 全拼 session read, so one table is never parsed or held twice. A load
+/// failure is remembered too, so a broken table is reported once instead of per
+/// keystroke.
+///
+/// Two readers, deliberately: [`Self::get`] waits for the load and is for a
+/// caller that cannot answer without the table (全拼), [`Self::get_ready`]
+/// never waits and is for the keystroke path (反查). [`Self::preheat`] starts
+/// the load on a background thread so neither of them has to wait.
 pub struct SharedPinyin {
     path: PathBuf,
     loaded: OnceLock<Result<Arc<PinyinLexicon>, String>>,
 }
 
 impl SharedPinyin {
-    /// Point at a table file; nothing is read until [`Self::get`].
+    /// Point at a table file; nothing is read until [`Self::get`] or
+    /// [`Self::preheat`].
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into(), loaded: OnceLock::new() }
@@ -129,6 +135,43 @@ impl SharedPinyin {
             }
             outcome
         });
+        Self::usable(outcome)
+    }
+
+    /// The table when this handle already holds it. This never waits: a load
+    /// in progress reads as `None`, exactly as a table that was never asked
+    /// for. It is the reader for a keystroke path, where a few seconds of
+    /// parsing would freeze the UI; the caller answers that keystroke from
+    /// what it has (SPEC §8.4).
+    #[must_use]
+    pub fn get_ready(&self) -> Option<Arc<PinyinLexicon>> {
+        self.loaded.get().and_then(Self::usable)
+    }
+
+    /// Read the table on a background thread so nobody waits for it.
+    ///
+    /// A shell calls this when it starts and whenever it is pointed at a new
+    /// table. The load costs the current thread nothing; until the thread is
+    /// done [`Self::get_ready`] answers `None` and [`Self::get`] is the one
+    /// that waits. An already loaded (or already loading) table starts no
+    /// second thread, and a failed spawn leaves the lazy path intact: the
+    /// next [`Self::get`] loads it as it always did.
+    pub fn preheat(self: &Arc<Self>) {
+        if self.loaded.get().is_some() {
+            return;
+        }
+        let shared = Arc::clone(self);
+        if let Err(e) = std::thread::Builder::new()
+            .name("hime-pinyin".to_owned())
+            .spawn(move || drop(shared.get()))
+        {
+            eprintln!("hime-core: pinyin preheat could not start: {e}");
+        }
+    }
+
+    /// Both readers report an unusable table — missing, malformed, or empty —
+    /// as `None`.
+    fn usable(outcome: &Result<Arc<PinyinLexicon>, String>) -> Option<Arc<PinyinLexicon>> {
         match outcome {
             Ok(lexicon) if !lexicon.is_empty() => Some(Arc::clone(lexicon)),
             _ => None,
@@ -1186,6 +1229,113 @@ mod tests {
 
     fn lexicon_for_tests() -> PinyinLexicon {
         PinyinLexicon::parse("你\tni\t1\n")
+    }
+
+    /// `get_ready` answers from memory only: a table nobody has asked for and a
+    /// table whose load failed both read as no table, and a loaded one is the
+    /// same `Arc` every reader sees.
+    #[test]
+    fn a_shared_table_is_ready_only_after_its_load() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/schemes/pinyin/py.hdict");
+        let shared = SharedPinyin::new(path);
+        assert!(shared.get_ready().is_none(), "a handle nobody asked for a table");
+
+        let loaded = shared.get().expect("the shipped table loads");
+        let ready = shared.get_ready().expect("a load makes it answer without waiting");
+        assert_eq!(Arc::as_ptr(&ready), Arc::as_ptr(&loaded), "one table for every reader");
+        assert_eq!(ready.entry_count(), loaded.entry_count());
+
+        let missing = SharedPinyin::new("/nonexistent/hime-pinyin.hdict");
+        assert!(missing.get().is_none());
+        assert!(missing.get_ready().is_none(), "a failure stays a failure");
+
+        let wrapped = SharedPinyin::from_loaded(Arc::new(lexicon_for_tests()));
+        assert_eq!(wrapped.get_ready().map(|l| l.entry_count()), Some(1));
+
+        let empty = SharedPinyin::from_loaded(Arc::new(PinyinLexicon::empty()));
+        assert!(empty.get().is_none());
+        assert!(empty.get_ready().is_none(), "a table with no rows answers nothing");
+    }
+
+    /// A load in progress reads as no table: a caller gets a complete table or
+    /// nothing, which is what lets the 反查 path call this on every keystroke
+    /// without ever waiting on the file (SPEC §8.4). The load is held open with
+    /// a FIFO, so "in progress" is a state this test controls and not one it
+    /// races for.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_in_progress_reads_as_no_table() {
+        let dir = temp_folder("loading");
+        let path = dir.join("py.hdict");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo is available");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let shared = Arc::new(SharedPinyin::new(path.clone()));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let loader = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let _ = sender.send(());
+                drop(shared.get());
+            })
+        };
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the loader thread started");
+
+        // Opening a FIFO for writing waits for a reader, so this returns once
+        // the loader is inside the load — with the table still unset.
+        let mut table = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the loader opened the table");
+        assert!(shared.get_ready().is_none(), "an unfinished load is not a table");
+        let written = std::io::Write::write_all(&mut table, "你好\tnihao\t200\n".as_bytes());
+        drop(table);
+        written.expect("rows written");
+
+        let ready = wait_until_ready(&shared).expect("the load finishes and every reader sees it");
+        assert_eq!(texts(&ready.lookup("nihao", 5)), vec!["你好"]);
+        loader.join().expect("the loader finished");
+        remove_folder(dir);
+    }
+
+    /// The table is read by the preheat thread alone: the call returns while the
+    /// handle is still empty and the table appears without any reader asking.
+    #[test]
+    fn preheat_loads_a_table_nobody_asked_for() {
+        let dir = temp_folder("preheat");
+        let path = dir.join("py.hdict");
+        fs::write(&path, "你好\tnihao\t200\n开发\tkaifa\t5\n").expect("table written");
+
+        let shared = Arc::new(SharedPinyin::new(path));
+        shared.preheat();
+        let ready = wait_until_ready(&shared).expect("the preheat thread loads the table");
+        assert_eq!(ready.entry_count(), 2);
+        assert_eq!(texts(&ready.lookup("nihao", 5)), vec!["你好"]);
+        assert_eq!(
+            Arc::as_ptr(&ready),
+            Arc::as_ptr(&shared.get().expect("the same table")),
+            "the thread and the caller share one table"
+        );
+        shared.preheat();
+        assert_eq!(shared.get().map(|l| l.entry_count()), Some(2), "no second load");
+        remove_folder(dir);
+    }
+
+    /// Waits for a background load; a table this small is a matter of
+    /// milliseconds, so the deadline only guards against a lost thread.
+    fn wait_until_ready(shared: &Arc<SharedPinyin>) -> Option<Arc<PinyinLexicon>> {
+        for _ in 0..2_000 {
+            if let Some(lexicon) = shared.get_ready() {
+                return Some(lexicon);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
     }
 
     #[test]
