@@ -3,7 +3,8 @@
 #
 # 1. cargo build --release -p hime-ffi          -> target/release/libhime_ffi.a
 # 2. swiftc sources + hime.h bridge header      -> Hime.app/Contents/MacOS/Hime
-# 3. assemble bundle (Info.plist + schemes + icons + localized names), codesign
+# 3. assemble bundle (Info.plist + schemes + pinyin index + icons + localized
+#    names), codesign
 # 4. optional: --install copies to ~/Library/Input Methods/ and (re)launches
 set -euo pipefail
 
@@ -51,6 +52,14 @@ swiftc \
 
 cp "${SCRIPT_DIR}/Info.plist" "${CONTENTS}/Info.plist"
 cp -R "${SCHEMES_DIR}" "${CONTENTS}/Resources/schemes"
+
+# Compile the 全拼 table into the `.hidx` index the engine maps in place of
+# parsing and sorting it (SPEC §8.1). Without it the first 反查 or 全拼 keystroke
+# would parse the table inside a keystroke; a stale or damaged index is ignored
+# at load time, and `build-index` verifies what it wrote before it succeeds.
+echo "==> Compiling the pinyin index"
+cargo run --release --manifest-path "${ROOT_DIR}/Cargo.toml" -p hime-cli -- \
+    build-index "${CONTENTS}/Resources/schemes/pinyin/py.hdict"
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
 echo "==> Rendering icons from assets/*.svg"
