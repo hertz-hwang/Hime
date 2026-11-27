@@ -396,6 +396,11 @@ final class PreferencesModel: ObservableObject {
     /// the finger map stay in the engine.
     @Published var keyboardSchemeChoice: String = ""
 
+    /// Whether 键盘热力 draws and shades Backspace and Enter. Their counts
+    /// dwarf the encoding keys, so they stay out of the heat scale by default.
+    /// Shell display state only — the engine records them either way.
+    @Published var keyboardShowsEditKeys: Bool = false
+
     /// Drives the live refresh of the 用户模型 page; nil otherwise.
     private var userModelRefreshTimer: Timer?
 
@@ -1808,7 +1813,11 @@ private struct KeyboardView: View {
                     }
                 }
                 Section("键盘热力") {
-                    MacKeyboardHeatmap(stats: selected)
+                    switchRow(title: "展示退格/回车键",
+                              hint: "两者击键数通常高过编码键，关闭时深浅按其余键归一",
+                              isOn: $model.keyboardShowsEditKeys)
+                    MacKeyboardHeatmap(stats: selected,
+                                       showsEditKeys: model.keyboardShowsEditKeys)
                         .padding(.vertical, 6)
                     HStack(spacing: 6) {
                         Text("浅")
@@ -1893,6 +1902,19 @@ private struct KeyboardView: View {
         }
     }
 
+    /// Row with a switch on the right.
+    private func switchRow(title: String, hint: String,
+                           isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 8) {
+                Text(title)
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     private func infoRow(title: String, value: String) -> some View {
         LabeledContent(title) {
             Text(value)
@@ -1910,6 +1932,9 @@ private struct KeyboardView: View {
 /// (SPEC §9).
 private struct MacKeyboardHeatmap: View {
     let stats: KeyboardStats?
+    /// Draws and shades Backspace and Enter; off leaves them decoration and
+    /// out of the heat scale, so the encoding keys keep their contrast.
+    let showsEditKeys: Bool
 
     /// A 15-unit ANSI block; every main row is stretched to end on
     /// `mainRight`, so the board has one clean right edge.
@@ -1937,8 +1962,17 @@ private struct MacKeyboardHeatmap: View {
         shades[min(max(level, 0), shades.count - 1)]
     }
 
+    /// The two editing keys the 键盘热力 toggle controls. The engine records
+    /// them as any other key; their counts are the highest on the board.
+    private static let editKeys: Set<String> = ["Backspace", "Enter"]
+
+    /// Hottest key of the drawn set; the heat scale is normalised against it.
     private var maxCount: Int64 {
-        stats?.keys.values.max() ?? 0
+        guard let stats else { return 0 }
+        return stats.keys
+            .filter { showsEditKeys || !Self.editKeys.contains($0.key) }
+            .values
+            .max() ?? 0
     }
 
     private func level(_ key: String) -> Int {
@@ -1947,8 +1981,9 @@ private struct MacKeyboardHeatmap: View {
         return min(4, 1 + Int(ratio * 4.0 - 0.0001))
     }
 
-    private func numberColor(_ key: String) -> Color {
-        level(key) >= 4 ? .white : .primary
+    /// Text stays readable on the two darkest steps.
+    private static func textColor(level: Int) -> Color {
+        level >= 4 ? .white : .primary
     }
 
     private struct Cap {
@@ -1990,7 +2025,8 @@ private struct MacKeyboardHeatmap: View {
                 Cap(name: "8", label: "8"), Cap(name: "9", label: "9"),
                 Cap(name: "0", label: "0"), Cap(name: "-", label: "-"),
                 Cap(name: "=", label: "="),
-                Cap(name: "Backspace", label: "delete", width: 2, stretch: true),
+                Cap(name: "Backspace", label: "delete", width: 2,
+                    recorded: showsEditKeys, stretch: true),
             ],
             [
                 Cap(name: "Tab", label: "⇥", width: 1.5), Cap(name: "q", label: "q"),
@@ -2006,7 +2042,8 @@ private struct MacKeyboardHeatmap: View {
                 Cap(name: "f", label: "f"), Cap(name: "g", label: "g"), Cap(name: "h", label: "h"),
                 Cap(name: "j", label: "j"), Cap(name: "k", label: "k"), Cap(name: "l", label: "l"),
                 Cap(name: ";", label: ";"), Cap(name: "'", label: "'"),
-                Cap(name: "Enter", label: "return", width: 2.25, stretch: true),
+                Cap(name: "Enter", label: "return", width: 2.25,
+                    recorded: showsEditKeys, stretch: true),
             ],
             [
                 Cap(name: "ShiftLeft", label: "⇧", width: 2.25, recorded: false),
@@ -2107,12 +2144,12 @@ private struct MacKeyboardHeatmap: View {
                 ? extra * cap.width / stretchUnits : 0
             let width = cap.width * Self.key + extraWidth
             let rect = CGRect(x: x, y: y, width: width, height: Self.rowHeight)
+            let heat = cap.recorded ? level(cap.name) : 0
             let count = cap.recorded ? stats?.count(cap.name) ?? 0 : 0
-            drawKey(&context, rect: rect,
-                    fill: Self.shade(level: cap.recorded ? level(cap.name) : 0),
+            drawKey(&context, rect: rect, fill: Self.shade(level: heat),
                     stroke: Color.secondary.opacity(0.22),
                     label: cap.label,
-                    labelColor: numberColor(cap.name).opacity(0.8),
+                    labelColor: Self.textColor(level: heat).opacity(0.8),
                     count: count > 0 ? Self.format(count) : nil,
                     fontSize: 10)
             x += width + Self.gap
@@ -2121,9 +2158,10 @@ private struct MacKeyboardHeatmap: View {
 
     private func drawArrow(_ context: inout GraphicsContext, rect: CGRect,
                            name: String, label: String) {
-        drawKey(&context, rect: rect, fill: Self.shade(level: level(name)),
+        let heat = level(name)
+        drawKey(&context, rect: rect, fill: Self.shade(level: heat),
                 stroke: Color.secondary.opacity(0.22), label: label,
-                labelColor: numberColor(name).opacity(0.8),
+                labelColor: Self.textColor(level: heat).opacity(0.8),
                 count: nil, fontSize: 9, centered: true)
     }
 
