@@ -26,14 +26,15 @@ use hime_core::{
 };
 
 /// Where candidates come from: a 形码 word table, the whole-sentence engine a
-/// 形码整句 (type 3) scheme needs, or the pinyin lexicon a 全拼 (type 0)
-/// scheme carries. This decides how every session is built.
+/// 形码整句 (type 3) scheme needs, or a 全拼 (type 0) scheme, whose words come
+/// from [`Engine::pinyin`]. This decides how every session is built.
 enum EngineSource {
     Table(Arc<Dictionary>),
     Sentence(Arc<SentenceEngine>),
-    /// A 全拼 (type 0) scheme. The model is present when an `.hng` was found:
-    /// then the sessions decode whole sentences, not just table words.
-    Pinyin { lexicon: Arc<PinyinLexicon>, model: Option<Arc<NgramModel>> },
+    /// A 全拼 (type 0) scheme. Its table is the [`Engine::pinyin`] handle, so
+    /// this arm carries only the sentence model, present when an `.hng` was
+    /// found: then the sessions decode whole sentences, not just table words.
+    Pinyin { model: Option<Arc<NgramModel>> },
 }
 
 /// Global engine state, present only after a successful `hime_init`.
@@ -43,10 +44,11 @@ struct Engine {
     sessions: HashMap<u64, Session>,
     next_session_id: u64,
     /// The shared pinyin table: the candidate source of a 全拼 scheme and the
-    /// query side of 反查 in every other scheme (SPEC §8). The table is read
-    /// on first use, so a process that never needs pinyin pays nothing for
-    /// it; `None` when no table was found beside the schemes, in which case
-    /// 反查 stays unavailable.
+    /// query side of 反查 in every other scheme (SPEC §8). This is the only
+    /// pinyin table the process loads, so 全拼 and 反查 read one copy. The
+    /// table is read on first use, so a process that never needs pinyin pays
+    /// nothing for it; `None` when no table was found beside the schemes, in
+    /// which case 反查 stays unavailable.
     pinyin: Option<Arc<SharedPinyin>>,
     /// The `.hng` path a 形码整句 source loaded from (SPEC §7.5); `None`
     /// for a word table. Reported by `hime_model_status` so the panel can
@@ -63,17 +65,29 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(source: EngineSource, pinyin_path: Option<PathBuf>) -> Self {
+    fn new(source: EngineSource, pinyin: Option<Arc<SharedPinyin>>) -> Self {
         Self {
             source,
             config: Config::default(),
             sessions: HashMap::new(),
             next_session_id: 1,
             model_path: None,
-            pinyin: pinyin_path.map(|path| Arc::new(SharedPinyin::new(path))),
+            pinyin,
             user_ngram: None,
             typing: Arc::new(TypingStats::load(typing_stats_path())),
         }
+    }
+
+    /// The pinyin table a 全拼 session retrieves from. It is the same handle
+    /// 反查 uses — one table is parsed once and held once (SPEC §8.4) — so
+    /// building a session is an atomic read plus an `Arc` clone. A missing or
+    /// unreadable table leaves the sessions with nothing to offer, which is
+    /// what an empty lexicon means.
+    fn pinyin_lexicon(&self) -> Arc<PinyinLexicon> {
+        self.pinyin
+            .as_ref()
+            .and_then(|shared| shared.get())
+            .unwrap_or_else(|| Arc::new(PinyinLexicon::empty()))
     }
 
     /// Build a fresh session for the current source and config. A 形码整句
@@ -91,15 +105,15 @@ impl Engine {
         let session = match &self.source {
             EngineSource::Table(dict) => Session::with_config(Arc::clone(dict), self.config),
             EngineSource::Sentence(engine) => Session::sentence(Arc::clone(engine), self.config),
-            EngineSource::Pinyin { lexicon, model: None } => {
+            EngineSource::Pinyin { model: None } => {
                 // Without the sentence model the word stage still serves the
                 // window; the learned model keeps recording commits there.
-                return Session::pinyin(Arc::clone(lexicon), self.config)
+                return Session::pinyin(self.pinyin_lexicon(), self.config)
                     .with_user_ngram(self.user_ngram.clone());
             }
-            EngineSource::Pinyin { lexicon, model: Some(model) } => {
+            EngineSource::Pinyin { model: Some(model) } => {
                 return Session::pinyin_sentence(
-                    Arc::clone(lexicon),
+                    self.pinyin_lexicon(),
                     Arc::clone(model),
                     self.user_ngram.clone(),
                     self.config,
@@ -135,8 +149,7 @@ impl Engine {
 
 /// Where the pinyin table lives: the `pinyin` scheme folder beside the one
 /// being selected (both the bundled `data/schemes` and the user folder keep
-/// that layout, SPEC §5.2/§8.1), or an explicit file given by
-/// `hime_set_pinyin_path`. A 全拼 scheme carries its own table, so it wins.
+/// that layout, SPEC §5.2/§8.1). A 全拼 scheme carries its own table, so it wins.
 fn pinyin_table_near(scheme_path: &Path) -> Option<PathBuf> {
     let schemes_dir = scheme_path.parent()?;
     if let Ok(info) = load_scheme(&schemes_dir.join("pinyin")) {
@@ -213,7 +226,10 @@ pub unsafe extern "C" fn hime_init(dict_path: *const c_char) -> bool {
                         user.flush();
                     }
                 }
-                let engine = Engine::new(EngineSource::Table(dict), pinyin);
+                let engine = Engine::new(
+                    EngineSource::Table(dict),
+                    pinyin.map(|path| Arc::new(SharedPinyin::new(path))),
+                );
                 engine.typing.set_scheme(&scheme);
                 *slot = Some(engine);
             });
@@ -441,7 +457,8 @@ pub unsafe extern "C" fn hime_scan_schemes(dir: *const c_char) -> *mut c_char {
 /// scheme fails and leaves the engine unchanged.
 ///
 /// Returns `false` on a null/invalid path or when the folder's metadata, table
-/// or (for 形码整句) model fails to load; the engine stays unchanged.
+/// or (for 形码整句) model fails to load, or a 全拼 scheme's table yields no
+/// candidates; the engine stays unchanged.
 ///
 /// # Safety
 /// `scheme_dir` must be null or point to a valid NUL-terminated C string.
@@ -467,8 +484,9 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     };
     // A 形码整句 (type 3) scheme decodes with the n-gram model over a sentence
     // table, a 全拼 (type 0) scheme looks pinyin words up, and every other
-    // scheme is a word table. Building the engine here lets a bad model or
-    // table fail the call without touching the live engine.
+    // scheme is a word table. Building the source here lets a bad model or
+    // word table fail the call without touching the live engine; a pinyin
+    // table is checked against the shared handle below.
     let mut pinyin = pinyin_table_near(Path::new(path));
     // The learned user model is per user, not per scheme: the scheme only
     // decides whether it is used (SPEC §7.7).
@@ -492,35 +510,27 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
                 }
             }
         }
-        CodeType::Quanpin => match PinyinLexicon::load(&info.table) {
-            Ok(lexicon) => {
-                // The scheme's own table is also the reverse source, so a
-                // user pinyin scheme serves 反查 in the shape schemes.
-                pinyin = Some(PathBuf::from(&info.table));
-                // Whole-sentence decoding needs the n-gram model; without one
-                // the scheme still types words and 简拼, so a missing model is
-                // reported and not fatal here.
-                let model = find_model_path().and_then(|path| match NgramModel::load(&path) {
-                    Ok(model) => Some((Arc::new(model), path)),
-                    Err(e) => {
-                        eprintln!(
-                            "hime-ffi: 全拼 sentence decoding is off, model {path:?} failed to load: {e}"
-                        );
-                        None
-                    }
-                });
-                let model_path = model.as_ref().map(|(_, path)| path.clone());
-                let source = EngineSource::Pinyin {
-                    lexicon: Arc::new(lexicon),
-                    model: model.map(|(model, _)| model),
-                };
-                (source, model_path)
-            }
-            Err(e) => {
-                eprintln!("hime-ffi: failed to load pinyin table {:?}: {e}", info.table);
-                return false;
-            }
-        },
+        CodeType::Quanpin => {
+            // The scheme's own table is also the reverse source, so a
+            // user pinyin scheme serves 反查 in the shape schemes. The rows
+            // are not read here: the shared handle built below is the one
+            // place this table is ever loaded, and it is checked there.
+            pinyin = Some(PathBuf::from(&info.table));
+            // Whole-sentence decoding needs the n-gram model; without one
+            // the scheme still types words and 简拼, so a missing model is
+            // reported and not fatal here.
+            let model = find_model_path().and_then(|path| match NgramModel::load(&path) {
+                Ok(model) => Some((Arc::new(model), path)),
+                Err(e) => {
+                    eprintln!(
+                        "hime-ffi: 全拼 sentence decoding is off, model {path:?} failed to load: {e}"
+                    );
+                    None
+                }
+            });
+            let model_path = model.as_ref().map(|(_, path)| path.clone());
+            (EngineSource::Pinyin { model: model.map(|(model, _)| model) }, model_path)
+        }
         _ => match Dictionary::load(&info.table) {
             Ok(dict) => (EngineSource::Table(Arc::new(dict)), None),
             Err(e) => {
@@ -532,44 +542,64 @@ pub unsafe extern "C" fn hime_select_scheme(scheme_dir: *const c_char) -> bool {
     // The key histogram follows the scheme the user typed with (SPEC §9);
     // presses recorded before any scheme loads stay unattributed.
     let scheme_dir = info.dir.clone();
-    let switched = with_engine("hime_select_scheme", |slot| match slot.as_mut() {
-        None => {
-            let mut engine = Engine::new(source, pinyin);
-            engine.config = info.metadata.defaults_for(engine.config);
-            engine.model_path = loaded_model;
-            engine.user_ngram = user;
-            engine.typing.set_scheme(&scheme_dir);
-            *slot = Some(engine);
-            true
+    let quanpin = matches!(source, EngineSource::Pinyin { .. });
+    let switched = with_engine("hime_select_scheme", |slot| {
+        // Resolve the shared handle first: it has to be the engine's own when
+        // the path is unchanged, and a 全拼 scheme whose table cannot be read
+        // has to fail before any of the live engine is touched.
+        let current = slot.as_ref().and_then(|engine| engine.pinyin.as_ref());
+        let shared = shared_pinyin(current, pinyin.as_deref());
+        if quanpin && shared.as_ref().and_then(|table| table.get()).is_none() {
+            eprintln!("hime-ffi: scheme {path:?} is 全拼 but its table offers no candidates");
+            return false;
         }
-        Some(engine) => {
-            engine.config = info.metadata.defaults_for(engine.config);
-            engine.source = source;
-            engine.model_path = loaded_model;
-            // Learned counts still in memory are written before the handle
-            // they belong to is replaced.
-            if let Some(previous) = engine.user_ngram.take() {
-                previous.flush();
+        match slot.as_mut() {
+            None => {
+                let mut engine = Engine::new(source, shared);
+                engine.config = info.metadata.defaults_for(engine.config);
+                engine.model_path = loaded_model;
+                engine.user_ngram = user;
+                engine.typing.set_scheme(&scheme_dir);
+                *slot = Some(engine);
+                true
             }
-            engine.user_ngram = user;
-            // A different pinyin table (or a different folder) replaces the
-            // shared one; an unchanged path keeps the loaded table and every
-            // running session keeps reading it.
-            let same_path = match (&engine.pinyin, &pinyin) {
-                (Some(current), Some(path)) => current.path() == path,
-                (None, None) => true,
-                _ => false,
-            };
-            if !same_path {
-                engine.pinyin = pinyin.map(|path| Arc::new(SharedPinyin::new(path)));
+            Some(engine) => {
+                engine.config = info.metadata.defaults_for(engine.config);
+                engine.source = source;
+                engine.model_path = loaded_model;
+                // Learned counts still in memory are written before the handle
+                // they belong to is replaced.
+                if let Some(previous) = engine.user_ngram.take() {
+                    previous.flush();
+                }
+                engine.user_ngram = user;
+                // The same handle serves 反查 and every 全拼 session, so a
+                // table already loaded for one of them is never loaded again.
+                engine.pinyin = shared;
+                engine.typing.set_scheme(&scheme_dir);
+                engine.rebuild_sessions();
+                engine.typing.flush();
+                true
             }
-            engine.typing.set_scheme(&scheme_dir);
-            engine.rebuild_sessions();
-            engine.typing.flush();
-            true
         }
     });
     switched
+}
+
+/// The shared pinyin handle for `table`: `current` when it already reads that
+/// same file, so a scheme switch between shape schemes, or back to 全拼, keeps
+/// the loaded table instead of paying for it again (SPEC §8.4). `None` when the
+/// selected scheme's folder has no pinyin table at all.
+fn shared_pinyin(
+    current: Option<&Arc<SharedPinyin>>,
+    table: Option<&Path>,
+) -> Option<Arc<SharedPinyin>> {
+    if let (Some(handle), Some(path)) = (current, table) {
+        if handle.path() == path {
+            return Some(Arc::clone(handle));
+        }
+    }
+    table.map(|path| Arc::new(SharedPinyin::new(path.to_path_buf())))
 }
 
 /// Load the shared user model when the data folder resolves. A file the
