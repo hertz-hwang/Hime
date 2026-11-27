@@ -554,7 +554,7 @@ logp          = ln((1 − α)·e^base + α·p_user)
 - `hdict::load_table_text` 按魔数判定：`.hdict` 解压，其它文件按 UTF-8 直读，所以
   用户把明文 `py.txt` 丢进方案目录也能用。`Dictionary::load` 也走这条入口，形码
   码表同样可以用 `.hdict` 打包。
-- 载入时每条码按音节切分，把音节序号（`syllables::syllable_id`，411 个音节表内的
+- 建索引时每条码按音节切分，把音节序号（`syllables::syllable_id`，411 个音节表内的
   1 起编号）**每音节 9 bit、高位在前**打包成一个 `u128`，得到「音节键」。下标是
   (音节键, 词) 的扁平数组，按 `(音节键, 词频降序, 行号, 词面)` 排好：查询时整数比较
   等价于音节的字典序比较，每个音节位置一次二分即可收窄。
@@ -563,9 +563,27 @@ logp          = ln((1 − α)·e^base + α·p_user)
   展示，`ni hao xi ang` 这种更细的命中不会出现在编码行里。
 - 词表行按 `(词, 码)` 去重（同一拼音同一词只留一行），`lue`/`nue` 归一化为
   `lve`/`nve`，两种 ü 写法都能命中。
-- 索引构建是一次排序，实测随包词表 release 约 1.5 s、debug 更久，因此不放在会话
-  创建路径上：`pinyin::SharedPinyin` 把一份表包成「首次用到才读」，载入结果（含失败）
-  被记住，所有会话共享同一份 `Arc`（§8.4）。
+- 索引构建是一次全量排序，实测随包词表 release 要 4.3 s、进程峰值驻集约 660 MB；
+  落在按键路径上就是一次看得见的冻结，所以索引离线编译成 `.hidx` 容器，读表退化
+  成 `open` + mmap + 头校验（实测 0 ms，常驻只有真正查到的那几页）。
+- `.hidx`（magic `HIMEIDX1`，256 字节头 + 64 字节对齐的 `blob | rows | keys | slots`
+  四段，段内定长记录）与 §7.1 的 `.hng` 同构：`PinyinLexicon` 是这块字节镜像的读取器，
+  词面与码用字节区间引用，键表与槽表按下标二分，没有指针、没有逐进程反序列化。
+  解析路径拼出的也是同一块镜像（`PinyinLexicon::parse` 直接把行写进 `Builder`），
+  所以索引与解析共用全部查询代码，两者答案逐条一致。
+- 头部记下源表的长度与容器 CRC（`hdict::fingerprint`：只读表头，不读负载）。对不上
+  就是换了表或改了表，索引作废、退回解析。取长度与 CRC 而非 mtime，因为 `cp -R` 与
+  `git checkout` 会改 mtime 而内容不变。
+- `PinyinLexicon::load` 的顺序：同级同名的 `<stem>.hidx` 校验通过就用，否则读表解析
+  （`PinyinLexicon::parse_file` 永远忽略索引，是 `build-index` 的输入）。校验只做
+  O(1) 的头部与段长检查（扫记录等于放弃惰性分页），每条记录再各自带边界检查：
+  一个损坏的索引表现为退回解析或那一条查不到，不会 panic 一次按键。
+- `hime-cli build-index [py.hdict] [-o py.hidx]` 编译索引，写完立刻映射回来核对条目数
+  与键、槽数才报成功；`platforms/macos/build.sh` 打包时执行它（§8.4）。第一次真正读
+  表时往 stderr 打一行耗时与来源（`index` 或 `parsed table`），那是用户唯一可能感知
+  的停顿。
+- `pinyin::SharedPinyin` 把一份表包成「首次用到才读」，载入结果（含失败）被记住，
+  所有会话共享同一份 `Arc`（§8.4）。
 
 ### 8.2 全拼会话（`Session::pinyin` / `Session::pinyin_sentence`）
 
@@ -663,22 +681,29 @@ logp          = ln((1 − α)·e^base + α·p_user)
 ### 8.4 接入（`hime-ffi` / `hime-cli` / 打包）
 
 - FFI（§6）：
-  - `hime_select_scheme` 按方案 `type` 选来源：`0` → `PinyinLexicon::load` 建全拼
-    会话（顺带按 `find_model_path` 找 `.hng`，找到就建 `pinyin_sentence` 会话、
-    找不到就退回词级并打印一行说明）；`3` → 整句引擎；其余 → 词表。任何方案都
-    顺带记下拼音表位置：优先本方案目录（`type = 0` 自己就是拼音表），否则同一
-    `schemes` 目录下的 `pinyin` 方案。
-  - 这份拼音表是 `SharedPinyin`：首次真正需要时（第一次反查或第一次敲全拼）才读，
-    之后所有会话共享同一份 `Arc<PinyinLexicon>`；切换方案时只有路径变了才换掉。
-    形码 / 形码整句的新会话据此装上 `ReverseLookup`，全拼会话不装；于是打字过程中
-    的按键路径只在第一次反查时承担一次载入。
+  - `hime_select_scheme` 按方案 `type` 选来源：`0` → 建全拼会话（顺带按
+    `find_model_path` 找 `.hng`，找到就建 `pinyin_sentence` 会话、找不到就退回词级并
+    打印一行说明）；`3` → 整句引擎；其余 → 词表。任何方案都顺带记下拼音表位置：
+    优先本方案目录（`type = 0` 自己就是拼音表），否则同一 `schemes` 目录下的
+    `pinyin` 方案。
+  - 全拼的候选表就是这份 `SharedPinyin`：`EngineSource::Pinyin` 只带模型，建会话时
+    向 `Engine::pinyin` 取 `Arc<PinyinLexicon>`（OnceLock 命中后是一次原子读加一次
+    `Arc` 克隆）。于是一份表在一个进程里只解析一次、只存一份，全拼与反查读同一个
+    `Arc`；路径没变时连句柄都复用，切回来什么都不重读。`type = 0` 在动引擎之前先用
+    该句柄试读一次（有索引是 0 ms），读不出候选就让选择失败、引擎保持原样。
+  - 表在首次真正需要时才读，载入结果（含失败）被记住。形码 / 形码整句的新会话据此
+    装上 `ReverseLookup`，全拼会话不装；于是打字过程中的按键路径只在第一次用到时
+    承担一次载入。
   - 找不到拼音表时反查不可用，`` ` `` 回到标点语义；方案选择本身不受影响。
   - `hime_model_status` 的 `online` 在形码整句会话与带模型的 全拼会话下都为真，
     面板据此显示模型是否参与解码。
-- CLI：`cargo run -p hime-cli -- --pinyin [py.hdict]` 进全拼模式，找到 `.hng` 就打开
-  整句解码并打印实际路径；形码 / 形码整句模式下自动装上反查，直接逐键验证 `` ` `` + 拼音。
-- 打包：`build.sh` 原样复制 `data/schemes`，`pinyin` 目录连同 `py.hdict` 一起进
-  `Resources/schemes`。
+- CLI：`cargo run -p hime-cli -- --pinyin [py.hdict]` 进全拼模式，状态行报条目数、
+  载入耗时与来源（`index` / `parsed table`），找到 `.hng` 就打开整句解码并打印实际
+  路径；`cargo run -p hime-cli -- build-index [py.hdict]` 编译索引（§8.1）；形码 /
+  形码整句模式下自动装上反查，直接逐键验证 `` ` `` + 拼音。
+- 打包：`build.sh` 原样复制 `data/schemes` 到 `Resources/schemes`，随后对包内的
+  `schemes/pinyin/py.hdict` 跑一次 `hime-cli build-index`，让 `py.hidx` 随包发布。
+  索引是由表派生的构建产物，不入库。
 
 ## 9. 打字统计（`typing`、数据指标与键盘用指）
 
